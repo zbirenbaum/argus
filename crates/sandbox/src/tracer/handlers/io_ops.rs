@@ -247,7 +247,7 @@ pub fn handle_ioctl(
 
 /// Resolves an fd to its target using the process fd table, falling
 /// back to `/proc/{pid}/fd/{fd}` if the table has no entry.
-fn resolve_fd_target(tracer: &TracerLoop, pid_u32: u32, fd: i32) -> FdTarget {
+pub(crate) fn resolve_fd_target(tracer: &TracerLoop, pid_u32: u32, fd: i32) -> FdTarget {
     if let Some(proc_state) = tracer.process_tree.get_process(pid_u32) {
         if let Some(target) = proc_state.fds.get(fd) {
             return target.clone();

@@ -19,6 +19,7 @@ use clap::Parser;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
+use sandbox::cas::CasStore;
 use sandbox::config::SupervisorConfig;
 use sandbox::events::{Event, EventPayload, SequenceGenerator};
 use sandbox::net;
@@ -75,6 +76,11 @@ fn main() -> Result<()> {
         }
     };
 
+    let cas = Arc::new(
+        CasStore::new(config.data_dir.join("cas"))
+            .context("failed to initialize CAS store")?,
+    );
+
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     let seq_gen = Arc::new(SequenceGenerator::default());
 
@@ -94,6 +100,7 @@ fn main() -> Result<()> {
         config.agent_id.clone(),
         event_tx,
         Arc::clone(&seq_gen),
+        cas,
     );
     tracer.run(child_pid, sync_pipe)?;
 

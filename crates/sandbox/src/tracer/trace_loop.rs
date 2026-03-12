@@ -6,6 +6,7 @@
 //! follows forks, program replacements, and exits. Emits structured
 //! events over a channel for downstream consumers.
 
+use std::collections::HashMap;
 use std::os::fd::{BorrowedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,19 +20,51 @@ use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
 
+use crate::cas::CasStore;
 use crate::events::{Event, EventPayload, SequenceGenerator};
+use crate::events::file as ef;
 use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
 use crate::tracer::{handlers, memory, process_events};
 
 /// Ptrace options to set on every traced process.
+///
+/// `TRACESYSGOOD` makes syscall-exit stops report as `SIGTRAP | 0x80`
+/// so we can distinguish them from signal-delivery stops. Required for
+/// the entry/exit capture flow on file-mutating syscalls.
 pub const PTRACE_OPTS: ptrace::Options = ptrace::Options::from_bits_truncate(
     ptrace::Options::PTRACE_O_TRACEFORK.bits()
         | ptrace::Options::PTRACE_O_TRACEVFORK.bits()
         | ptrace::Options::PTRACE_O_TRACECLONE.bits()
         | ptrace::Options::PTRACE_O_TRACEEXEC.bits()
         | ptrace::Options::PTRACE_O_TRACEEXIT.bits()
-        | ptrace::Options::PTRACE_O_TRACESECCOMP.bits(),
+        | ptrace::Options::PTRACE_O_TRACESECCOMP.bits()
+        | ptrace::Options::PTRACE_O_TRACESYSGOOD.bits(),
 );
+
+/// What kind of file mutation triggered the capture.
+#[derive(Debug)]
+pub enum CaptureKind {
+    /// A write/pwrite/writev/pwritev syscall.
+    Write { fd: i32, size: u64 },
+    /// An open with O_TRUNC that truncates existing content.
+    OpenTrunc,
+}
+
+/// Saved state between syscall entry and exit for content capture.
+#[derive(Debug)]
+pub struct PendingCapture {
+    /// SHA-256 of the file before the syscall executed.
+    pub before_hash: Option<String>,
+    pub path: String,
+    pub pid: u32,
+    pub kind: CaptureKind,
+}
+
+/// Hashes a file's content via CAS, returning `None` on any error.
+pub fn hash_file_content(cas: &CasStore, path: &str) -> Option<String> {
+    let data = std::fs::read(path).ok()?;
+    cas.store(&data).ok().map(|h| h.to_string())
+}
 
 /// Orchestrates the ptrace event loop.
 ///
@@ -43,6 +76,12 @@ pub struct TracerLoop {
     pub pipe_registry: PipeRegistry,
     pub pty_registry: PtyRegistry,
     pub write_locks: WriteLocks,
+    pub cas: Arc<CasStore>,
+    /// Captures awaiting syscall-exit to hash the post-mutation content.
+    pub pending_captures: HashMap<u32, PendingCapture>,
+    /// Last known content hash per path, used as before_hash for the
+    /// next mutation. Guarantees an unbroken hash chain across events.
+    pub path_hashes: HashMap<String, String>,
     event_tx: Sender<Event>,
     seq_gen: Arc<SequenceGenerator>,
     agent_id: String,
@@ -55,12 +94,16 @@ impl TracerLoop {
         agent_id: String,
         event_tx: Sender<Event>,
         seq_gen: Arc<SequenceGenerator>,
+        cas: Arc<CasStore>,
     ) -> Self {
         Self {
             process_tree: ProcessTree::new(),
             pipe_registry: PipeRegistry::new(),
             pty_registry: PtyRegistry::new(),
             write_locks: WriteLocks::new(),
+            cas,
+            pending_captures: HashMap::new(),
+            path_hashes: HashMap::new(),
             event_tx,
             seq_gen,
             agent_id,
@@ -137,16 +180,23 @@ impl TracerLoop {
     fn handle_wait_status(&mut self, status: WaitStatus) -> Result<()> {
         match status {
             WaitStatus::PtraceEvent(pid, _sig, evt) => {
-                self.handle_ptrace_event(pid, evt)?;
-                ptrace::cont(pid, None)?;
+                let already_resumed = self.handle_ptrace_event(pid, evt)?;
+                if !already_resumed {
+                    ptrace::cont(pid, None)?;
+                }
+            }
+            WaitStatus::PtraceSyscall(pid) => {
+                self.handle_syscall_exit(pid)?;
             }
             WaitStatus::Stopped(pid, sig) => {
                 self.handle_signal_stop(pid, sig)?;
             }
             WaitStatus::Exited(pid, code) => {
+                self.pending_captures.remove(&(pid.as_raw() as u32));
                 process_events::handle_process_exit(self, pid, code, None);
             }
             WaitStatus::Signaled(pid, sig, _core) => {
+                self.pending_captures.remove(&(pid.as_raw() as u32));
                 process_events::handle_process_exit(
                     self,
                     pid,
@@ -160,7 +210,10 @@ impl TracerLoop {
     }
 
     /// Handles ptrace events (fork, clone, seccomp, etc.).
-    fn handle_ptrace_event(&mut self, pid: Pid, evt: i32) -> Result<()> {
+    ///
+    /// Returns `true` if the tracee was already resumed (via
+    /// `ptrace::syscall`) and the caller should NOT call `ptrace::cont`.
+    fn handle_ptrace_event(&mut self, pid: Pid, evt: i32) -> Result<bool> {
         let fork = ptrace::Event::PTRACE_EVENT_FORK as i32;
         let vfork = ptrace::Event::PTRACE_EVENT_VFORK as i32;
         let clone = ptrace::Event::PTRACE_EVENT_CLONE as i32;
@@ -175,26 +228,96 @@ impl TracerLoop {
         } else if evt == exit {
             process_events::handle_exit_event(self, pid)?;
         } else if evt == seccomp {
-            if let Err(e) = handlers::handle_seccomp_stop(self, pid) {
-                event!(
-                    name: "tracer.seccomp.error",
-                    Level::WARN,
-                    pid = pid.as_raw(),
-                    error.message = %e,
-                    "seccomp handler error for pid {{pid}}: {{error.message}}",
-                );
+            match handlers::handle_seccomp_stop(self, pid) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(e) => {
+                    event!(
+                        name: "tracer.seccomp.error",
+                        Level::WARN,
+                        pid = pid.as_raw(),
+                        error.message = %e,
+                        "seccomp handler error for pid {{pid}}: {{error.message}}",
+                    );
+                }
             }
         }
+        Ok(false)
+    }
+
+    /// Completes a pending content capture at syscall exit.
+    ///
+    /// Uses the per-path `path_hashes` cache for before_hash and
+    /// updates it with the new after_hash, ensuring an unbroken chain.
+    fn handle_syscall_exit(&mut self, pid: Pid) -> Result<()> {
+        let pid_u32 = pid.as_raw() as u32;
+
+        if let Some(cap) = self.pending_captures.remove(&pid_u32) {
+            let after_hash = hash_file_content(&self.cas, &cap.path);
+
+            // Use cached hash as before_hash; fall back to the one
+            // computed at entry (for the first event on this path).
+            let before_hash = self
+                .path_hashes
+                .get(&cap.path)
+                .cloned()
+                .or(cap.before_hash);
+
+            // Update cache so the next event's before_hash chains.
+            if let Some(ref h) = after_hash {
+                self.path_hashes.insert(cap.path.clone(), h.clone());
+            }
+
+            match cap.kind {
+                CaptureKind::Write { fd, size } => {
+                    self.emit(EventPayload::Write(ef::Write {
+                        pid: cap.pid,
+                        path: cap.path,
+                        fd,
+                        offset: 0,
+                        size,
+                        before_hash,
+                        after_hash,
+                        tree_hash: None,
+                    }));
+                }
+                CaptureKind::OpenTrunc => {
+                    if before_hash != after_hash {
+                        self.emit(EventPayload::Write(ef::Write {
+                            pid: cap.pid,
+                            path: cap.path,
+                            fd: -1,
+                            offset: 0,
+                            size: 0,
+                            before_hash,
+                            after_hash,
+                            tree_hash: None,
+                        }));
+                    }
+                }
+            }
+        }
+
+        ptrace::cont(pid, None)?;
         Ok(())
     }
 
     /// Forwards non-ptrace signals to the tracee.
+    ///
+    /// If the pid has a pending capture, resumes with `ptrace::syscall`
+    /// to preserve syscall-exit tracking across signal delivery.
     fn handle_signal_stop(&mut self, pid: Pid, sig: Signal) -> Result<()> {
         let forward = match sig {
             Signal::SIGSTOP | Signal::SIGTRAP => None,
             other => Some(other),
         };
-        ptrace::cont(pid, forward)?;
+
+        let pid_u32 = pid.as_raw() as u32;
+        if self.pending_captures.contains_key(&pid_u32) {
+            ptrace::syscall(pid, forward)?;
+        } else {
+            ptrace::cont(pid, forward)?;
+        }
         Ok(())
     }
 
@@ -234,15 +357,21 @@ mod tests {
 
     use super::*;
 
+    fn test_cas() -> Arc<CasStore> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        Arc::new(CasStore::new(dir.path().join("cas")).expect("CasStore"))
+    }
+
     #[test]
     fn tracer_loop_new_initializes_empty_state() {
         let (tx, _rx) = mpsc::channel();
         let seq = Arc::new(SequenceGenerator::default());
-        let tracer = TracerLoop::new("test-agent".into(), tx, seq);
+        let tracer = TracerLoop::new("test-agent".into(), tx, seq, test_cas());
         assert!(tracer.process_tree.is_empty());
         assert!(tracer.pipe_registry.is_empty());
         assert!(tracer.pty_registry.is_empty());
         assert!(tracer.write_locks.is_empty());
+        assert!(tracer.pending_captures.is_empty());
         assert_eq!(tracer.alive_count, 0);
     }
 
@@ -250,7 +379,7 @@ mod tests {
     fn emit_sends_event_with_correct_agent_id() {
         let (tx, rx) = mpsc::channel();
         let seq = Arc::new(SequenceGenerator::default());
-        let tracer = TracerLoop::new("agent-42".into(), tx, seq);
+        let tracer = TracerLoop::new("agent-42".into(), tx, seq, test_cas());
         tracer.emit(EventPayload::Fork(crate::events::process::Fork {
             parent_pid: 1,
             child_pid: 2,
@@ -264,7 +393,7 @@ mod tests {
     fn emit_increments_sequence() {
         let (tx, rx) = mpsc::channel();
         let seq = Arc::new(SequenceGenerator::default());
-        let tracer = TracerLoop::new("a".into(), tx, seq);
+        let tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
         tracer.emit(EventPayload::Exit(crate::events::process::Exit {
             pid: 1,
             exit_code: 0,

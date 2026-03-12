@@ -92,7 +92,7 @@ See `docs/spec/12-testing.md` for the full 12-test validation suite.
 | 4: Pipe topology | PASS | pipe_data flow through echo→grep→wc |
 | 5: Subprocess tree | PASS | python3→ls with pipe_data back to parent |
 | 6: Escape test | PASS | Tool creation, exec, write attribution, unlink |
-| 7: Write locking | not tested | |
+| 7: Write locking | PASS | 49 write events, unbroken hash chain across 3 concurrent threads |
 | 8: TLS capture | not tested | |
 | 9: Pause/resume | not tested | |
 | 10: Pause-before-action | not tested | |
@@ -132,5 +132,5 @@ No agents currently running.
 
 - Last full test run: 395 pass (378 sandbox + 17 supervisor), 0 fail, 2 ignored
 - All P1 + P2 + P3 (indexes, merkle) merged to main
-- Validation tests 1-6 pass on native aarch64
+- Validation tests 1-7 pass on native aarch64
 - Seccomp-BPF works natively on ARM64 (no more Rosetta/QEMU issues)

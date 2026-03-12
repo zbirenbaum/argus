@@ -7,18 +7,15 @@ use std::path::PathBuf;
 use anyhow::Result;
 use nix::sys::ptrace;
 use nix::unistd::Pid;
-use tracing::event;
-use tracing::Level;
 
 use crate::events::EventPayload;
 use crate::events::process as ep;
 use crate::tracer::memory;
-use crate::tracer::trace_loop::{TracerLoop, PTRACE_OPTS};
+use crate::tracer::trace_loop::TracerLoop;
 
 /// Handles fork/vfork/clone by registering the child process.
 pub fn handle_fork(tracer: &mut TracerLoop, parent_pid: Pid) -> Result<()> {
     let child_raw = ptrace::getevent(parent_pid)? as i32;
-    let child_pid = Pid::from_raw(child_raw);
     let parent_u32 = parent_pid.as_raw() as u32;
     let child_u32 = child_raw as u32;
 
@@ -41,15 +38,8 @@ pub fn handle_fork(tracer: &mut TracerLoop, parent_pid: Pid) -> Result<()> {
         .add_process(child_u32, parent_u32, binary, argv, cwd, child_fds);
     tracer.alive_count += 1;
 
-    if let Err(e) = ptrace::setoptions(child_pid, PTRACE_OPTS) {
-        event!(
-            name: "tracer.fork.setoptions_error",
-            Level::WARN,
-            pid = child_raw,
-            error.message = %e,
-            "failed to set ptrace options on child {{pid}}: {{error.message}}",
-        );
-    }
+    // Options propagate automatically from PTRACE_SEIZE — no
+    // explicit setoptions needed on auto-traced children.
 
     tracer.emit(EventPayload::Fork(ep::Fork {
         parent_pid: parent_u32,
