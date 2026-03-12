@@ -4,7 +4,7 @@ Last updated: 2026-03-11
 
 ## Context Recovery
 
-When resuming this conversation or starting a new one:
+When resuming this conversation, starting a new one, or after context compaction:
 1. Read `/Users/zach/Development/argus-run/CLAUDE.md` to refresh full project context.
 2. Read this file (`docs/tasks/STATUS.md`) for current pipeline state.
 3. You are dispatching agents for implementation, blocking merges until tests pass and reviews + fixes are complete.
