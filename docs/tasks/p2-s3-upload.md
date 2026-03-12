@@ -1,6 +1,6 @@
 # P2: S3 Upload Pipeline
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/03-storage.md` (S3 integration, upload pool)
 
@@ -11,33 +11,34 @@
 ## Parallelizable with
 - All P1 tasks, P2-pause-resume-api, P2-content-capture
 
-## What needs to be done
-- `crates/sandbox/src/storage/s3.rs`:
-  - `S3Client`: wraps aws-sdk-s3, configured from `S3Config`
-  - `upload_cas_object(hash: &ContentHash, data: Vec<u8>) -> Result<()>`: PUT to `cas/{hash[0:2]}/{hash[2:]}`
-  - `upload_event_segment(agent_id: &str, segment_seq: u64, data: Vec<u8>) -> Result<()>`: PUT to `events/{agent_id}/{segment_seq}.jsonl`
-  - `upload_checkpoint(agent_id: &str, seq: u64, data: Vec<u8>) -> Result<()>`
-  - `download_object(key: &str) -> Result<Vec<u8>>`
-  - `list_prefix(prefix: &str) -> Result<Vec<String>>`
+## What was done
+- `crates/sandbox/Cargo.toml` — added `aws-sdk-s3` and `aws-config` dependencies
+- `crates/sandbox/src/storage/mod.rs` — module declarations and re-exports
+- `crates/sandbox/src/storage/s3.rs` — `ObjectStore` trait (RPITIT) and `S3Client` implementation
+- `crates/sandbox/src/storage/object_store_dyn.rs` — `DynObjectStore` type-erased wrapper for dynamic dispatch
+- `crates/sandbox/src/storage/upload_pool.rs` — `UploadPool`, `UploadJob`, `UploadStats`, `UploadConfirmation`
 
-- `crates/sandbox/src/storage/upload_pool.rs`:
-  - `UploadPool`: tokio task pool (configurable concurrency, default 4)
-  - `submit(job: UploadJob) -> Result<()>`: non-blocking enqueue
-  - `UploadJob` enum: CasObject, EventSegment, Checkpoint, DigestCache
-  - Retry with exponential backoff (3 attempts)
-  - Track: pending count, uploaded count, failed count
-  - On failure after retries: log error, keep in local buffer for retry later
-  - Graceful shutdown: drain queue before exit
+## What works
+- `ObjectStore` trait with `put`, `get`, `exists`, `list` methods
+- `S3Client` configured from `S3Config` (region, bucket, prefix, optional custom endpoint)
+- Path-style access forced for custom endpoints (MinIO, LocalStack)
+- Key construction: CAS, event segments, checkpoints, digest cache snapshots
+- `DynObjectStore` bridges RPITIT trait to dynamic dispatch via boxed futures
+- `UploadPool` with configurable concurrency via tokio workers
+- Non-blocking `submit()` via mpsc channel
+- Exponential backoff retry with configurable max attempts
+- Atomic `UploadStats` (pending, uploaded, failed, bytes_uploaded)
+- `UploadConfirmation` channel for downstream eviction/cache updates
+- Graceful `shutdown()` drains queue and returns stats
 
-- Add `aws-sdk-s3` and `aws-config` to sandbox dependencies
+## What's missing
+- Integration test with real S3/MinIO (needs container orchestration)
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib storage::s3
-cargo test -p sandbox --lib storage::upload_pool
+cargo test -p sandbox --lib storage
 ```
-Unit tests: upload pool queuing, retry logic (mock S3 client with failures), graceful drain.
-Integration test (ignored, needs S3/minio): round-trip upload+download.
+16 tests covering: key construction, job routing, submit+process, stats tracking, retry-then-succeed, exhaust-retries-marks-failed, shutdown drains queue, confirmation channel.
 
 ## Branch
 - **Branch**: `p2-s3-upload`
