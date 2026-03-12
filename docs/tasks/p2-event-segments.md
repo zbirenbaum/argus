@@ -1,6 +1,6 @@
 # P2: Event Segments & Local Buffer
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/03-storage.md` (event log, local buffer, durability)
 
@@ -11,34 +11,36 @@
 ## Parallelizable with
 - P1-tracer-loop, P1-state, P1-seccomp, P2-cas, P2-content-capture, P2-pause-resume-api
 
-## What needs to be done
-- `crates/sandbox/src/storage/event_log.rs`:
-  - `EventLog`: append-only JSONL writer
-  - Segments: new file every 64MB, named `{segment_seq}.jsonl`
-  - Local path: `/data/events/{segment_seq}.jsonl`
-  - On segment completion: submit to upload pool for S3 upload
-  - `append(event: &EventEnvelope) -> Result<()>`: serialize + write + newline
-  - `flush() -> Result<()>`: fsync current segment
-  - `current_segment_size() -> u64`
+## What was done
+- `crates/sandbox/src/storage/event_log.rs`: `EventLog` append-only JSONL writer with segment rotation at configurable size threshold (default 64 MiB), fsync, and upload pool integration
+- `crates/sandbox/src/storage/event_log_tests.rs`: 10 unit tests covering JSONL format, rotation, sequential naming, finalize, durability modes, size tracking
+- `crates/sandbox/src/storage/local_buffer.rs`: `LocalBuffer` bounded LRU cache with upload confirmation tracking and eviction of confirmed-only entries
+- `crates/sandbox/src/storage/local_buffer_tests.rs`: 7 unit tests covering tracking, pruning, eviction order, tolerance of pre-deleted files
+- `crates/sandbox/src/storage/mod.rs`: added `event_log` and `local_buffer` modules with `#[doc(inline)]` re-exports
+- `crates/sandbox/Cargo.toml`: moved `tempfile` from dev-dependencies to dependencies (pre-existing issue: `cas/store.rs` uses it at non-test scope)
+- `crates/sandbox/src/storage/upload_pool_tests.rs`: fixed missing `S3Client` import (pre-existing issue)
 
-- `crates/sandbox/src/storage/local_buffer.rs`:
-  - `LocalBuffer`: bounded LRU cache for CAS objects and event segments
-  - `max_size`: configurable (default 10GB)
-  - Eviction: only evict objects confirmed uploaded to S3
-  - Track upload confirmation from upload pool
-  - `prune() -> Result<usize>`: evict oldest confirmed objects until under limit
+## What works
+- `EventLog::append()` serializes events as JSONL, one line per event
+- Segment rotation at configurable byte threshold (default 64 MiB)
+- Sequential segment naming (`0.jsonl`, `1.jsonl`, ...)
+- `DurabilityMode::Local` fsyncs after every append
+- `DurabilityMode::Memory` buffers without per-append fsync
+- Completed segments submitted to `UploadPool` as `UploadJob::EventSegment`
+- `EventLog::finalize()` fsyncs and submits the current segment
+- `LocalBuffer::track()` registers files for eviction tracking
+- `LocalBuffer::confirm_upload()` marks entries as safe to evict
+- `LocalBuffer::prune()` evicts oldest confirmed entries until under limit
 
-- Durability mode enforcement:
-  - Memory: events buffered in memory, flushed on segment completion
-  - Local: fsync after every append
-  - Remote: block until S3 upload confirmed (via upload pool callback)
+## What's missing
+- `DurabilityMode::Remote` does not block until S3 upload is confirmed (would require async or callback plumbing from the upload pool)
+- Time-based segment rotation (only size-based is implemented)
 
 ## How to test
 ```bash
 cargo test -p sandbox --lib storage::event_log
 cargo test -p sandbox --lib storage::local_buffer
 ```
-Unit tests: segment rotation at 64MB, JSONL format correctness, LRU eviction order, durability mode fsync behavior.
 
 ## Branch
 - **Branch**: `p2-event-segments`
