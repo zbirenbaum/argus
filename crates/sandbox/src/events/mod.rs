@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Event types and envelope for the Argus supervisor.
 //!
 //! Every filesystem, process, network, and control action captured by the

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Snapshot and checkpoint event payloads.
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,9 @@ pub struct InitialState {
 /// A point-in-time checkpoint was created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// The event sequence number at which the checkpoint was taken.
+    /// The event sequence number at which the checkpoint was taken. Uses a
+    /// distinct JSON key because serde flatten merges payload fields into
+    /// the envelope, which already has `seq`.
     #[serde(rename = "checkpoint_seq")]
     pub seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]

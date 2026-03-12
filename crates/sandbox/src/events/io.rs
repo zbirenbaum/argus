@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Stdio, pipe, PTY, and fd redirect event payloads.
 
 use serde::{Deserialize, Serialize};

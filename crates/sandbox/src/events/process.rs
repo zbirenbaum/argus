@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Process lifecycle event payloads.
 
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Agent control event payloads.
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Agent supervisor started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStart {
-    /// Duplicates envelope `agent_id` for self-contained event payloads.
+    /// The agent that started. Uses a distinct JSON key because serde flatten
+    /// merges payload fields into the envelope, which already has `agent_id`.
     #[serde(rename = "start_agent_id")]
     pub agent_id: String,
     pub config_summary: String,
