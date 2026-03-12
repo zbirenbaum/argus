@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::path_index::IndexEntry;
+use super::IndexEntry;
 
 /// Process lifecycle metadata for the process tree index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +251,14 @@ fn load_entries(
         if parts.len() < 2 {
             continue;
         }
-        let seq: u64 = parts[0].parse().unwrap_or(0);
+        let Ok(seq) = parts[0].parse::<u64>() else {
+            tracing::warn!(
+                file = %path.display(),
+                raw = parts[0],
+                "skipping pid index entry with malformed seq"
+            );
+            continue;
+        };
         entries.push(IndexEntry {
             seq,
             event_type: parts[1].to_owned(),

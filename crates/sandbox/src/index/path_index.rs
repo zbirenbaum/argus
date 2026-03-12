@@ -13,14 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-/// Sequence number paired with the event type tag.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IndexEntry {
-    /// Monotonic event sequence number.
-    pub seq: u64,
-    /// Serde discriminator tag (e.g. `"write"`, `"unlink"`).
-    pub event_type: String,
-}
+use super::IndexEntry;
 
 /// Secondary index mapping filesystem paths to event entries.
 #[derive(Debug)]
@@ -195,7 +188,14 @@ fn load_index_file(
             continue;
         }
         let path = parts[0].to_owned();
-        let seq: u64 = parts[1].parse().unwrap_or(0);
+        let Ok(seq) = parts[1].parse::<u64>() else {
+            tracing::warn!(
+                file = %file_path.display(),
+                raw = parts[1],
+                "skipping path index entry with malformed seq"
+            );
+            continue;
+        };
         let event_type = parts[2].to_owned();
         map.entry(path)
             .or_default()

@@ -14,6 +14,15 @@ pub mod pid_index;
 pub mod query;
 pub mod type_index;
 
+/// Sequence number paired with the event type tag.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IndexEntry {
+    /// Monotonic event sequence number.
+    pub seq: u64,
+    /// Serde discriminator tag (e.g. `"write"`, `"unlink"`).
+    pub event_type: String,
+}
+
 #[doc(inline)]
 pub use path_index::PathIndex;
 #[doc(inline)]

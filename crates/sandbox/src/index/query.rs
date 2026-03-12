@@ -7,9 +7,12 @@
 
 use std::collections::BTreeSet;
 
+use chrono::DateTime;
+
 use crate::events::Event;
 
-use super::path_index::{IndexEntry, PathIndex};
+use super::IndexEntry;
+use super::path_index::PathIndex;
 use super::pid_index::PidIndex;
 use super::type_index::TypeIndex;
 
@@ -98,13 +101,26 @@ impl<'a> QueryEngine<'a> {
         filter: &QueryFilter,
         events: &[Event],
     ) -> Vec<QueryResult> {
-        let candidates = self.gather_candidates(filter);
-        let candidate_seqs: BTreeSet<u64> =
-            candidates.iter().map(|r| r.seq).collect();
+        let has_index_filters = filter.path.is_some()
+            || filter.path_prefix.is_some()
+            || filter.pid.is_some()
+            || filter.event_type.is_some();
+
+        let candidate_seqs: Option<BTreeSet<u64>> =
+            if has_index_filters {
+                let candidates = self.gather_candidates(filter);
+                Some(candidates.iter().map(|r| r.seq).collect())
+            } else {
+                None
+            };
 
         let mut results: Vec<QueryResult> = events
             .iter()
-            .filter(|e| candidate_seqs.contains(&e.seq))
+            .filter(|e| {
+                candidate_seqs
+                    .as_ref()
+                    .map_or(true, |seqs| seqs.contains(&e.seq))
+            })
             .filter(|e| self.matches_seq_range(e.seq, filter))
             .filter(|e| matches_time_range(e, filter))
             .map(|e| QueryResult {
@@ -230,15 +246,35 @@ fn intersect_sets(sets: &[BTreeSet<u64>]) -> BTreeSet<u64> {
     iter.fold(first, |acc, s| acc.intersection(s).copied().collect())
 }
 
+/// Parses an RFC 3339 timestamp, returning `None` on failure.
+fn parse_rfc3339(s: &str) -> Option<DateTime<chrono::FixedOffset>> {
+    DateTime::parse_from_rfc3339(s).ok()
+}
+
 fn matches_time_range(event: &Event, filter: &QueryFilter) -> bool {
-    if let Some(since) = &filter.since {
-        if event.ts_wall.as_str() < since.as_str() {
+    let event_ts = match parse_rfc3339(&event.ts_wall) {
+        Some(ts) => ts,
+        None => {
+            tracing::warn!(
+                seq = event.seq,
+                ts_wall = %event.ts_wall,
+                "skipping event with unparseable ts_wall"
+            );
             return false;
+        }
+    };
+    if let Some(since) = &filter.since {
+        if let Some(since_ts) = parse_rfc3339(since) {
+            if event_ts < since_ts {
+                return false;
+            }
         }
     }
     if let Some(until) = &filter.until {
-        if event.ts_wall.as_str() > until.as_str() {
-            return false;
+        if let Some(until_ts) = parse_rfc3339(until) {
+            if event_ts > until_ts {
+                return false;
+            }
         }
     }
     true
@@ -247,5 +283,9 @@ fn matches_time_range(event: &Event, filter: &QueryFilter) -> bool {
 #[cfg(test)]
 #[path = "query_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "query_event_tests.rs"]
+mod event_tests;
 
 // Rust guideline compliant 2026-02-21
