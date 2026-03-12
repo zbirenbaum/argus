@@ -1,6 +1,6 @@
 # P2: Content-Addressable Storage
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/03-storage.md` (CAS section)
 
@@ -11,30 +11,30 @@
 ## Parallelizable with
 - ALL P1 tasks — can start immediately
 
-## What needs to be done
-- `crates/sandbox/src/cas/mod.rs`:
+## What was done
+- `crates/sandbox/src/cas/hash.rs` — `ContentHash` newtype (SHA-256, 64-char hex), Display, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, `from_data`, `as_str`, `prefix`, `suffix`
+- `crates/sandbox/src/cas/stats.rs` — `CasStats` (atomic counters), `CasStatsSnapshot` (serializable snapshot)
+- `crates/sandbox/src/cas/store.rs` — `CasStore` with `new`, `store`, `exists`, `read`, `delete`, `object_path`, `stats`; atomic writes via temp-file + fsync + rename
+- `crates/sandbox/src/cas/mod.rs` — module re-exports
+- `crates/sandbox/Cargo.toml` — added `tempfile` dev-dependency
 
-### Hasher
-- `hash_content(data: &[u8]) -> ContentHash`: SHA-256, return hex string
-- `ContentHash` newtype: 64-char hex string with Display, Serialize, Deserialize
+## What works
+- SHA-256 hashing with deterministic output
+- Content-addressed storage at `{root}/{hash[0:2]}/{hash[2:]}`
+- Atomic writes (temp file, fsync, rename)
+- Dedup: second store of same content skips write, stats not double-counted
+- Read, exists, delete operations
+- Concurrent store of same content is safe (no corruption)
+- Stats tracking (total objects/bytes, cumulative adds)
+- Full serde round-trip for `ContentHash`
 
-### Local Store
-- `CasStore`: manages `/data/cas/{hash[0:2]}/{hash[2:]}` on disk
-- `store(data: &[u8]) -> Result<ContentHash>`: hash, write if not exists (atomic rename), return hash
-- `exists(hash: &ContentHash) -> bool`
-- `read(hash: &ContentHash) -> Result<Vec<u8>>`
-- `delete(hash: &ContentHash) -> Result<()>`: for LRU eviction
-- Atomic writes: write to temp file, fsync, rename into place
-- Dedup: if file already exists at hash path, skip write
-
-### Stats
-- Track: total objects, total bytes, objects added since start
+## What's missing
+- Nothing — all spec requirements implemented
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib cas
+docker exec -w /workspaces/argus-run silly_snyder cargo test -p sandbox --lib cas
 ```
-Unit tests: hash determinism, store + read round-trip, dedup (store same content twice = one file), atomic write (concurrent stores don't corrupt), stats tracking.
 
 ## Branch
 - **Branch**: `p2-cas`
