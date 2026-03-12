@@ -34,12 +34,17 @@ When resuming this conversation, starting a new one, or after context compaction
 | P2: S3 Upload | `p2-s3-upload` | 68 pass | done | 9dc9729 |
 | P1: Tracer Loop | `p1-tracer-loop` | 146 pass | done | 6d973bc |
 
+## Pending Review (implementation done, blocking on review/fix cycle)
+
+| Task | Branch | Worktree | Tests | Review |
+|-|-|-|-|-|
+| P2: TLS Content | `p2-tls-content` | agent-a5bc4ff9 | 29 pass | review dispatched |
+| P2: Event Segments | `p2-event-segments` | agent-afaf96b9 | 17 pass | review dispatched |
+
 ## Implementation In Progress
 
 | Task | Branch | Worktree | Agent status |
 |-|-|-|-|
-| P2: TLS Content | `p2-tls-content` | agent-a5bc4ff9 | running |
-| P2: Event Segments | `p2-event-segments` | agent-afaf96b9 | running |
 | P1: Supervisor Main | `p1-supervisor-main` | agent-a908dd0e | running |
 | P2: Content Capture | `p2-content-capture` | agent-a929a1e3 | running |
 | P2: Write Locking | `p2-write-locking` | agent-afbafafc | running |
@@ -64,8 +69,8 @@ Check these before dispatching new work:
 
 | Agent ID | Task | Type | Worktree | Status |
 |-|-|-|-|-|
-| a5bc4ff9599348725 | P2 TLS Content | impl | agent-a5bc4ff9 | running |
-| afaf96b9a57292537 | P2 Event Segments | impl | agent-afaf96b9 | running |
+| ad4811153edf13f0e | P2 Event Segments | review | agent-afaf96b9 | running |
+| affed1170d899316a | P2 TLS Content | review | agent-a5bc4ff9 | running |
 | a908dd0e014b86181 | P1 Supervisor Main | impl | agent-a908dd0e | running |
 | a929a1e31aee445ae | P2 Content Capture | impl | agent-a929a1e3 | running |
 | afbafafcf55a2b224 | P2 Write Locking | impl | agent-afbafafc | running |
