@@ -64,6 +64,10 @@ External:
 After completing any implementation work, update or create a task doc in `docs/tasks/`.
 Name format: `docs/tasks/<phase>-<feature>.md` (e.g. `docs/tasks/p1-trace-loop.md`).
 
+Keep task docs current. If a subsequent change affects a completed task, update that task doc in the same commit.
+When using subagents make sure they get the full contents of this file. Try to parallelize and organize tasks as much as possible.
+A task is not complete until all tests pass, all TODOs are finalized, and all stubbed functions implemented
+
 Each task doc must contain:
 - **Status**: not started | in progress | done
 - **Spec reference**: which `docs/spec/` files this implements
@@ -72,7 +76,6 @@ Each task doc must contain:
 - **What's missing**: remaining TODOs, known gaps, stubbed functions
 - **How to test**: exact commands to verify
 
-Keep task docs current. If a subsequent change affects a completed task, update that task doc in the same commit.
 
 
 ## Rust Guidelines
