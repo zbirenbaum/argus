@@ -1,6 +1,6 @@
 # P1: Event Schema & Envelope
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/02-event-schema.md`
 
@@ -11,26 +11,36 @@
 ## Parallelizable with
 - P1-config, P1-state, P1-seccomp, P1-net-env, P2-cas, P2-s3-upload, P2-digest-cache
 
-## What needs to be done
-- `crates/sandbox/src/events/mod.rs` — event types and envelope:
-  - `EventEnvelope`: seq (u64, monotonic), ts_monotonic (f64, CLOCK_MONOTONIC_RAW), ts_wall (chrono DateTime<Utc>, RFC3339), agent_id (String), vclock (Option<HashMap<String, u64>>), event (Event enum)
-  - `Event` enum with all variants from spec:
-    - Process: `Exec { pid, ppid, binary, args, env, cwd }`, `Fork { parent_pid, child_pid }`, `Exit { pid, code, signal }`
-    - File: `Read { pid, path, hash, size }`, `Write { pid, path, before_hash, after_hash, size }`, `Rename { pid, from, to }`, `Unlink { pid, path, hash }`, `Mkdir { pid, path, mode }`, `Chmod { pid, path, mode }`, `Truncate { pid, path, before_hash, after_hash }`, `Link { pid, from, to }`, `Symlink { pid, target, link_path }`
-    - IO: `StdioData { pid, fd, stream (stdout/stderr/stdin), hash, size }`, `PipeData { pid, fd, pipe_id, hash, size }`, `PtyData { pid, fd, pty_id, hash, size }`
-    - Network: `SocketCreate { pid, fd, domain, sock_type }`, `Connect { pid, fd, addr }`, `Accept { pid, fd, new_fd, peer_addr }`, `TlsKeys { pid, fd, hash }`, `HttpRequest { pid, method, url, status, req_hash, resp_hash }`
-    - Control: `AgentStart { agent_id, command, config_hash }`, `Pause { reason }`, `Resume`, `PendingApproval { action_id, rule, syscall_info }`
-    - System: `InitialState { path, hash, mode, size }`, `Checkpoint { seq, tree_hash }`, `MmapWarning { pid, path }`
-  - `SequenceGenerator`: atomic u64 counter
-  - `timestamp_pair()` fn returning (ts_monotonic, ts_wall)
-  - Serde serialization: snake_case, tagged enum
-  - `EventEnvelope::new(agent_id, event) -> Self` auto-fills seq, timestamps
+## What was done
+- `crates/sandbox/src/events/mod.rs` — module root with re-exports
+- `crates/sandbox/src/events/envelope.rs` — `Event` struct, `EventPayload` tagged enum (35 variants), `SequenceGenerator` (AtomicU64), `timestamp_pair()` fn
+- `crates/sandbox/src/events/process.rs` — `Exec`, `Fork`, `Exit`
+- `crates/sandbox/src/events/file.rs` — `Read`, `Write`, `Rename`, `Unlink`, `Mkdir`, `Rmdir`, `Chmod`, `Truncate`, `Link`, `Symlink`
+- `crates/sandbox/src/events/io.rs` — `Stdio`, `PipeCreate`, `PipeData`, `PipeClose`, `PtyCreate`, `PtyData`, `FdRedirect`, `FdTarget`, plus `StdioSubtype`, `PipeDirection`, `PtySubtype` enums
+- `crates/sandbox/src/events/network.rs` — `Socket`, `Connect`, `Accept`, `TlsKeys`, `HttpRequest`, `HttpResponse`
+- `crates/sandbox/src/events/control.rs` — `AgentStart`, `AgentPause`, `AgentResume`, `PendingApproval`, `ApprovalGranted`, `ApprovalDenied`
+- `crates/sandbox/src/events/snapshot.rs` — `InitialState`, `Checkpoint`, `MmapWarning`
+
+## What works
+- All 35 event variants serialize/deserialize correctly with serde tagged enum (`"type": "variant_name"`)
+- `SequenceGenerator` produces thread-safe monotonic sequence numbers via `AtomicU64`
+- `timestamp_pair()` returns `(ts_monotonic_nanos, ts_wall_rfc3339)` with monotonic guarantees
+- `Event::new()` auto-fills seq, both timestamps, and sets vclock to None
+- Optional hash/tree_hash fields omitted from JSON when None
+- vclock field omitted when None, serialized as map when Some
+- 39 tests pass covering round-trips for all variants, seq increments, timestamp monotonicity, JSON format validation
+
+## Spec deviations
+- `AgentStart.agent_id` serializes as `start_agent_id` to avoid collision with the envelope's flattened `agent_id` field
+- `Checkpoint.seq` serializes as `checkpoint_seq` to avoid collision with the envelope's flattened `seq` field
+
+## What's missing
+- Nothing — all event types from spec implemented, all tests pass, clippy clean
 
 ## How to test
 ```bash
 cargo test -p sandbox --lib events
 ```
-Unit tests: envelope creation with auto-incrementing seq, serialization round-trip for every event variant, timestamp monotonicity across calls.
 
 ## Branch
 - **Branch**: `p1-events`
