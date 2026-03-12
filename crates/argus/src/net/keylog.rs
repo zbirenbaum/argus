@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::{event, Level};
 
-use crate::cas::CasStore;
+use crate::cas::{Cas, LocalCas};
 use crate::events::network::TlsKeys;
 
 /// Parsed NSS Key Log line with label, client random, and secret.
@@ -106,7 +106,7 @@ impl KeylogWatcher {
     /// Returns an error if CAS storage fails.
     pub fn process_new_lines(
         &mut self,
-        cas: &CasStore,
+        cas: &LocalCas,
         pid: u32,
         fd: i32,
     ) -> Result<Vec<TlsKeys>> {
@@ -115,7 +115,7 @@ impl KeylogWatcher {
 
         for line in &lines {
             let raw = format!("{} {} {}", line.label, line.client_random, line.secret);
-            let hash = cas.store(raw.as_bytes())?;
+            let hash = cas.put(raw.as_bytes())?;
 
             event!(
                 name: "net.keylog.captured",
@@ -296,7 +296,7 @@ mod tests {
         )
         .unwrap();
 
-        let cas = CasStore::new(cas_path).unwrap();
+        let cas = LocalCas::new(cas_path).unwrap();
         let mut watcher = KeylogWatcher::new(keylog_path);
         let events = watcher.process_new_lines(&cas, 100, 5).unwrap();
 
@@ -308,7 +308,7 @@ mod tests {
         // Verify CAS actually has the content.
         let hash_str = events[0].keylog_line_hash.as_ref().unwrap();
         let hash = crate::cas::ContentHash::try_from(hash_str.clone()).unwrap();
-        let stored = cas.read(&hash).unwrap();
+        let stored = cas.get(&hash).unwrap();
         assert_eq!(
             String::from_utf8(stored).unwrap(),
             format!("CLIENT_RANDOM {TEST_CR} bb22"),

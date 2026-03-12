@@ -4,13 +4,11 @@
 //! buffer from tracee address space via `process_vm_readv`, hashes
 //! the content, and stores it in the content-addressable store.
 
-use std::sync::Arc;
-
 use anyhow::{Result, bail};
 use nix::unistd::Pid;
 use tracing::{Level, event};
 
-use crate::cas::{CasStore, ContentHash};
+use crate::cas::{Cas, LocalCas, ContentHash};
 
 use super::memory;
 
@@ -29,7 +27,7 @@ const MAX_SINGLE_READ: usize = 16 * 1024 * 1024;
 ///
 /// Returns an error if reading tracee memory or CAS storage fails.
 pub fn capture_write_buffer(
-    cas: &Arc<CasStore>,
+    cas: &LocalCas,
     pid: Pid,
     buf_addr: u64,
     len: u64,
@@ -39,7 +37,7 @@ pub fn capture_write_buffer(
     }
 
     let data = read_tracee_buffer(pid, buf_addr, len)?;
-    let hash = cas.store(&data)?;
+    let hash = cas.put(&data)?;
 
     event!(
         name: "content.capture.write",
@@ -63,7 +61,7 @@ pub fn capture_write_buffer(
 ///
 /// Returns an error if reading tracee memory or CAS storage fails.
 pub fn capture_iovec_buffer(
-    cas: &Arc<CasStore>,
+    cas: &LocalCas,
     pid: Pid,
     iov_addr: u64,
     iov_cnt: u64,
@@ -77,7 +75,7 @@ pub fn capture_iovec_buffer(
         return Ok(None);
     }
 
-    let hash = cas.store(&data)?;
+    let hash = cas.put(&data)?;
 
     event!(
         name: "content.capture.iovec",
@@ -98,7 +96,7 @@ pub fn capture_iovec_buffer(
 /// propagating errors. Syscall handling should not abort on capture
 /// failure since the tracee must always be resumed.
 pub fn try_capture_flat(
-    cas: &Arc<CasStore>,
+    cas: &LocalCas,
     pid: Pid,
     buf_addr: u64,
     len: u64,
@@ -123,7 +121,7 @@ pub fn try_capture_flat(
 ///
 /// Same error-swallowing behavior as [`try_capture_flat`].
 pub fn try_capture_iovec(
-    cas: &Arc<CasStore>,
+    cas: &LocalCas,
     pid: Pid,
     iov_addr: u64,
     iov_cnt: u64,

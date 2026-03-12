@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::event;
 
-use crate::cas::{CasStore, ContentHash};
+use crate::cas::{Cas, LocalCas, ContentHash};
 use crate::config::{DurabilityMode, StorageConfig};
 use crate::events::Event;
 use crate::storage::digest_cache::DigestCache;
@@ -27,7 +27,7 @@ use crate::storage::upload_pool::{UploadPool, UploadStatsSnapshot};
 /// Unified storage pipeline tying CAS, event log, upload pool,
 /// digest cache, and local buffer together.
 pub struct StoragePipeline {
-    cas: CasStore,
+    cas: LocalCas,
     event_log: EventLog,
     upload_pool: UploadPool,
     digest_cache: DigestCache,
@@ -49,7 +49,7 @@ impl StoragePipeline {
         durability: DurabilityMode,
     ) -> Result<Self> {
         let cas_dir = config.local_buffer.cas_dir.clone();
-        let cas = CasStore::new(cas_dir.clone())
+        let cas = LocalCas::new(cas_dir.clone())
             .context("create CAS store")?;
 
         let event_log = EventLog::new(
@@ -88,8 +88,8 @@ impl StoragePipeline {
     /// Hash and store content in the local CAS, enqueue S3 upload
     /// if not already known remotely.
     pub fn store_content(&mut self, data: &[u8]) -> Result<ContentHash> {
-        let hash = self.cas.store(data)
-            .context("CAS store")?;
+        let hash = self.cas.put(data)
+            .context("CAS put")?;
 
         let local_path = self.cas.object_path(&hash);
         self.local_buffer.track(local_path, data.len() as u64);
@@ -210,7 +210,7 @@ impl StoragePipeline {
 
     /// Read content from the local CAS by hash.
     pub fn read_content(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        self.cas.read(hash)
+        self.cas.get(hash)
     }
 
     /// Current event log segment sequence number.

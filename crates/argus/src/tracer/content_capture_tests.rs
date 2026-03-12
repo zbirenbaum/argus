@@ -1,11 +1,11 @@
 use super::*;
 
-fn test_cas() -> Arc<CasStore> {
+fn test_cas() -> LocalCas {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cas");
     // Prevent cleanup so the CAS directory outlives the test helper.
     let _persisted = dir.into_path();
-    Arc::new(CasStore::new(path).expect("CasStore::new"))
+    LocalCas::new(path).expect("LocalCas::new")
 }
 
 #[test]

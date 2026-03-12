@@ -14,6 +14,7 @@ use tracing::event;
 
 use super::hash::ContentHash;
 use super::stats::{CasStats, CasStatsSnapshot};
+use super::traits::Cas;
 
 /// Local content-addressable store backed by the filesystem.
 ///
@@ -21,12 +22,12 @@ use super::stats::{CasStats, CasStatsSnapshot};
 /// renamed to its content-addressed path. Duplicate content is
 /// automatically deduplicated.
 #[derive(Debug)]
-pub struct CasStore {
+pub struct LocalCas {
     root: PathBuf,
     stats: CasStats,
 }
 
-impl CasStore {
+impl LocalCas {
     /// Open or create a CAS store rooted at `root`.
     ///
     /// # Errors
@@ -39,56 +40,6 @@ impl CasStore {
             root,
             stats: CasStats::new(),
         })
-    }
-
-    /// Hash `data` and store it, returning the content hash.
-    ///
-    /// If the object already exists on disk the write is skipped
-    /// (dedup). Stats are only updated for genuinely new objects.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the filesystem write fails.
-    pub fn store(&self, data: &[u8]) -> Result<ContentHash> {
-        let hash = ContentHash::from_data(data);
-        let path = self.object_path(&hash);
-
-        // TOCTOU: concurrent stores of the same content may both pass
-        // this check and double-count stats. Acceptable trade-off vs.
-        // locking, since the CAS file itself is written atomically and
-        // rename-overwrites are idempotent for identical content.
-        if path.exists() {
-            return Ok(hash);
-        }
-
-        self.atomic_write(&path, data)?;
-
-        self.stats.record_add(data.len() as u64);
-        event!(
-            name: "cas.store.added",
-            tracing::Level::DEBUG,
-            cas.hash = hash.as_str(),
-            cas.size = data.len(),
-            "stored new CAS object",
-        );
-
-        Ok(hash)
-    }
-
-    /// Check whether an object exists on disk.
-    pub fn exists(&self, hash: &ContentHash) -> bool {
-        self.object_path(hash).exists()
-    }
-
-    /// Read the full contents of a stored object.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the object does not exist or cannot be read.
-    pub fn read(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        let path = self.object_path(hash);
-        fs::read(&path)
-            .with_context(|| format!("read CAS object {hash}"))
     }
 
     /// Remove an object from the store.
@@ -150,23 +101,61 @@ impl CasStore {
     }
 }
 
+impl Cas for LocalCas {
+    fn get(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        let path = self.object_path(hash);
+        fs::read(&path)
+            .with_context(|| format!("read CAS object {hash}"))
+    }
+
+    fn put(&self, content: &[u8]) -> Result<ContentHash> {
+        let hash = ContentHash::from_data(content);
+        let path = self.object_path(&hash);
+
+        // TOCTOU: concurrent stores of the same content may both pass
+        // this check and double-count stats. Acceptable trade-off vs.
+        // locking, since the CAS file itself is written atomically and
+        // rename-overwrites are idempotent for identical content.
+        if path.exists() {
+            return Ok(hash);
+        }
+
+        self.atomic_write(&path, content)?;
+
+        self.stats.record_add(content.len() as u64);
+        event!(
+            name: "cas.store.added",
+            tracing::Level::DEBUG,
+            cas.hash = hash.as_str(),
+            cas.size = content.len(),
+            "stored new CAS object",
+        );
+
+        Ok(hash)
+    }
+
+    fn exists(&self, hash: &ContentHash) -> Result<bool> {
+        Ok(self.object_path(hash).exists())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tmp_store() -> (tempfile::TempDir, CasStore) {
+    fn tmp_store() -> (tempfile::TempDir, LocalCas) {
         let dir = tempfile::tempdir().expect("tempdir");
         let store =
-            CasStore::new(dir.path().join("cas")).expect("CasStore::new");
+            LocalCas::new(dir.path().join("cas")).expect("LocalCas::new");
         (dir, store)
     }
 
     #[test]
-    fn store_and_read_round_trip() {
+    fn put_and_get_round_trip() {
         let (_dir, store) = tmp_store();
         let data = b"hello world";
-        let hash = store.store(data).expect("store");
-        let read_back = store.read(&hash).expect("read");
+        let hash = store.put(data).expect("put");
+        let read_back = store.get(&hash).expect("get");
         assert_eq!(read_back, data);
     }
 
@@ -174,8 +163,8 @@ mod tests {
     fn dedup_same_content() {
         let (_dir, store) = tmp_store();
         let data = b"duplicate";
-        let h1 = store.store(data).expect("store 1");
-        let h2 = store.store(data).expect("store 2");
+        let h1 = store.put(data).expect("put 1");
+        let h2 = store.put(data).expect("put 2");
         assert_eq!(h1, h2);
 
         // Only one file should be on disk.
@@ -188,33 +177,33 @@ mod tests {
     }
 
     #[test]
-    fn exists_true_after_store() {
+    fn exists_true_after_put() {
         let (_dir, store) = tmp_store();
-        let hash = store.store(b"exists test").expect("store");
-        assert!(store.exists(&hash));
+        let hash = store.put(b"exists test").expect("put");
+        assert!(store.exists(&hash).expect("exists"));
     }
 
     #[test]
     fn exists_false_for_unknown() {
         let (_dir, store) = tmp_store();
         let hash = ContentHash::from_data(b"never stored");
-        assert!(!store.exists(&hash));
+        assert!(!store.exists(&hash).expect("exists"));
     }
 
     #[test]
     fn delete_removes_file() {
         let (_dir, store) = tmp_store();
-        let hash = store.store(b"to delete").expect("store");
-        assert!(store.exists(&hash));
+        let hash = store.put(b"to delete").expect("put");
+        assert!(store.exists(&hash).expect("exists"));
         store.delete(&hash).expect("delete");
-        assert!(!store.exists(&hash));
+        assert!(!store.exists(&hash).expect("exists"));
     }
 
     #[test]
     fn delete_updates_stats() {
         let (_dir, store) = tmp_store();
         let data = b"stats delete";
-        let hash = store.store(data).expect("store");
+        let hash = store.put(data).expect("put");
         store.delete(&hash).expect("delete");
         let snap = store.stats();
         assert_eq!(snap.total_objects, 0);
@@ -224,10 +213,10 @@ mod tests {
     }
 
     #[test]
-    fn read_nonexistent_errors() {
+    fn get_nonexistent_errors() {
         let (_dir, store) = tmp_store();
         let hash = ContentHash::from_data(b"ghost");
-        assert!(store.read(&hash).is_err());
+        assert!(store.get(&hash).is_err());
     }
 
     #[test]
@@ -245,8 +234,8 @@ mod tests {
     #[test]
     fn stats_track_bytes() {
         let (_dir, store) = tmp_store();
-        store.store(b"aaa").expect("store 1");
-        store.store(b"bbbbb").expect("store 2");
+        store.put(b"aaa").expect("put 1");
+        store.put(b"bbbbb").expect("put 2");
         let snap = store.stats();
         assert_eq!(snap.objects_added, 2);
         assert_eq!(snap.bytes_added, 8);
@@ -255,12 +244,12 @@ mod tests {
     }
 
     #[test]
-    fn store_empty_data() {
+    fn put_empty_data() {
         let (_dir, store) = tmp_store();
-        let hash = store.store(b"").expect("store empty");
-        let read_back = store.read(&hash).expect("read empty");
+        let hash = store.put(b"").expect("put empty");
+        let read_back = store.get(&hash).expect("get empty");
         assert!(read_back.is_empty());
-        assert!(store.exists(&hash));
+        assert!(store.exists(&hash).expect("exists"));
 
         let snap = store.stats();
         assert_eq!(snap.objects_added, 1);
@@ -268,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_store_same_content() {
+    fn concurrent_put_same_content() {
         let (_dir, store) = tmp_store();
         let store = std::sync::Arc::new(store);
         let data = b"concurrent";
@@ -277,13 +266,13 @@ mod tests {
             .map(|_| {
                 let s = store.clone();
                 let d = data.to_vec();
-                std::thread::spawn(move || s.store(&d))
+                std::thread::spawn(move || s.put(&d))
             })
             .collect();
 
         let hashes: Vec<_> = handles
             .into_iter()
-            .map(|h| h.join().expect("thread").expect("store"))
+            .map(|h| h.join().expect("thread").expect("put"))
             .collect();
 
         // All threads produce the same hash.
@@ -293,7 +282,7 @@ mod tests {
         }
 
         // Exactly one file on disk.
-        assert!(store.exists(first));
+        assert!(store.exists(first).expect("exists"));
         let snap = store.stats();
         // At least 1 add, at most 8 (races allowed), but no corruption.
         assert!(snap.objects_added >= 1 && snap.objects_added <= 8);

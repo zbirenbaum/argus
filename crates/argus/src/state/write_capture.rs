@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::event;
 use tracing::Level;
 
-use crate::cas::{CasStore, ContentHash};
+use crate::cas::{Cas, LocalCas, ContentHash};
 
 use super::write_locks::WriteLocks;
 
@@ -62,7 +62,7 @@ pub struct RenameCaptureGuard {
 ///
 /// Returns `None` if the file does not exist or cannot be read (e.g.,
 /// the path refers to a directory, device, or was already deleted).
-fn hash_and_store(cas: &CasStore, path: &Path) -> Option<ContentHash> {
+fn hash_and_store(cas: &LocalCas, path: &Path) -> Option<ContentHash> {
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -76,7 +76,7 @@ fn hash_and_store(cas: &CasStore, path: &Path) -> Option<ContentHash> {
             return None;
         }
     };
-    match cas.store(&data) {
+    match cas.put(&data) {
         Ok(hash) => Some(hash),
         Err(e) => {
             event!(
@@ -100,7 +100,7 @@ fn hash_and_store(cas: &CasStore, path: &Path) -> Option<ContentHash> {
 /// [`CaptureGuard`].
 fn lock_and_hash(
     locks: &WriteLocks,
-    cas: &CasStore,
+    cas: &LocalCas,
     path: &Path,
 ) -> (Arc<Mutex<()>>, MutexGuard<'static, ()>, Option<ContentHash>) {
     let arc = locks.get_or_create(path);
@@ -125,7 +125,7 @@ fn lock_and_hash(
 /// is `None`).
 pub fn acquire_for_path(
     locks: &WriteLocks,
-    cas: &CasStore,
+    cas: &LocalCas,
     path: &Path,
 ) -> CaptureGuard {
     let (arc, guard, before_hash) = lock_and_hash(locks, cas, path);
@@ -143,7 +143,7 @@ pub fn acquire_for_path(
 /// two renames cross paths concurrently.
 pub fn acquire_for_rename(
     locks: &WriteLocks,
-    cas: &CasStore,
+    cas: &LocalCas,
     src: &Path,
     dst: &Path,
 ) -> RenameCaptureGuard {
@@ -195,7 +195,7 @@ impl CaptureGuard {
     /// Hashes the file after the syscall and produces the final result.
     ///
     /// Consumes `self`, releasing the per-path lock.
-    pub fn complete(self, cas: &CasStore) -> CaptureResult {
+    pub fn complete(self, cas: &LocalCas) -> CaptureResult {
         let after_hash = hash_and_store(cas, &self.path);
         CaptureResult {
             before_hash: self.before_hash,
@@ -226,7 +226,7 @@ impl RenameCaptureGuard {
     /// destination has the source's former content.
     ///
     /// Consumes `self`, releasing both per-path locks.
-    pub fn complete(self, cas: &CasStore) -> (CaptureResult, CaptureResult) {
+    pub fn complete(self, cas: &LocalCas) -> (CaptureResult, CaptureResult) {
         let src_result = CaptureResult {
             before_hash: self.src_before_hash,
             after_hash: None,
@@ -244,10 +244,10 @@ impl RenameCaptureGuard {
 mod tests {
     use super::*;
 
-    fn setup() -> (tempfile::TempDir, WriteLocks, CasStore) {
+    fn setup() -> (tempfile::TempDir, WriteLocks, LocalCas) {
         let dir = tempfile::tempdir().expect("tempdir");
         let locks = WriteLocks::new();
-        let cas = CasStore::new(dir.path().join("cas")).expect("CasStore");
+        let cas = LocalCas::new(dir.path().join("cas")).expect("LocalCas");
         (dir, locks, cas)
     }
 
@@ -428,12 +428,12 @@ mod tests {
         let result = guard.complete(&cas);
 
         // Verify the CAS actually contains the content.
-        assert!(cas.exists(&before));
-        let data = cas.read(&before).unwrap();
+        assert!(cas.exists(&before).unwrap());
+        let data = cas.get(&before).unwrap();
         assert_eq!(data, b"store me");
 
         if let Some(ref after) = result.after_hash {
-            assert!(cas.exists(after));
+            assert!(cas.exists(after).unwrap());
         }
     }
 

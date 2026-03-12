@@ -9,7 +9,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result};
@@ -20,7 +19,7 @@ use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
 
-use crate::cas::CasStore;
+use crate::cas::{Cas, LocalCas};
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::file as ef;
 use crate::snapshot::MerkleTree;
@@ -62,9 +61,9 @@ pub struct PendingCapture {
 }
 
 /// Hashes a file's content via CAS, returning `None` on any error.
-pub fn hash_file_content(cas: &CasStore, path: &str) -> Option<String> {
+pub fn hash_file_content(cas: &LocalCas, path: &str) -> Option<String> {
     let data = std::fs::read(path).ok()?;
-    cas.store(&data).ok().map(|h| h.to_string())
+    cas.put(&data).ok().map(|h| h.to_string())
 }
 
 /// Orchestrates the ptrace event loop.
@@ -77,7 +76,7 @@ pub struct TracerLoop {
     pub pipe_registry: PipeRegistry,
     pub pty_registry: PtyRegistry,
     pub write_locks: WriteLocks,
-    pub cas: Arc<CasStore>,
+    pub cas: LocalCas,
     pub tree: MerkleTree,
     /// Captures awaiting syscall-exit to hash the post-mutation content.
     pub pending_captures: HashMap<u32, PendingCapture>,
@@ -92,7 +91,7 @@ pub struct TracerLoop {
     /// the same path to finish. Drained FIFO on write completion.
     pub write_wait_queue: HashMap<String, VecDeque<PendingCapture>>,
     event_tx: Sender<Event>,
-    seq_gen: Arc<SequenceGenerator>,
+    seq_gen: SequenceGenerator,
     agent_id: String,
     pub alive_count: u32,
 }
@@ -102,8 +101,8 @@ impl TracerLoop {
     pub fn new(
         agent_id: String,
         event_tx: Sender<Event>,
-        seq_gen: Arc<SequenceGenerator>,
-        cas: Arc<CasStore>,
+        seq_gen: SequenceGenerator,
+        cas: LocalCas,
     ) -> Self {
         Self {
             process_tree: ProcessTree::new(),
@@ -493,15 +492,15 @@ mod tests {
 
     use super::*;
 
-    fn test_cas() -> Arc<CasStore> {
+    fn test_cas() -> LocalCas {
         let dir = tempfile::tempdir().expect("tempdir");
-        Arc::new(CasStore::new(dir.path().join("cas")).expect("CasStore"))
+        LocalCas::new(dir.path().join("cas")).expect("LocalCas")
     }
 
     #[test]
     fn tracer_loop_new_initializes_empty_state() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let tracer = TracerLoop::new("test-agent".into(), tx, seq, test_cas());
         assert!(tracer.process_tree.is_empty());
         assert!(tracer.pipe_registry.is_empty());
@@ -516,7 +515,7 @@ mod tests {
     #[test]
     fn emit_sends_event_with_correct_agent_id() {
         let (tx, rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let tracer = TracerLoop::new("agent-42".into(), tx, seq, test_cas());
         tracer.emit(EventPayload::Fork(crate::events::process::Fork {
             parent_pid: 1,
@@ -530,7 +529,7 @@ mod tests {
     #[test]
     fn emit_increments_sequence() {
         let (tx, rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
         tracer.emit(EventPayload::Exit(crate::events::process::Exit {
             pid: 1,
@@ -551,7 +550,7 @@ mod tests {
     #[test]
     fn active_writes_blocks_concurrent_path() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         // Simulate pid 10 as active writer on "/workspace/f.txt".
@@ -578,7 +577,7 @@ mod tests {
     #[test]
     fn resume_next_queued_writer_drains_queue() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let path = "/workspace/queued.txt".to_string();
@@ -614,7 +613,7 @@ mod tests {
     #[test]
     fn cleanup_dead_writer_removes_from_active() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let path = "/workspace/dead.txt".to_string();
@@ -628,7 +627,7 @@ mod tests {
     #[test]
     fn cleanup_dead_writer_removes_from_wait_queue() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let path = "/workspace/queued.txt".to_string();
@@ -667,7 +666,7 @@ mod tests {
     #[test]
     fn different_paths_not_blocked() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         tracer
@@ -681,7 +680,7 @@ mod tests {
     #[test]
     fn tree_update_populates_root_hash() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let hash = crate::cas::ContentHash::from_data(b"hello");
@@ -693,7 +692,7 @@ mod tests {
     #[test]
     fn tree_rename_moves_entry() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let hash = crate::cas::ContentHash::from_data(b"data");
@@ -707,7 +706,7 @@ mod tests {
     #[test]
     fn tree_remove_deletes_entry() {
         let (tx, _rx) = mpsc::channel();
-        let seq = Arc::new(SequenceGenerator::default());
+        let seq = SequenceGenerator::default();
         let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
 
         let hash = crate::cas::ContentHash::from_data(b"data");

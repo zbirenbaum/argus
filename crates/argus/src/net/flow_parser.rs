@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{event, Level};
 
-use crate::cas::CasStore;
+use crate::cas::{Cas, LocalCas};
 use crate::events::network::{HttpRequest, HttpResponse};
 
 /// Raw flow structure deserialized from mitmdump addon JSON output.
@@ -75,7 +75,7 @@ pub fn parse_flow_line(line: &str) -> Result<MitmdumpFlow> {
 /// Returns an error if JSON parsing, base64 decoding, or CAS storage fails.
 pub fn process_flow(
     flow: &MitmdumpFlow,
-    cas: &CasStore,
+    cas: &LocalCas,
     pid: u32,
 ) -> Result<ProcessedFlow> {
     let req_headers_hash = store_headers(cas, &flow.request.headers)?;
@@ -120,20 +120,20 @@ pub fn process_flow(
 
 /// Serialize headers as JSON and store in CAS.
 fn store_headers(
-    cas: &CasStore,
+    cas: &LocalCas,
     headers: &[(String, String)],
 ) -> Result<Option<String>> {
     if headers.is_empty() {
         return Ok(None);
     }
     let json = serde_json::to_vec(headers).context("serialize headers")?;
-    let hash = cas.store(&json)?;
+    let hash = cas.put(&json)?;
     Ok(Some(hash.as_str().to_owned()))
 }
 
 /// Decode base64 body and store in CAS.
 fn store_body(
-    cas: &CasStore,
+    cas: &LocalCas,
     body_b64: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(encoded) = body_b64 else {
@@ -149,7 +149,7 @@ fn store_body(
         .decode(encoded)
         .context("decode base64 body")?;
 
-    let hash = cas.store(&decoded)?;
+    let hash = cas.put(&decoded)?;
     Ok(Some(hash.as_str().to_owned()))
 }
 
@@ -179,7 +179,7 @@ pub fn parse_flow_lines(input: &str) -> Vec<MitmdumpFlow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cas::CasStore;
+    use crate::cas::{Cas, LocalCas};
     use tempfile::TempDir;
 
     fn flow_json(method: &str, url: &str, status: u16) -> String {
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn process_flow_stores_bodies_in_cas() {
         let dir = TempDir::new().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let json = flow_json("POST", "https://api.example.com/data", 200);
         let flow = parse_flow_line(&json).unwrap();
@@ -234,14 +234,14 @@ mod tests {
         // Verify the request body was stored correctly ("hello").
         let body_hash_str = result.request.body_hash.unwrap();
         let hash = crate::cas::ContentHash::try_from(body_hash_str).unwrap();
-        let stored = cas.read(&hash).unwrap();
+        let stored = cas.get(&hash).unwrap();
         assert_eq!(stored, b"hello");
     }
 
     #[test]
     fn process_flow_without_body() {
         let dir = TempDir::new().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let json = r#"{"request":{"method":"GET","url":"https://example.com","headers":[]}}"#;
         let flow = parse_flow_line(json).unwrap();
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn process_flow_response_body_decoded() {
         let dir = TempDir::new().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let json = flow_json("GET", "https://example.com", 200);
         let flow = parse_flow_line(&json).unwrap();
@@ -277,7 +277,7 @@ mod tests {
             resp.body_hash.unwrap(),
         )
         .unwrap();
-        let stored = cas.read(&hash).unwrap();
+        let stored = cas.get(&hash).unwrap();
         // "d29ybGQ=" decodes to "world"
         assert_eq!(stored, b"world");
     }
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn empty_body_string_yields_none() {
         let dir = TempDir::new().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let json = r#"{"request":{"method":"GET","url":"https://x.com","headers":[],"body":""}}"#;
         let flow = parse_flow_line(json).unwrap();

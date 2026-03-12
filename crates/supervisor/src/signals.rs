@@ -70,15 +70,21 @@ extern "C" fn signal_handler(_sig: std::ffi::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that touch the global `SHUTDOWN_REQUESTED` flag.
+    static SIGNAL_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn shutdown_flag_initially_false() {
+        let _guard = SIGNAL_LOCK.lock().unwrap();
         reset_shutdown_flag();
         assert!(!shutdown_requested());
     }
 
     #[test]
     fn signal_handler_sets_flag() {
+        let _guard = SIGNAL_LOCK.lock().unwrap();
         reset_shutdown_flag();
         signal_handler(Signal::SIGTERM as std::ffi::c_int);
         assert!(shutdown_requested());
@@ -87,8 +93,8 @@ mod tests {
 
     #[test]
     fn install_handler_does_not_panic() {
+        let _guard = SIGNAL_LOCK.lock().unwrap();
         install_handler();
-        // Clean up so other tests aren't affected.
         reset_shutdown_flag();
     }
 }
