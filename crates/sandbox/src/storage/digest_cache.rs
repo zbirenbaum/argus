@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Tracks content hashes known to exist in remote storage (S3).
 //!
 //! Avoids redundant uploads by maintaining a TTL-bounded set of
@@ -31,7 +29,7 @@ impl DigestEntry {
     fn is_expired(&self, now: SystemTime) -> bool {
         now.duration_since(self.uploaded_at)
             .map(|elapsed| elapsed >= self.ttl)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 }
 
@@ -48,6 +46,12 @@ pub struct DigestCacheStats {
 /// Entries expire after a configurable TTL, forcing re-verification
 /// with the remote store. The cache serializes to disk via bincode
 /// for fast startup recovery.
+///
+/// # Thread Safety
+///
+/// This type is **not internally synchronized**. Callers sharing a
+/// `DigestCache` across threads or async tasks must wrap it in
+/// `Arc<Mutex<DigestCache>>` (or equivalent).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DigestCache {
     known_remote: HashMap<ContentHash, DigestEntry>,
@@ -165,9 +169,20 @@ impl DigestCache {
     pub fn load_from_disk(cache_file: &Path) -> Result<Self> {
         let data = std::fs::read(cache_file)
             .context("read digest cache file")?;
-        let cache: Self = bincode::deserialize(&data)
+        let mut cache: Self = bincode::deserialize(&data)
             .context("deserialize digest cache")?;
+        cache.cache_file = cache_file.to_path_buf();
         Ok(cache)
+    }
+
+    /// Load a cache from disk, falling back to an empty cache on any error.
+    ///
+    /// Convenience wrapper around [`load_from_disk`](Self::load_from_disk)
+    /// that returns a fresh cache when the file is missing or corrupt.
+    pub fn load_or_default(cache_file: &Path, ttl: Duration) -> Self {
+        let _ = ttl; // reserved for future per-cache default TTL
+        Self::load_from_disk(cache_file)
+            .unwrap_or_else(|_| Self::new(cache_file.to_path_buf()))
     }
 }
 
@@ -175,13 +190,10 @@ impl DigestCache {
 mod tests {
     use super::*;
 
-    fn temp_cache_path() -> PathBuf {
+    fn temp_cache_path() -> (PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("create tempdir");
-        // Leak the tempdir so it lives past this function; tests are
-        // short-lived and the OS cleans up on process exit.
         let path = dir.path().join("digest-cache.bin");
-        std::mem::forget(dir);
-        path
+        (path, dir)
     }
 
     fn make_hash(data: &[u8]) -> ContentHash {
@@ -190,13 +202,15 @@ mod tests {
 
     #[test]
     fn contains_returns_false_for_unknown_hash() {
-        let cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let cache = DigestCache::new(path);
         assert!(!cache.contains(&make_hash(b"unknown")));
     }
 
     #[test]
     fn insert_then_contains_returns_true() {
-        let mut cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let mut cache = DigestCache::new(path);
         let h = make_hash(b"known");
         cache.insert(h.clone(), 42);
         assert!(cache.contains(&h));
@@ -204,7 +218,8 @@ mod tests {
 
     #[test]
     fn remove_then_contains_returns_false() {
-        let mut cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let mut cache = DigestCache::new(path);
         let h = make_hash(b"removeme");
         cache.insert(h.clone(), 10);
         cache.remove(&h);
@@ -213,7 +228,8 @@ mod tests {
 
     #[test]
     fn expired_entry_is_not_contained() {
-        let mut cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let mut cache = DigestCache::new(path);
         let h = make_hash(b"expiring");
         cache.insert_with_ttl(h.clone(), 5, Duration::ZERO);
         assert!(!cache.contains(&h));
@@ -221,7 +237,8 @@ mod tests {
 
     #[test]
     fn prune_expired_removes_stale_entries() {
-        let mut cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let mut cache = DigestCache::new(path);
         cache.insert_with_ttl(
             make_hash(b"stale"),
             1,
@@ -235,7 +252,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let path = temp_cache_path();
+        let (path, _dir) = temp_cache_path();
         let mut cache = DigestCache::new(path.clone());
         let h = make_hash(b"persist");
         cache.insert(h.clone(), 999);
@@ -248,7 +265,8 @@ mod tests {
 
     #[test]
     fn stats_returns_correct_counts() {
-        let mut cache = DigestCache::new(temp_cache_path());
+        let (path, _dir) = temp_cache_path();
+        let mut cache = DigestCache::new(path);
         cache.insert(make_hash(b"a"), 100);
         cache.insert(make_hash(b"b"), 200);
         cache.insert_with_ttl(
@@ -265,7 +283,7 @@ mod tests {
 
     #[test]
     fn empty_cache_len_and_save_load() {
-        let path = temp_cache_path();
+        let (path, _dir) = temp_cache_path();
         let cache = DigestCache::new(path.clone());
         assert_eq!(cache.len(), 0);
         assert!(cache.is_empty());
