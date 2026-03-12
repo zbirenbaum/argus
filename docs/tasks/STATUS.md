@@ -10,6 +10,26 @@ When resuming this conversation, starting a new one, or after context compaction
 3. You are dispatching agents for implementation, blocking merges until tests pass and reviews + fixes are complete.
 4. Check the **Running Agents Tracker** below before doing anything — pick up where you left off.
 
+## How to Run Tests
+
+This project only builds on Linux. Use the dev container:
+
+```bash
+# Find the container
+docker ps | grep vsc-argus-run
+
+# Run all tests
+docker exec <container_id> bash -c "cd /workspaces/argus-run && cargo test --workspace"
+
+# Run tests for a specific crate
+docker exec <container_id> bash -c "cd /workspaces/argus-run && cargo test -p sandbox"
+
+# Run ignored integration tests (require ptrace)
+docker exec <container_id> bash -c "cd /workspaces/argus-run && cargo test --workspace -- --ignored"
+```
+
+Always verify tests pass in the container before merging.
+
 ## Process Rules
 
 1. **Update this file** after every agent completion and every merge to main.
@@ -18,6 +38,7 @@ When resuming this conversation, starting a new one, or after context compaction
 4. **Dispatch reviews** immediately after implementation completes.
 5. **Dispatch fix agents** immediately after reviews complete.
 6. **Dispatch next wave** as soon as dependencies are merged and reviewed.
+7. **Run tests in the dev container** after merging — confirm they pass before moving on.
 
 ## Merged to `main` (reviewed + fixed)
 
