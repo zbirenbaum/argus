@@ -2,6 +2,24 @@
 
 Each agent runs its own supervisor. All stream to the same S3 bucket. Cross-agent visibility comes from querying the shared bucket — not from cross-container ptrace.
 
+## How Shared Resource Access Is Captured
+
+The supervisor doesn't need special multi-agent logic to see shared resources. The existing capture layers already surface them:
+
+| Shared Resource | How Supervisor Sees It | Event Type |
+|----------------|----------------------|------------|
+| S3/GCS bucket | HTTP PUT/GET via TLS decryption (Layer 1/2) — URL contains bucket + key | `http_request` with path like `s3://bucket/data.csv` |
+| PostgreSQL | Wire protocol over TCP — captured via network interception | `net_send`/`net_recv` with parseable frontend/backend messages |
+| Redis | RESP protocol over TCP — text-based, trivial to parse | `net_send`/`net_recv` with parseable commands |
+| HTTP APIs | Full request/response via MITM proxy | `http_request`/`http_response` |
+| Shared NFS/EFS mount | Normal file syscalls (open/read/write) on the mount | `read`/`write` events with paths on the shared mount |
+
+Agent A writes `PUT s3://bucket/model.pt` → captured as `http_request` event with the S3 key.
+Agent B reads `GET s3://bucket/model.pt` → captured as `http_request` event with the same key.
+Both events are in the same S3 bucket. The query layer correlates them by resource path and ts_wall.
+
+The key insight: **as long as each agent is instrumented, the shared resource doesn't need to be.** The S3 bucket, the PostgreSQL database, the Redis cache — none of them need modification. The supervisors observe from the agent side.
+
 ## Container Image
 
 ```dockerfile
@@ -82,7 +100,11 @@ No central coordinator. Query layer discovers agents via S3 listing.
 
 **Ordering:** Within agent: seq. Across agents: ts_wall, break ties by agent_id.
 
-**Vector clock:** Reserved in event schema (`vclock` field). Implementation deferred. For future sub-millisecond causal ordering on shared resources.
+**Vector clock (see `02-event-schema.md` for full schema):**
+
+The `vclock` field is a `HashMap<agent_id, counter>` reserved in the event envelope. It enables causal ordering beyond NTP accuracy. When Agent B reads a resource that Agent A wrote, B merges A's counter into its vector clock — establishing that B's subsequent actions are causally after A's write.
+
+Not MVP. The field exists in the schema (serialized as null), the structure is defined, and consumers can ignore it until it's populated. Implementation requires agents to exchange counter state via a shared S3 metadata file or lightweight coordination service.
 
 ## Same-Pod Multi-Container
 

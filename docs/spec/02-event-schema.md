@@ -48,9 +48,57 @@ Both always present. Within one agent: order by seq. Across agents: order by ts_
 - Appears on every event. No event emitted without it.
 - Namespaces S3 paths: `s3://bucket/events/{agent_id}/`
 
-## vclock
+## Causal Ordering: vclock Field
 
-Reserved for future vector clock / Lamport timestamp. Serialized as null / omitted now. When agents access shared resources, they can increment a per-resource logical clock for sub-millisecond causal ordering. Schema supports it; implementation deferred.
+### The Problem
+
+NTP gives ~1ms accuracy across nodes. Most causal relationships (Agent A writes, Agent B reads) are separated by more than 1ms. But when agents interact rapidly with the same shared resource — both writing to the same S3 key, both querying the same database row — ts_wall can't distinguish which happened first.
+
+### Two Approaches
+
+**Lamport timestamp:** Single counter. Every event increments it. When agents communicate (one reads what another wrote), the reader sets its counter to max(own, writer's) + 1. Simple. Gives you total ordering but not "who knew about whose events."
+
+**Vector clock:** Map of `{agent_id → counter}`. Each agent increments its own entry on every event. When Agent B reads something Agent A wrote, B merges A's counter into its own vector: `B.vclock[A] = max(B.vclock[A], A.vclock[A])`. This gives you true causal ordering: you can determine if two events are causally related or concurrent.
+
+### Schema
+
+The `vclock` field in the event envelope is an optional JSON object:
+
+```rust
+#[serde(skip_serializing_if = "Option::is_none")]
+vclock: Option<HashMap<String, u64>>,  // agent_id → counter
+```
+
+**When populated (not MVP, but schema is ready):**
+
+```json
+{
+  "seq": 42,
+  "agent_id": "researcher-abc",
+  "type": "write",
+  "path": "s3://bucket/shared-data.csv",
+  "vclock": {
+    "researcher-abc": 42,
+    "coder-def": 17
+  }
+}
+```
+
+This says: "researcher has seen 42 of its own events and is aware of coder's state as of coder's event 17." If coder later reads this file and sees `researcher-abc: 42`, coder knows it's reading data that was written with full knowledge of coder's first 17 events.
+
+### When to Populate
+
+Only on events that touch shared resources — identified by:
+- Network writes to shared storage (S3 PUT, database INSERT)
+- Network reads from shared storage (S3 GET, database SELECT)
+- File writes to shared mounted volumes (NFS, EFS)
+
+Local filesystem events don't need vclock (seq is sufficient within one agent).
+
+### Implementation Path
+
+1. **Now:** Field exists in schema, serialized as null/omitted. Zero cost.
+2. **Future:** Supervisor detects shared resource access (S3 URLs, database connections) and populates vclock. Requires a lightweight coordination protocol — agents exchange their latest counters via a shared S3 metadata file or a small coordination service.
 
 ## Event Types
 

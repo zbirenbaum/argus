@@ -65,8 +65,8 @@ After completing any implementation work, update or create a task doc in `docs/t
 Name format: `docs/tasks/<phase>-<feature>.md` (e.g. `docs/tasks/p1-trace-loop.md`).
 
 Keep task docs current. If a subsequent change affects a completed task, update that task doc in the same commit.
-When using subagents make sure they get the full contents of this file. Try to parallelize and organize tasks as much as possible.
-A task is not complete until all tests pass, all TODOs are finalized, and all stubbed functions implemented
+When using subagents make sure they get the full contents of this file.
+Try to parallelize and organize tasks as much as possible to be executed by subagents without guesswork in worktrees.
 
 Each task doc must contain:
 - **Status**: not started | in progress | done
@@ -75,8 +75,24 @@ Each task doc must contain:
 - **What works**: which behaviors are implemented and tested
 - **What's missing**: remaining TODOs, known gaps, stubbed functions
 - **How to test**: exact commands to verify
+- **Branch**: Branch(es) for the worktree. Use stacked PRs when applicable
 
 
+A task is not complete until:
+ - All tests pass
+ - All TODOs are finalized
+ - All stubbed functions are implemented
+ - Coverage is as close to 100% as is feasibly possible
+ - An agent running /code-review:code-review has given a full review
+ - All code review feedback has been incorperated
+ - All deviations from the spec have been recorded and signed off on by the human user you are assisting
+
+
+**Important** If you are testing something and fail to get it right after the third attempt:
+ - Immediately halt
+ - Report the problem/failure
+ - What you have attempted
+ - Ask for guidance
 
 ## Rust Guidelines
 
