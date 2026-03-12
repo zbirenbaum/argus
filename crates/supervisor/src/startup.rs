@@ -166,8 +166,7 @@ fn wait_for_child_stop(pid: Pid) -> Result<()> {
             .context("waitpid for child SIGSTOP failed");
     }
 
-    // SAFETY: WIFSTOPPED is a pure macro over the status bits.
-    let stopped = unsafe { libc::WIFSTOPPED(status) };
+    let stopped = libc::WIFSTOPPED(status);
     if !stopped {
         bail!(
             "child {} did not stop as expected (wait status=0x{:x})",

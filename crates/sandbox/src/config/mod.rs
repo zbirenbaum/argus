@@ -111,7 +111,7 @@ impl SupervisorConfig {
     /// or `data_dir` / `workspace_dir` are empty strings.
     pub fn validate(&mut self) -> anyhow::Result<()> {
         if self.agent_id.is_empty() {
-            self.agent_id = uuid::Uuid::new_v4().to_string();
+            self.agent_id = generate_agent_id();
         }
         if self.agent_command.is_empty() {
             bail!("agent_command must not be empty");
@@ -152,6 +152,60 @@ fn default_listen_addr() -> SocketAddr {
     "127.0.0.1:9090".parse().expect("hardcoded listen address is valid")
 }
 
+/// Generates an agent ID from hostname and host-visible PID.
+///
+/// Produces IDs like `gke-pool-1-abc-14523` so operators can map from
+/// agent identity to a specific process on a specific node. Falls back
+/// to `AGENT_ID` env var, then `HOSTNAME` env var, then `/etc/hostname`.
+fn generate_agent_id() -> String {
+    if let Ok(id) = std::env::var("AGENT_ID") {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_owned())
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+
+    let host_pid = read_host_pid().unwrap_or_else(|| std::process::id());
+
+    format!("{hostname}-{host_pid}")
+}
+
+/// Reads the host-visible PID from `/proc/1/status` NSpid line.
+///
+/// Inside a PID namespace the supervisor runs as PID 1, but the host
+/// sees a different PID. The `NSpid` line lists PIDs from outermost
+/// to innermost namespace: `NSpid: 14523 1`.
+pub fn read_host_pid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/1/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            // First field is the outermost (host) PID.
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Reads all namespace PID layers from `/proc/1/status` NSpid line.
+///
+/// Returns `(host_pid, namespace_pid)` if both are present.
+pub fn read_nspid_pair() -> Option<(u32, u32)> {
+    let status = std::fs::read_to_string("/proc/1/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("NSpid:") {
+            let mut pids = rest.split_whitespace();
+            let host = pids.next()?.parse().ok()?;
+            let ns = pids.next()?.parse().ok()?;
+            return Some((host, ns));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,8 +230,8 @@ mod tests {
         assert!(cfg.agent_id.is_empty());
         cfg.validate().unwrap();
         assert!(!cfg.agent_id.is_empty());
-        // Verify it looks like a UUID v4 (36 chars with hyphens).
-        assert_eq!(cfg.agent_id.len(), 36);
+        // Generated ID is hostname-pid format.
+        assert!(cfg.agent_id.contains('-'), "expected hostname-pid format, got: {}", cfg.agent_id);
     }
 
     #[test]

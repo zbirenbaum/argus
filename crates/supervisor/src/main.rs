@@ -158,8 +158,12 @@ fn emit_agent_start(
     config: &SupervisorConfig,
     seq_gen: &SequenceGenerator,
 ) {
+    let nspid = sandbox::config::read_nspid_pair();
+
     let payload = EventPayload::AgentStart(sandbox::events::control::AgentStart {
         agent_id: config.agent_id.clone(),
+        supervisor_pid_host: nspid.map(|(h, _)| h),
+        supervisor_pid_ns: nspid.map(|(_, n)| n),
         config_summary: format!(
             "data_dir={}, workspace={}",
             config.data_dir.display(),
@@ -167,6 +171,7 @@ fn emit_agent_start(
         ),
         node: std::env::var("NODE_NAME").ok(),
         pod: std::env::var("POD_NAME").ok(),
+        container: std::env::var("CONTAINER_NAME").ok(),
     });
 
     let evt = Event::new(seq_gen, config.agent_id.clone(), payload);

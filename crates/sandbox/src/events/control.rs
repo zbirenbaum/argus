@@ -9,11 +9,19 @@ pub struct AgentStart {
     /// merges payload fields into the envelope, which already has `agent_id`.
     #[serde(rename = "start_agent_id")]
     pub agent_id: String,
+    /// Host-visible PID of the supervisor process (from NSpid outermost).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor_pid_host: Option<u32>,
+    /// Namespace PID of the supervisor (typically 1 inside a container).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor_pid_ns: Option<u32>,
     pub config_summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pod: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 /// Agent was paused by operator or rule.
@@ -75,9 +83,12 @@ mod tests {
     fn agent_start_round_trip() {
         let s = AgentStart {
             agent_id: "researcher-abc".into(),
+            supervisor_pid_host: Some(14523),
+            supervisor_pid_ns: Some(1),
             config_summary: "default".into(),
             node: Some("node-1".into()),
             pod: Some("argus-xyz".into()),
+            container: Some("agent".into()),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AgentStart = serde_json::from_str(&json).unwrap();

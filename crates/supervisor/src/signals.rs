@@ -14,9 +14,7 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` if a shutdown signal has been received.
 ///
-/// Currently unused: the tracer loop (in the sandbox crate) will poll
-/// this once it gains graceful shutdown support.
-#[expect(dead_code, reason = "will be polled by the tracer loop once graceful shutdown is implemented")]
+/// The tracer loop will poll this once graceful shutdown is implemented.
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }

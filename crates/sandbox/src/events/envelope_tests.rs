@@ -140,9 +140,12 @@ fn agent_start_avoids_field_collision() {
         "envelope-agent".into(),
         EventPayload::AgentStart(control::AgentStart {
             agent_id: "payload-agent".into(),
+            supervisor_pid_host: None,
+            supervisor_pid_ns: None,
             config_summary: "s".into(),
             node: None,
             pod: None,
+            container: None,
         }),
     );
     let json = serde_json::to_string(&event).unwrap();
@@ -272,8 +275,8 @@ fn all_variants_round_trip() {
             pid: 1, status: 200, headers_hash: None, body_hash: None,
         }),
         EventPayload::AgentStart(control::AgentStart {
-            agent_id: "a".into(), config_summary: "s".into(),
-            node: None, pod: None,
+            agent_id: "a".into(), supervisor_pid_host: None, supervisor_pid_ns: None,
+            config_summary: "s".into(), node: None, pod: None, container: None,
         }),
         EventPayload::AgentPause(control::AgentPause {
             reason: "r".into(), stopped_pids: vec![1],
