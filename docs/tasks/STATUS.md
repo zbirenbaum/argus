@@ -36,37 +36,37 @@ When resuming this conversation, starting a new one, or after context compaction
 
 ## Implementation In Progress
 
-| Task | Branch | Agent status | Depends on |
+| Task | Branch | Worktree | Agent status |
 |-|-|-|-|
-| P2: TLS Content | `p2-tls-content` | agent running | net-env (merged), cas (merged) |
-| P2: Event Segments | `p2-event-segments` | agent running | events (merged), s3-upload (merged) |
-| P1: Supervisor Main | `p1-supervisor-main` | agent dispatching | tracer-loop (merged), net-env (merged), config (merged) |
-| P2: Content Capture | `p2-content-capture` | agent dispatching | tracer-loop (merged), cas (merged), digest-cache (merged) |
-| P2: Write Locking | `p2-write-locking` | agent dispatching | tracer-loop (merged), cas (merged) |
-| P2: Pause/Resume API | `p2-pause-resume-api` | agent dispatching | tracer-loop (merged), events (merged), config (merged) |
+| P2: TLS Content | `p2-tls-content` | agent-a5bc4ff9 | running |
+| P2: Event Segments | `p2-event-segments` | agent-afaf96b9 | running |
+| P1: Supervisor Main | `p1-supervisor-main` | agent-a908dd0e | running |
+| P2: Content Capture | `p2-content-capture` | agent-a929a1e3 | running |
+| P2: Write Locking | `p2-write-locking` | agent-afbafafc | running |
+| P2: Pause/Resume API | `p2-pause-resume-api` | agent-ae7abb32 | running |
 
 ## Blocked (waiting on dependencies)
 
 | Task | Branch | Depends on |
 |-|-|-|
 | P3: Indexes | `p3-indexes` | events (merged), event-segments (in progress) |
-| P3: Merkle Tree | `p3-merkle-tree` | content-capture (dispatching), write-locking (dispatching), cas (merged) |
-| P3: Query API | `p3-query-api` | indexes, merkle-tree, pause-resume-api |
+| P3: Merkle Tree | `p3-merkle-tree` | content-capture (in progress), write-locking (in progress), cas (merged) |
+| P3: Query API | `p3-query-api` | indexes, merkle-tree, pause-resume-api (in progress) |
 | P3: Restore | `p3-restore` | merkle-tree, s3-upload (merged) |
 | P3: Realtime API | `p3-realtime-api` | query-api, events (merged) |
-| P4: Container Image | `p4-container-image` | supervisor-main (dispatching), s3-upload (merged) |
+| P4: Container Image | `p4-container-image` | supervisor-main (in progress), s3-upload (merged) |
 | P4: Cross-Agent | `p4-cross-agent` | container-image, query-api, s3-upload (merged) |
-| P5: Polish | `p5-polish` | realtime-api, pause-resume-api |
+| P5: Polish | `p5-polish` | realtime-api, pause-resume-api (in progress) |
 
 ## Running Agents Tracker
 
 Check these before dispatching new work:
 
-| Agent | Task | Type | Status |
-|-|-|-|-|
-| a5bc4ff9599348725 | P2 TLS Content | implementation | running |
-| afaf96b9a57292537 | P2 Event Segments | implementation | running |
-| (pending) | P1 Supervisor Main | implementation | dispatching now |
-| (pending) | P2 Content Capture | implementation | dispatching now |
-| (pending) | P2 Write Locking | implementation | dispatching now |
-| (pending) | P2 Pause/Resume API | implementation | dispatching now |
+| Agent ID | Task | Type | Worktree | Status |
+|-|-|-|-|-|
+| a5bc4ff9599348725 | P2 TLS Content | impl | agent-a5bc4ff9 | running |
+| afaf96b9a57292537 | P2 Event Segments | impl | agent-afaf96b9 | running |
+| a908dd0e014b86181 | P1 Supervisor Main | impl | agent-a908dd0e | running |
+| a929a1e31aee445ae | P2 Content Capture | impl | agent-a929a1e3 | running |
+| afbafafcf55a2b224 | P2 Write Locking | impl | agent-afbafafc | running |
+| ae7abb32f7a9290cc | P2 Pause/Resume API | impl | agent-ae7abb32 | running |
