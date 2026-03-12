@@ -1,0 +1,18 @@
+[package]
+name = "argus-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "argus"
+path = "src/main.rs"
+
+[dependencies]
+sandbox = { path = "../sandbox" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+clap.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true

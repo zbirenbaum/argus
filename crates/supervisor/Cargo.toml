@@ -1,0 +1,16 @@
+[package]
+name = "supervisor"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "supervisor"
+path = "src/main.rs"
+
+[dependencies]
+sandbox = { path = "../sandbox" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true

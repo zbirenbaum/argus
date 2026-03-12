@@ -1,6 +1,26 @@
-[package]
-name = "argus-run"
+[workspace]
+resolver = "3"
+members = [
+    "crates/sandbox",
+    "crates/supervisor",
+    "crates/cli",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+sha2 = "0.10"
+nix = { version = "0.30", features = ["ptrace", "signal", "process", "fs", "dir", "mount"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
