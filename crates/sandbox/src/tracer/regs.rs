@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Architecture-abstracted register access for ptrace.
 //!
 //! The production target is x86_64, but development/CI may use aarch64
@@ -32,6 +31,10 @@ pub fn syscall_ret(regs: &user_regs_struct) -> u64 {
     #[cfg(target_arch = "aarch64")]
     {
         regs.regs[0]
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        compile_error!("unsupported architecture");
     }
 }
 

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Tracee memory access helpers for reading data from traced processes.
 //!
 //! Uses `process_vm_readv` for efficient cross-process memory reads,
@@ -28,7 +27,7 @@ pub fn read_c_string(pid: Pid, addr: u64) -> Result<String> {
     }
     let bytes = read_bytes(pid, addr, MAX_PATH_LEN)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).into_owned().pipe_ok()
+    Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 /// Reads arbitrary bytes from tracee memory via `process_vm_readv`.
@@ -132,12 +131,3 @@ pub fn read_proc_cmdline(pid: Pid) -> Result<Vec<String>> {
         .collect();
     Ok(args)
 }
-
-/// Helper trait to convert a value into `Result::Ok`.
-trait PipeOk: Sized {
-    fn pipe_ok(self) -> Result<Self> {
-        Ok(self)
-    }
-}
-
-impl<T> PipeOk for T {}

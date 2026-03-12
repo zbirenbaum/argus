@@ -1,9 +1,10 @@
-// Rust guideline compliant 2026-02-21
 //! File metadata syscall handlers (rename, unlink, mkdir, chmod, etc.).
 
 use anyhow::Result;
 use libc::user_regs_struct;
 use nix::unistd::Pid;
+use tracing::event;
+use tracing::Level;
 
 use crate::events::EventPayload;
 use crate::events::file as ef;
@@ -218,6 +219,47 @@ pub fn handle_link(
         link_path,
         tree_hash: None,
     }));
+    Ok(())
+}
+
+/// Handles chown/fchown/fchownat.
+///
+/// Phase 1: logs the ownership change but does not emit an event
+/// (no Chown event type defined yet).
+pub fn handle_chown(
+    _tracer: &mut TracerLoop,
+    pid: Pid,
+    nr: u64,
+    r: &user_regs_struct,
+) -> Result<()> {
+    let pid_u32 = pid.as_raw() as u32;
+    let path = match nr {
+        SYS_CHOWN => memory::read_c_string(pid, regs::arg1(r))?,
+        SYS_FCHOWNAT => {
+            let dirfd = regs::arg1(r) as i32;
+            memory::read_path_at(pid, dirfd, regs::arg2(r))?
+                .to_string_lossy()
+                .into_owned()
+        }
+        SYS_FCHOWN => {
+            let fd = regs::arg1(r) as i32;
+            let link = format!("/proc/{}/fd/{fd}", pid.as_raw());
+            std::fs::read_link(&link)
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        }
+        _ => return Ok(()),
+    };
+
+    event!(
+        name: "tracer.chown",
+        Level::DEBUG,
+        pid = pid_u32,
+        file.path = %path,
+        "chown on {{file.path}} for pid {{pid}}",
+    );
+
     Ok(())
 }
 

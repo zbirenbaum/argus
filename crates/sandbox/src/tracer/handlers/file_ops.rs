@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! File open/close/dup/fcntl syscall handlers.
 
 use anyhow::Result;
@@ -14,6 +13,13 @@ use crate::tracer::syscall_nr::*;
 use crate::tracer::trace_loop::TracerLoop;
 
 /// Handles open/openat/openat2/creat by recording the fd-to-path mapping.
+///
+/// Fd table population from `open()` must happen on syscall exit, not
+/// entry, because the kernel has not yet assigned an fd when seccomp
+/// triggers. Currently we log the path on entry and rely on
+/// `/proc/{pid}/fd/{fd}` fallback in read/write handlers.
+// TODO: implement exit-side fd table insertion once post-syscall
+// tracing is wired up (requires PTRACE_SYSCALL or seccomp notify).
 pub fn handle_open(
     _tracer: &mut TracerLoop,
     pid: Pid,
@@ -40,9 +46,6 @@ pub fn handle_open(
         "open path recorded for pid {{pid}}: {{file.path}}",
     );
 
-    // Phase 1 limitation: seccomp stops happen on syscall entry before
-    // the kernel assigns an fd. Read/write handlers resolve fd targets
-    // from /proc/{pid}/fd/{fd} as a fallback.
     Ok(())
 }
 

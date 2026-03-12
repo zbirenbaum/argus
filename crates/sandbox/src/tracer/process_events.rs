@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Process lifecycle event handlers (fork, program replacement, exit).
 //!
 //! Extracted from the trace loop to keep file sizes manageable.

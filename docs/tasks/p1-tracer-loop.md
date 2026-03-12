@@ -30,9 +30,9 @@
 - Auto-follow fork/vfork/clone via `PTRACE_O_TRACEFORK|TRACEVFORK|TRACECLONE`
 - Program replacement detection via `PTRACE_EVENT_EXEC`
 - Exit handling via `PTRACE_EVENT_EXIT` and `WaitStatus::Exited/Signaled`
-- Seccomp stop dispatch for all 57 traced syscalls
+- Seccomp stop dispatch for all traced syscalls (including lseek, chown, fchown, fchownat)
 - Fd target classification (file/pipe/pty/socket/devnull) via fd table + procfs fallback
-- Stdio detection (fd 1 -> stdout, fd 2 -> stderr)
+- Stdio detection (fd 0/1/2 classified as Stdio only when backed by pipe/PTY)
 - Pause-before-action stub (`check_pause_rules` always returns `Allow`)
 - Tracee memory access via `process_vm_readv`
 - `AT_FDCWD` and dirfd resolution for `*at()` syscalls

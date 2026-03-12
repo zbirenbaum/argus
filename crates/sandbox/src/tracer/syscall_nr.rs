@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! x86_64 syscall number constants used by the handler dispatch.
 //!
 //! These duplicate the numbers in `seccomp::syscalls` but as `u64`
@@ -10,6 +9,7 @@ pub const SYS_READ: u64 = 0;
 pub const SYS_WRITE: u64 = 1;
 pub const SYS_OPEN: u64 = 2;
 pub const SYS_CLOSE: u64 = 3;
+pub const SYS_LSEEK: u64 = 8;
 pub const SYS_PREAD64: u64 = 17;
 pub const SYS_PWRITE64: u64 = 18;
 pub const SYS_READV: u64 = 19;
@@ -42,6 +42,8 @@ pub const SYS_LINK: u64 = 86;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_SYMLINK: u64 = 88;
 pub const SYS_READLINK: u64 = 89;
+pub const SYS_CHOWN: u64 = 92;
+pub const SYS_FCHOWN: u64 = 93;
 pub const SYS_CHMOD: u64 = 90;
 pub const SYS_FCHMOD: u64 = 91;
 pub const SYS_IOCTL: u64 = 16;
@@ -53,6 +55,7 @@ pub const SYS_RENAMEAT: u64 = 264;
 pub const SYS_LINKAT: u64 = 265;
 pub const SYS_SYMLINKAT: u64 = 266;
 pub const SYS_READLINKAT: u64 = 267;
+pub const SYS_FCHOWNAT: u64 = 260;
 pub const SYS_FCHMODAT: u64 = 268;
 pub const SYS_ACCEPT4: u64 = 288;
 pub const SYS_DUP3: u64 = 292;

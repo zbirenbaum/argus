@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Read, write, pipe, and PTY syscall handlers.
 
 use anyhow::Result;
@@ -17,7 +16,8 @@ use crate::tracer::trace_loop::TracerLoop;
 /// Handles read/pread64/readv/preadv.
 ///
 /// Classifies the fd target and emits the appropriate event type:
-/// file reads, stdio, pipe data, or PTY data.
+/// file reads, stdio (stdin on fd 0 when backed by pipe/PTY), pipe
+/// data, or PTY data.
 pub fn handle_read(
     tracer: &mut TracerLoop,
     pid: Pid,
@@ -28,6 +28,24 @@ pub fn handle_read(
     let pid_u32 = pid.as_raw() as u32;
 
     let target = resolve_fd_target(tracer, pid_u32, fd);
+
+    // Stdin is only classified as Stdio when fd 0 is backed by a
+    // pipe or PTY, not when redirected to a regular file.
+    if fd == 0 && matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. }) {
+        tracer.emit(EventPayload::Stdio(eio::Stdio {
+            pid: pid_u32,
+            subtype: eio::StdioSubtype::Stdin,
+            content_hash: None,
+            size,
+            pipe_inode: match &target {
+                FdTarget::Pipe { inode, .. } => Some(*inode),
+                _ => None,
+            },
+            dest_pid: None,
+            source_pid: None,
+        }));
+        return Ok(());
+    }
 
     match target {
         FdTarget::File { path } => {
@@ -78,33 +96,33 @@ pub fn handle_write(
     let size = regs::arg3(r);
     let pid_u32 = pid.as_raw() as u32;
 
-    // Stdio classification takes priority over fd target lookup.
-    if fd == 1 {
-        tracer.emit(EventPayload::Stdio(eio::Stdio {
-            pid: pid_u32,
-            subtype: eio::StdioSubtype::Stdout,
-            content_hash: None,
-            size,
-            pipe_inode: None,
-            dest_pid: None,
-            source_pid: None,
-        }));
-        return Ok(());
-    }
-    if fd == 2 {
-        tracer.emit(EventPayload::Stdio(eio::Stdio {
-            pid: pid_u32,
-            subtype: eio::StdioSubtype::Stderr,
-            content_hash: None,
-            size,
-            pipe_inode: None,
-            dest_pid: None,
-            source_pid: None,
-        }));
-        return Ok(());
-    }
-
     let target = resolve_fd_target(tracer, pid_u32, fd);
+
+    // Only classify fd 1/2 as Stdio when the underlying target is a
+    // pipe or PTY. When stdout/stderr is redirected to a file, emit
+    // a normal Write event instead.
+    if (fd == 1 || fd == 2)
+        && matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. })
+    {
+        let subtype = if fd == 1 {
+            eio::StdioSubtype::Stdout
+        } else {
+            eio::StdioSubtype::Stderr
+        };
+        tracer.emit(EventPayload::Stdio(eio::Stdio {
+            pid: pid_u32,
+            subtype,
+            content_hash: None,
+            size,
+            pipe_inode: match &target {
+                FdTarget::Pipe { inode, .. } => Some(*inode),
+                _ => None,
+            },
+            dest_pid: None,
+            source_pid: None,
+        }));
+        return Ok(());
+    }
 
     match target {
         FdTarget::File { path } => {
@@ -165,6 +183,29 @@ pub fn handle_pipe(
     Ok(())
 }
 
+/// Handles lseek.
+///
+/// Phase 1: logged for debugging but no event emitted. Offset
+/// tracking will be added in a later phase.
+pub fn handle_lseek(
+    _tracer: &mut TracerLoop,
+    pid: Pid,
+    r: &user_regs_struct,
+) -> Result<()> {
+    let fd = regs::arg1(r) as i32;
+    let pid_u32 = pid.as_raw() as u32;
+
+    event!(
+        name: "tracer.lseek",
+        Level::TRACE,
+        pid = pid_u32,
+        fd = fd,
+        "lseek on fd {{fd}} for pid {{pid}}",
+    );
+
+    Ok(())
+}
+
 /// Handles ioctl — checks for PTY-related ioctls.
 pub fn handle_ioctl(
     _tracer: &mut TracerLoop,
@@ -175,9 +216,9 @@ pub fn handle_ioctl(
     let request = regs::arg2(r);
     let pid_u32 = pid.as_raw() as u32;
 
-    /// TIOCGPTN: get PTY number.
+    // TIOCGPTN: get PTY number.
     const TIOCGPTN: u64 = 0x8004_5430;
-    /// TIOCSPTLCK: lock/unlock PTY.
+    // TIOCSPTLCK: lock/unlock PTY.
     const TIOCSPTLCK: u64 = 0x4004_5431;
 
     match request {

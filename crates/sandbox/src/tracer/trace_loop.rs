@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Main ptrace event loop.
 //!
 //! Sits on a dedicated thread, calling `waitpid(-1)` in a loop and
@@ -122,6 +121,10 @@ impl TracerLoop {
     fn handle_wait_status(&mut self, status: WaitStatus) -> Result<()> {
         match status {
             WaitStatus::PtraceEvent(pid, _sig, evt) => {
+                // Seccomp stops are continued inside handle_seccomp_stop
+                // after handler processing. Other ptrace events (fork,
+                // exec, exit) are continued here. Signal stops forward the
+                // signal to the tracee via handle_signal_stop.
                 self.handle_ptrace_event(pid, evt)?;
                 ptrace::cont(pid, None)?;
             }

@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Network syscall handlers (socket, connect, accept).
 
 use anyhow::Result;

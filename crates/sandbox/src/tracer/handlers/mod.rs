@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Syscall dispatch and handler functions for seccomp-ptrace stops.
 //!
 //! Each handler reads arguments from the tracee's registers, updates
@@ -61,6 +60,11 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<()> {
             file_ops::handle_fcntl(tracer, pid, &regs)?;
         }
 
+        // Seek
+        SYS_LSEEK => {
+            io_ops::handle_lseek(tracer, pid, &regs)?;
+        }
+
         // Read/write
         SYS_READ | SYS_PREAD64 | SYS_READV | SYS_PREADV => {
             io_ops::handle_read(tracer, pid, &regs)?;
@@ -84,6 +88,9 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<()> {
         }
         SYS_CHMOD | SYS_FCHMOD | SYS_FCHMODAT => {
             metadata_ops::handle_chmod(tracer, pid, nr, &regs)?;
+        }
+        SYS_CHOWN | SYS_FCHOWN | SYS_FCHOWNAT => {
+            metadata_ops::handle_chown(tracer, pid, nr, &regs)?;
         }
         SYS_TRUNCATE | SYS_FTRUNCATE => {
             metadata_ops::handle_truncate(tracer, pid, nr, &regs)?;
