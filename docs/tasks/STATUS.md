@@ -2,11 +2,19 @@
 
 Last updated: 2026-03-11
 
+## Context Recovery
+
+When resuming this conversation or starting a new one:
+1. Read `/Users/zach/Development/argus-run/CLAUDE.md` to refresh full project context.
+2. Read this file (`docs/tasks/STATUS.md`) for current pipeline state.
+3. You are dispatching agents for implementation, blocking merges until tests pass and reviews + fixes are complete.
+4. Check the **Running Agents Tracker** below before doing anything — pick up where you left off.
+
 ## Process Rules
 
 1. **Update this file** after every agent completion and every merge to main.
 2. **Check running agents** before dispatching new work — avoid duplicate effort.
-3. **Block merges** until review + fixes are complete.
+3. **Block merges** until tests are done and reviews + fixes are complete.
 4. **Dispatch reviews** immediately after implementation completes.
 5. **Dispatch fix agents** immediately after reviews complete.
 6. **Dispatch next wave** as soon as dependencies are merged and reviewed.
