@@ -96,7 +96,7 @@ mod tests {
         #[cfg(target_arch = "x86_64")]
         assert_eq!(TRACED_SYSCALLS.len(), 61, "expected 61 traced syscalls on x86_64");
         #[cfg(target_arch = "aarch64")]
-        assert_eq!(TRACED_SYSCALLS.len(), 44, "expected 44 traced syscalls on aarch64");
+        assert_eq!(TRACED_SYSCALLS.len(), 46, "expected 46 traced syscalls on aarch64");
         assert_eq!(BLOCKED_SYSCALLS.len(), 3, "expected 3 blocked syscalls");
     }
 
