@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argus-supervisor-config
+data:
+  supervisor.yaml: |
+    storage:
+      backend: local-only
+      local_buffer:
+        cas_dir: /data/cas
+        event_dir: /data/events
+        max_size: 2GB
+        min_retention: 5m
+      digest_cache:
+        path: /data/digest-cache.bin
+        ttl: 7d
+    durability:
+      default: local

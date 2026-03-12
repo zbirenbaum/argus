@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argus-supervisor-config
+data:
+  supervisor.yaml: |
+    storage:
+      backend: s3
+      bucket: argus-sandbox
+      prefix: agents/{agent_id}/
+      region: us-west-2
+      upload:
+        max_concurrent: 4
+        retry_max: 5
+        retry_backoff_base: 1s
+      local_buffer:
+        cas_dir: /data/cas
+        event_dir: /data/events
+        max_size: 2GB
+        min_retention: 5m
+      digest_cache:
+        path: /data/digest-cache.bin
+        ttl: 7d
+        rebuild_on_start: true
+    durability:
+      default: local

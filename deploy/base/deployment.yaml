@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argus-agent
+  labels:
+    app: argus-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argus-agent
+  template:
+    metadata:
+      labels:
+        app: argus-agent
+    spec:
+      serviceAccountName: argus-agent
+      containers:
+        - name: agent
+          image: argus-supervisor:latest
+          args: ["python3", "/app/agent.py"]
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/supervisor.yaml
+              subPath: supervisor.yaml
+              readOnly: true
+          env:
+            - name: RUST_LOG
+              value: "info"
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: data
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: config
+          configMap:
+            name: argus-supervisor-config
