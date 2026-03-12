@@ -18,9 +18,11 @@ uuid.workspace = true
 chrono.workspace = true
 rcgen = "0.13"
 time = "0.3"
-aws-sdk-s3 = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-libc = "0.2"
+aws-sdk-s3 = { version = "1", default-features = false }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "credentials-process", "sso"] }
+aws-smithy-runtime = { version = "1", default-features = false }
+aws-smithy-http-client = { version = "1", features = ["default-client", "rustls-ring"] }
+rustls.workspace = true
 serde_yaml = "0.9"
 glob = "0.3"
 humantime-serde = "1"

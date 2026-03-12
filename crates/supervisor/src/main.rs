@@ -82,7 +82,7 @@ fn main() -> Result<()> {
 
     emit_agent_start(&event_tx, &config, &seq_gen);
 
-    let child_pid = startup::spawn_agent(
+    let (child_pid, sync_pipe) = startup::spawn_agent(
         &config.agent_command,
         &agent_env,
         &config.workspace_dir,
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
         event_tx,
         Arc::clone(&seq_gen),
     );
-    tracer.run(child_pid)?;
+    tracer.run(child_pid, sync_pipe)?;
 
     event!(
         name: "supervisor.shutdown",

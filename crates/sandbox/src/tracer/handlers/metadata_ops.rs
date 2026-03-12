@@ -1,7 +1,6 @@
 //! File metadata syscall handlers (rename, unlink, mkdir, chmod, etc.).
 
 use anyhow::Result;
-use libc::user_regs_struct;
 use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
@@ -9,7 +8,7 @@ use tracing::Level;
 use crate::events::EventPayload;
 use crate::events::file as ef;
 use crate::tracer::memory;
-use crate::tracer::regs;
+use crate::tracer::regs::{self, UserRegs};
 use crate::tracer::syscall_nr::*;
 use crate::tracer::trace_loop::TracerLoop;
 
@@ -18,7 +17,7 @@ pub fn handle_rename(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let (old_path, new_path) = match nr {
@@ -53,7 +52,7 @@ pub fn handle_unlink(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let path = match nr {
@@ -81,7 +80,7 @@ pub fn handle_mkdir(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let path = match nr {
@@ -107,7 +106,7 @@ pub fn handle_mkdir(
 pub fn handle_rmdir(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let path = memory::read_c_string(pid, regs::arg1(r))?;
@@ -125,7 +124,7 @@ pub fn handle_chmod(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let (path, new_mode) = match nr {
@@ -161,7 +160,7 @@ pub fn handle_truncate(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let (path, new_size) = match nr {
@@ -192,7 +191,7 @@ pub fn handle_link(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let (target, link_path) = match nr {
@@ -230,7 +229,7 @@ pub fn handle_chown(
     _tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let path = match nr {
@@ -268,7 +267,7 @@ pub fn handle_symlink(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let (target, link_path) = match nr {

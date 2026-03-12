@@ -1,17 +1,24 @@
+// Rust guideline compliant 2026-02-21
 //! Tracee memory access helpers for reading data from traced processes.
 //!
 //! Uses `process_vm_readv` for efficient cross-process memory reads,
 //! falling back to `ptrace::read` for small reads when needed.
 
 use std::ffi::OsStr;
+use std::io::IoSliceMut;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use nix::sys::uio::{RemoteIoVec, process_vm_readv};
 use nix::unistd::Pid;
 
 /// Maximum path length we will read from a tracee.
 const MAX_PATH_LEN: usize = 4096;
+
+/// `AT_FDCWD` sentinel — resolve relative to process cwd. Value -100
+/// per linux/fcntl.h.
+const AT_FDCWD: i32 = -100;
 
 /// Reads a null-terminated C string from tracee memory.
 ///
@@ -44,36 +51,20 @@ pub fn read_bytes(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
     }
 
     let mut buf = vec![0u8; len];
-    let local_iov = libc::iovec {
-        iov_base: buf.as_mut_ptr().cast(),
-        iov_len: len,
-    };
-    // `iov_base` is `*mut c_void` even for reads — the kernel API uses a
-    // single `iovec` type for both read and write directions.
-    let remote_iov = libc::iovec {
-        iov_base: addr as *mut libc::c_void,
-        iov_len: len,
+
+    let remote = RemoteIoVec {
+        base: addr as usize,
+        len,
     };
 
-    // SAFETY: `local_iov` points to `buf` which is valid for `len` bytes,
-    // `remote_iov` references tracee address space, and `pid` identifies
-    // a process we are tracing via ptrace.
-    let n = unsafe {
-        libc::process_vm_readv(
-            pid.as_raw(),
-            &local_iov,
-            1,
-            &remote_iov,
-            1,
-            0,
-        )
-    };
-    if n < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context(format!("process_vm_readv failed for pid {pid} at 0x{addr:x}"));
-    }
+    let n = process_vm_readv(
+        pid,
+        &mut [IoSliceMut::new(&mut buf)],
+        &[remote],
+    )
+    .with_context(|| format!("process_vm_readv failed for pid {pid} at 0x{addr:x}"))?;
 
-    buf.truncate(n as usize);
+    buf.truncate(n);
     Ok(buf)
 }
 
@@ -94,7 +85,7 @@ pub fn read_path_at(pid: Pid, dirfd: i32, path_addr: u64) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
 
-    if dirfd == libc::AT_FDCWD {
+    if dirfd == AT_FDCWD {
         let cwd = read_proc_cwd(pid)?;
         return Ok(cwd.join(path));
     }
@@ -163,5 +154,10 @@ mod tests {
     #[test]
     fn max_path_len_is_reasonable() {
         assert_eq!(MAX_PATH_LEN, 4096);
+    }
+
+    #[test]
+    fn at_fdcwd_matches_kernel_value() {
+        assert_eq!(AT_FDCWD, -100);
     }
 }

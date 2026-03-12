@@ -1,8 +1,20 @@
+// Rust guideline compliant 2026-02-21
 //! Raw BPF program builder for seccomp filters.
 //!
 //! Constructs a classic BPF (cBPF) program that inspects `seccomp_data`
 //! and returns the appropriate action per syscall number. Only supports
-//! x86_64 (`AUDIT_ARCH_X86_64`).
+//! x86_64 (`AUDIT_ARCH`).
+
+/// Classic BPF instruction, matching `struct sock_filter` in
+/// linux/filter.h. Defined here to avoid a direct libc dependency.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SockFilter {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
 
 /// Describes what action the filter should take for a syscall.
 #[derive(Debug, Clone, Copy)]
@@ -34,8 +46,12 @@ const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 /// Offset of `seccomp_data.nr` (i32 at byte 0 of `seccomp_data`).
 const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 
-/// `AUDIT_ARCH_X86_64` = `EM_X86_64 | __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE`
-const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+/// Architecture constant for the BPF filter's arch check.
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: u32 = 0xC000_003E; // AUDIT_ARCH
+
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: u32 = 0xC000_00B7; // AUDIT_ARCH_AARCH64
 
 const SECCOMP_RET_ALLOW: u32 = 0x7FFF_0000;
 const SECCOMP_RET_TRACE: u32 = 0x7FF0_0000;
@@ -63,17 +79,17 @@ const ENOSYS: u32 = 38;
 ///
 /// Panics if the resulting program exceeds the BPF maximum of 4096
 /// instructions (would require ~2045 actions, far beyond our ~58).
-pub fn build_filter_program(actions: &[SyscallAction]) -> Vec<libc::sock_filter> {
+pub fn build_filter_program(actions: &[SyscallAction]) -> Vec<SockFilter> {
     let num_actions = actions.len();
     // 4 header + N jeqs + 1 default allow + N rets
     let total = 4 + num_actions + 1 + num_actions;
-    let mut insns: Vec<libc::sock_filter> = Vec::with_capacity(total);
+    let mut insns: Vec<SockFilter> = Vec::with_capacity(total);
 
     // --- Header: validate architecture ---
     insns.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_ARCH_OFFSET));
     insns.push(bpf_jump(
         BPF_JMP | BPF_JEQ | BPF_K,
-        AUDIT_ARCH_X86_64,
+        AUDIT_ARCH,
         1,
         0,
     ));
@@ -84,8 +100,6 @@ pub fn build_filter_program(actions: &[SyscallAction]) -> Vec<libc::sock_filter>
     insns.push(bpf_stmt(BPF_LD | BPF_W | BPF_ABS, SECCOMP_DATA_NR_OFFSET));
 
     // --- Per-syscall JEQ instructions ---
-    // All jump to offset `num_actions` from next instruction, which lands
-    // on the matching RET instruction past the default ALLOW.
     for action in actions {
         let nr = u32::try_from(action.syscall_nr())
             .expect("x86_64 syscall numbers fit in u32");
@@ -126,8 +140,8 @@ const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 
 /// Creates a BPF statement (no jump targets).
-fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
-    libc::sock_filter {
+fn bpf_stmt(code: u16, k: u32) -> SockFilter {
+    SockFilter {
         code,
         jt: 0,
         jf: 0,
@@ -136,8 +150,8 @@ fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
 }
 
 /// Creates a BPF jump instruction.
-fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-    libc::sock_filter { code, jt, jf, k }
+fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
+    SockFilter { code, jt, jf, k }
 }
 
 #[cfg(test)]
@@ -184,19 +198,6 @@ mod tests {
         ];
         let program = build_filter_program(&actions);
 
-        // Layout:
-        // 0: load arch
-        // 1: jeq arch
-        // 2: kill
-        // 3: load nr
-        // 4: jeq(0)  -> jt=3, target = 4+1+3 = 8
-        // 5: jeq(1)  -> jt=3, target = 5+1+3 = 9
-        // 6: jeq(425) -> jt=3, target = 6+1+3 = 10
-        // 7: ret allow
-        // 8: ret trace (action 0)
-        // 9: ret trace (action 1)
-        // 10: ret errno (action 2)
-
         assert_eq!(program.len(), 11);
 
         // All JEQ offsets equal num_actions = 3
@@ -216,11 +217,9 @@ mod tests {
     #[test]
     fn arch_check_kills_on_mismatch() {
         let program = build_filter_program(&[]);
-        // Index 1: JEQ for arch, jt=1 (skip kill), jf=0 (fall through)
         assert_eq!(program[1].jt, 1);
         assert_eq!(program[1].jf, 0);
-        assert_eq!(program[1].k, AUDIT_ARCH_X86_64);
-        // Index 2: KILL_PROCESS
+        assert_eq!(program[1].k, AUDIT_ARCH);
         assert_eq!(program[2].k, SECCOMP_RET_KILL_PROCESS);
     }
 }

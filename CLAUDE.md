@@ -57,6 +57,7 @@ External:
 | `09-multi-agent.md` | Container image, Helm chart, auto-registration, clock sync, cross-agent queries |
 | `10-api-reference.md` | All REST endpoints, WebSocket, CLI commands |
 | `11-implementation-phases.md` | Phase breakdown with file references per phase |
+| `12-testing.md` | 12 validation tests, integration test, bug indicators |
 
 
 ## Task Tracking

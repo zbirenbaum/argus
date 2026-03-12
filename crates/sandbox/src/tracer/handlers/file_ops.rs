@@ -1,16 +1,22 @@
 //! File open/close/dup/fcntl syscall handlers.
 
 use anyhow::Result;
-use libc::user_regs_struct;
 use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
 
 use crate::state::FdTarget;
 use crate::tracer::memory;
-use crate::tracer::regs;
+use crate::tracer::regs::{self, UserRegs};
 use crate::tracer::syscall_nr::*;
 use crate::tracer::trace_loop::TracerLoop;
+
+/// `O_CLOEXEC` flag — close fd on exec. Value per linux/fcntl.h.
+const O_CLOEXEC: i32 = 0x80000;
+/// `F_SETFD` — set fd flags. Value per linux/fcntl.h.
+const F_SETFD: i32 = 2;
+/// `FD_CLOEXEC` — close-on-exec fd flag. Value per linux/fcntl.h.
+const FD_CLOEXEC: i32 = 1;
 
 /// Handles open/openat/openat2/creat by recording the fd-to-path mapping.
 ///
@@ -24,7 +30,7 @@ pub fn handle_open(
     _tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let path = match nr {
         SYS_OPEN | SYS_CREAT => memory::read_c_string(pid, regs::arg1(r))?,
@@ -53,7 +59,7 @@ pub fn handle_open(
 pub fn handle_close(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let pid_u32 = pid.as_raw() as u32;
@@ -76,7 +82,7 @@ pub fn handle_dup(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let old_fd = regs::arg1(r) as i32;
     let new_fd = match nr {
@@ -95,7 +101,7 @@ pub fn handle_dup(
 
     if nr == SYS_DUP3 {
         let flags = regs::arg3(r) as i32;
-        if flags & libc::O_CLOEXEC != 0 {
+        if flags & O_CLOEXEC != 0 {
             proc_state.fds.set_cloexec(new_fd);
         }
     }
@@ -111,7 +117,7 @@ pub fn handle_dup(
 pub fn handle_fcntl(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let cmd = regs::arg2(r) as i32;
@@ -121,9 +127,9 @@ pub fn handle_fcntl(
         return Ok(());
     };
 
-    if cmd == libc::F_SETFD {
+    if cmd == F_SETFD {
         let arg = regs::arg3(r) as i32;
-        if arg & libc::FD_CLOEXEC != 0 {
+        if arg & FD_CLOEXEC != 0 {
             proc_state.fds.set_cloexec(fd);
         } else {
             proc_state.fds.clear_cloexec(fd);

@@ -1,14 +1,25 @@
+// Rust guideline compliant 2026-02-21
 //! Network syscall handlers (socket, connect, accept).
 
 use anyhow::Result;
-use libc::user_regs_struct;
 use nix::unistd::Pid;
 
 use crate::events::EventPayload;
 use crate::events::network as en;
 use crate::tracer::memory;
-use crate::tracer::regs;
+use crate::tracer::regs::{self, UserRegs};
 use crate::tracer::trace_loop::TracerLoop;
+
+// Address family constants per linux/socket.h.
+const AF_INET: i32 = 2;
+const AF_INET6: i32 = 10;
+const AF_UNIX: i32 = 1;
+const AF_NETLINK: i32 = 16;
+
+// Socket type constants per linux/socket.h.
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const SOCK_RAW: i32 = 3;
 
 /// Handles socket() by emitting a socket event.
 ///
@@ -16,25 +27,25 @@ use crate::tracer::trace_loop::TracerLoop;
 pub fn handle_socket(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let domain = regs::arg1(r) as i32;
     let sock_type = regs::arg2(r) as i32;
 
     let domain_str = match domain {
-        libc::AF_INET => "AF_INET",
-        libc::AF_INET6 => "AF_INET6",
-        libc::AF_UNIX => "AF_UNIX",
-        libc::AF_NETLINK => "AF_NETLINK",
+        AF_INET => "AF_INET",
+        AF_INET6 => "AF_INET6",
+        AF_UNIX => "AF_UNIX",
+        AF_NETLINK => "AF_NETLINK",
         _ => "UNKNOWN",
     };
 
     // Mask out SOCK_NONBLOCK and SOCK_CLOEXEC flags.
     let type_str = match sock_type & 0xFF {
-        libc::SOCK_STREAM => "SOCK_STREAM",
-        libc::SOCK_DGRAM => "SOCK_DGRAM",
-        libc::SOCK_RAW => "SOCK_RAW",
+        SOCK_STREAM => "SOCK_STREAM",
+        SOCK_DGRAM => "SOCK_DGRAM",
+        SOCK_RAW => "SOCK_RAW",
         _ => "UNKNOWN",
     };
 
@@ -52,7 +63,7 @@ pub fn handle_socket(
 pub fn handle_connect(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let fd = regs::arg1(r) as i32;
@@ -77,7 +88,7 @@ pub fn handle_connect(
 pub fn handle_accept(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
     let fd = regs::arg1(r) as i32;
@@ -108,12 +119,12 @@ fn read_sockaddr(pid: Pid, addr_ptr: u64, addr_len: usize) -> Result<(String, u1
     let family = u16::from_ne_bytes([buf[0], buf[1]]);
 
     match i32::from(family) {
-        libc::AF_INET if buf.len() >= 8 => {
+        AF_INET if buf.len() >= 8 => {
             let port = u16::from_be_bytes([buf[2], buf[3]]);
             let addr = format!("{}.{}.{}.{}", buf[4], buf[5], buf[6], buf[7]);
             Ok((addr, port))
         }
-        libc::AF_INET6 if buf.len() >= 28 => {
+        AF_INET6 if buf.len() >= 28 => {
             let port = u16::from_be_bytes([buf[2], buf[3]]);
             let mut segments = [0u16; 8];
             for (i, seg) in segments.iter_mut().enumerate() {

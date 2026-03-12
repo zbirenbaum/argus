@@ -1,3 +1,4 @@
+// Rust guideline compliant 2026-02-21
 //! Main ptrace event loop.
 //!
 //! Sits on a dedicated thread, calling `waitpid(-1)` in a loop and
@@ -5,6 +6,7 @@
 //! follows forks, program replacements, and exits. Emits structured
 //! events over a channel for downstream consumers.
 
+use std::os::fd::{BorrowedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -68,16 +70,25 @@ impl TracerLoop {
 
     /// Runs the main ptrace loop until all traced processes exit.
     ///
-    /// Attaches to `initial_pid` via `PTRACE_SEIZE`, sets ptrace
-    /// options, and enters the wait loop.
+    /// Attaches to `initial_pid` via `PTRACE_SEIZE`, then signals
+    /// the child via `sync_pipe_w` to install seccomp and exec.
     ///
     /// # Errors
     ///
     /// Returns an error if ptrace operations fail or the wait loop
     /// encounters an unrecoverable error.
-    pub fn run(&mut self, initial_pid: Pid) -> Result<()> {
+    pub fn run(&mut self, initial_pid: Pid, sync_pipe_w: RawFd) -> Result<()> {
         ptrace::seize(initial_pid, PTRACE_OPTS)
             .with_context(|| format!("ptrace seize pid {initial_pid}"))?;
+
+        // Child is blocked on pipe read — unblock it now that seize
+        // has established the trace relationship.
+        // SAFETY: sync_pipe_w is a valid open fd from pipe().
+        let pipe_fd = unsafe { BorrowedFd::borrow_raw(sync_pipe_w) };
+        nix::unistd::write(pipe_fd, &[1u8])
+            .context("write to sync pipe")?;
+        nix::unistd::close(sync_pipe_w)
+            .context("close sync pipe")?;
 
         self.register_initial_process(initial_pid)?;
         self.alive_count = 1;
@@ -104,7 +115,8 @@ impl TracerLoop {
                 return Ok(());
             }
 
-            let status = match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::__WALL)) {
+            let wall = WaitPidFlag::__WALL;
+            let status = match waitpid(Pid::from_raw(-1), Some(wall)) {
                 Ok(s) => s,
                 Err(nix::errno::Errno::ECHILD) => {
                     event!(
@@ -125,10 +137,6 @@ impl TracerLoop {
     fn handle_wait_status(&mut self, status: WaitStatus) -> Result<()> {
         match status {
             WaitStatus::PtraceEvent(pid, _sig, evt) => {
-                // Seccomp stops are continued inside handle_seccomp_stop
-                // after handler processing. Other ptrace events (fork,
-                // exec, exit) are continued here. Signal stops forward the
-                // signal to the tracee via handle_signal_stop.
                 self.handle_ptrace_event(pid, evt)?;
                 ptrace::cont(pid, None)?;
             }
@@ -153,30 +161,29 @@ impl TracerLoop {
 
     /// Handles ptrace events (fork, clone, seccomp, etc.).
     fn handle_ptrace_event(&mut self, pid: Pid, evt: i32) -> Result<()> {
-        match evt {
-            libc::PTRACE_EVENT_FORK
-            | libc::PTRACE_EVENT_VFORK
-            | libc::PTRACE_EVENT_CLONE => {
-                process_events::handle_fork(self, pid)?;
+        let fork = ptrace::Event::PTRACE_EVENT_FORK as i32;
+        let vfork = ptrace::Event::PTRACE_EVENT_VFORK as i32;
+        let clone = ptrace::Event::PTRACE_EVENT_CLONE as i32;
+        let exec = ptrace::Event::PTRACE_EVENT_EXEC as i32;
+        let exit = ptrace::Event::PTRACE_EVENT_EXIT as i32;
+        let seccomp = ptrace::Event::PTRACE_EVENT_SECCOMP as i32;
+
+        if evt == fork || evt == vfork || evt == clone {
+            process_events::handle_fork(self, pid)?;
+        } else if evt == exec {
+            process_events::handle_program_replace(self, pid)?;
+        } else if evt == exit {
+            process_events::handle_exit_event(self, pid)?;
+        } else if evt == seccomp {
+            if let Err(e) = handlers::handle_seccomp_stop(self, pid) {
+                event!(
+                    name: "tracer.seccomp.error",
+                    Level::WARN,
+                    pid = pid.as_raw(),
+                    error.message = %e,
+                    "seccomp handler error for pid {{pid}}: {{error.message}}",
+                );
             }
-            libc::PTRACE_EVENT_EXEC => {
-                process_events::handle_program_replace(self, pid)?;
-            }
-            libc::PTRACE_EVENT_EXIT => {
-                process_events::handle_exit_event(self, pid)?;
-            }
-            libc::PTRACE_EVENT_SECCOMP => {
-                if let Err(e) = handlers::handle_seccomp_stop(self, pid) {
-                    event!(
-                        name: "tracer.seccomp.error",
-                        Level::WARN,
-                        pid = pid.as_raw(),
-                        error.message = %e,
-                        "seccomp handler error for pid {{pid}}: {{error.message}}",
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }

@@ -6,10 +6,11 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use nix::unistd::Pid;
+use nix::unistd::{ForkResult, Pid, close, execvpe, pipe, read, write};
 use tracing::{Level, event};
 
 /// Subdirectories under `data_dir` required at startup.
@@ -35,20 +36,22 @@ pub fn create_data_dirs(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Forks a child process that installs seccomp, signals readiness via
-/// `PTRACE_TRACEME` + `SIGSTOP`, then execs the agent command.
+/// Forks a child process that waits for ptrace attachment, then
+/// installs seccomp and execs the agent command.
 ///
-/// The parent receives the child PID for ptrace attachment.
+/// Returns `(child_pid, sync_pipe_write_fd)`. The caller must pass
+/// `sync_pipe_write_fd` to the tracer loop which writes to it after
+/// completing `PTRACE_SEIZE` on the child.
 ///
 /// # Errors
 ///
-/// Returns an error if `fork()` fails or the command path cannot be
-/// converted to a C string.
+/// Returns an error if `fork()` or pipe creation fails, or if the
+/// command path cannot be converted to a C string.
 pub fn spawn_agent(
     command: &[String],
     env_vars: &HashMap<String, String>,
     working_dir: &Path,
-) -> Result<Pid> {
+) -> Result<(Pid, RawFd)> {
     if command.is_empty() {
         bail!("agent command must not be empty");
     }
@@ -67,115 +70,74 @@ pub fn spawn_agent(
         .map(|(k, v)| to_cstring(&format!("{k}={v}")))
         .collect::<Result<_>>()?;
 
-    // SAFETY: fork() is called once; child immediately sets up ptrace
-    // and execs, parent returns the child PID. No shared mutable state
-    // is accessed between fork and exec.
-    let fork_result = unsafe { libc::fork() };
+    // Sync pipe: child blocks on read until parent completes PTRACE_SEIZE.
+    let (pipe_r, pipe_w) = pipe().context("pipe() for sync failed")?;
 
-    if fork_result < 0 {
-        return Err(std::io::Error::last_os_error()).context("fork() failed");
+    // SAFETY: fork() is called once; child blocks on pipe then execs,
+    // parent returns immediately. No shared mutable state between
+    // fork and exec.
+    match unsafe { nix::unistd::fork() }.context("fork() failed")? {
+        ForkResult::Child => {
+            drop(pipe_w);
+            child_setup(&c_program, &c_argv, &c_env, working_dir, pipe_r);
+        }
+        ForkResult::Parent { child } => {
+            // Extract the raw fd before dropping — the tracer loop
+            // takes ownership and will close it after PTRACE_SEIZE.
+            let raw_w = pipe_w.as_raw_fd();
+            // Leak ownership so the fd stays open for the tracer.
+            std::mem::forget(pipe_w);
+            drop(pipe_r);
+
+            event!(
+                name: "supervisor.agent.spawned",
+                Level::INFO,
+                agent.pid = child.as_raw(),
+                "spawned agent process with pid {{agent.pid}}",
+            );
+
+            Ok((child, raw_w))
+        }
     }
-
-    if fork_result == 0 {
-        // Child process: set up ptrace, seccomp, then exec.
-        child_setup(&c_program, &c_argv, &c_env, working_dir);
-    }
-
-    let child_pid = Pid::from_raw(fork_result);
-    event!(
-        name: "supervisor.agent.spawned",
-        Level::INFO,
-        agent.pid = fork_result,
-        "spawned agent process with pid {{agent.pid}}",
-    );
-
-    // Wait for the child's initial SIGSTOP before returning, so the
-    // caller can safely attach ptrace options.
-    wait_for_child_stop(child_pid)?;
-
-    Ok(child_pid)
 }
 
-/// Child-side setup: change directory, install seccomp, signal parent
-/// via `PTRACE_TRACEME` + `SIGSTOP`, then exec.
+/// Child-side setup: wait for parent's seize, install seccomp, exec.
 ///
-/// This function never returns on success; it calls `_exit(1)` on failure.
+/// This function never returns on success; it aborts on failure.
 fn child_setup(
     program: &CString,
     argv: &[CString],
     envp: &[CString],
     working_dir: &Path,
+    pipe_r: OwnedFd,
 ) -> ! {
-    // Change to workspace directory before exec.
     if std::env::set_current_dir(working_dir).is_err() {
-        // SAFETY: _exit is async-signal-safe.
-        unsafe { libc::_exit(1) };
+        // SAFETY: _exit is async-signal-safe and avoids running
+        // destructors in the forked child.
+        unsafe { nix::libc::_exit(71) };
     }
 
-    // Request ptrace attachment from the parent.
-    // SAFETY: standard ptrace setup in forked child before exec.
-    unsafe {
-        if libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0) < 0 {
-            libc::_exit(1);
-        }
+    // Block until parent completes PTRACE_SEIZE on us.
+    let mut buf = [0u8; 1];
+    let _ = read(&pipe_r, &mut buf);
+    drop(pipe_r);
+
+    // Install seccomp filter — parent has already seized us so
+    // SECCOMP_RET_TRACE will produce ptrace stops, not SIGSYS.
+    // Seccomp is unavailable under Rosetta/QEMU emulation; warn
+    // and continue so the supervisor can still track process
+    // lifecycle via ptrace fork/exec/exit events.
+    if let Err(e) = sandbox::tracer::seccomp::install_seccomp_filter() {
+        let msg = format!("seccomp install failed (syscall tracing disabled): {e}\n");
+        let _ = nix::unistd::write(std::io::stderr(), msg.as_bytes());
     }
 
-    // Stop ourselves so the parent can set ptrace options.
-    // SAFETY: SIGSTOP is safe to raise in child after PTRACE_TRACEME.
-    unsafe {
-        libc::raise(libc::SIGSTOP);
-    }
-
-    // Install seccomp filter after ptrace is established.
-    if sandbox::tracer::seccomp::install_seccomp_filter().is_err() {
-        // SAFETY: _exit is async-signal-safe.
-        unsafe { libc::_exit(1) };
-    }
-
-    // Build null-terminated pointer arrays for execvpe.
-    let argv_ptrs: Vec<*const libc::c_char> = argv
-        .iter()
-        .map(|a| a.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-    let envp_ptrs: Vec<*const libc::c_char> = envp
-        .iter()
-        .map(|e| e.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-
-    // SAFETY: argv and envp are valid null-terminated arrays.
-    // execvpe replaces the process image on success, _exit on failure.
-    unsafe {
-        libc::execvpe(
-            program.as_ptr(),
-            argv_ptrs.as_ptr(),
-            envp_ptrs.as_ptr(),
-        );
-        libc::_exit(1)
-    }
-}
-
-/// Waits for the child to hit its initial `SIGSTOP`.
-fn wait_for_child_stop(pid: Pid) -> Result<()> {
-    let mut status: libc::c_int = 0;
-    // SAFETY: waiting on our own child process.
-    let ret = unsafe { libc::waitpid(pid.as_raw(), &mut status, 0) };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("waitpid for child SIGSTOP failed");
-    }
-
-    let stopped = libc::WIFSTOPPED(status);
-    if !stopped {
-        bail!(
-            "child {} did not stop as expected (wait status=0x{:x})",
-            pid,
-            status,
-        );
-    }
-
-    Ok(())
+    // execvpe replaces the process image on success; unreachable
+    // on success. nix's execvpe takes &CStr references.
+    let argv_refs: Vec<&CString> = argv.iter().collect();
+    let envp_refs: Vec<&CString> = envp.iter().collect();
+    let _err = execvpe(program, &argv_refs, &envp_refs);
+    unsafe { nix::libc::_exit(73) }
 }
 
 /// Converts a string to a `CString`, adding context on failure.

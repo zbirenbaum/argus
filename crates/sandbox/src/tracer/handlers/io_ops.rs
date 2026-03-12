@@ -1,7 +1,6 @@
 //! Read, write, pipe, and PTY syscall handlers.
 
 use anyhow::Result;
-use libc::user_regs_struct;
 use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
@@ -10,7 +9,7 @@ use crate::events::EventPayload;
 use crate::events::file as ef;
 use crate::events::io as eio;
 use crate::state::{FdTarget, PipeEnd};
-use crate::tracer::regs;
+use crate::tracer::regs::{self, UserRegs};
 use crate::tracer::trace_loop::TracerLoop;
 
 /// Handles read/pread64/readv/preadv.
@@ -21,7 +20,7 @@ use crate::tracer::trace_loop::TracerLoop;
 pub fn handle_read(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let size = regs::arg3(r);
@@ -90,7 +89,7 @@ pub fn handle_read(
 pub fn handle_write(
     tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let size = regs::arg3(r);
@@ -169,7 +168,7 @@ pub fn handle_write(
 pub fn handle_pipe(
     _tracer: &mut TracerLoop,
     pid: Pid,
-    _r: &user_regs_struct,
+    _r: &UserRegs,
 ) -> Result<()> {
     let pid_u32 = pid.as_raw() as u32;
 
@@ -190,7 +189,7 @@ pub fn handle_pipe(
 pub fn handle_lseek(
     _tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let pid_u32 = pid.as_raw() as u32;
@@ -210,7 +209,7 @@ pub fn handle_lseek(
 pub fn handle_ioctl(
     _tracer: &mut TracerLoop,
     pid: Pid,
-    r: &user_regs_struct,
+    r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
     let request = regs::arg2(r);

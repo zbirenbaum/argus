@@ -1,5 +1,5 @@
 FROM rust:1.94-bookworm
- 
+
 # System deps: ptrace debugging, build essentials, TLS proxy
 RUN apt-get update && apt-get install -y \
     strace \
@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
     neovim \
     mold \
     clang \
+    musl-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (required by Claude Code)
@@ -34,7 +35,8 @@ RUN pipx install mitmproxy
 ENV PATH="/root/.local/bin:${PATH}"
 
 # Rust tooling
-RUN rustup component add clippy rustfmt rust-analyzer
+RUN rustup component add clippy rustfmt rust-analyzer \
+    && rustup target add aarch64-unknown-linux-musl
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 RUN cargo binstall -y cargo-watch cargo-nextest
 

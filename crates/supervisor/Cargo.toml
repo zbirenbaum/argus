@@ -16,7 +16,6 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 nix.workspace = true
-libc = "0.2"
 serde_yaml = "0.9"
 
 [dev-dependencies]

@@ -10,7 +10,6 @@ mod metadata_ops;
 mod net_ops;
 
 use anyhow::Result;
-use nix::sys::ptrace;
 use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
@@ -40,7 +39,7 @@ fn check_pause_rules(_pid: Pid, _syscall_nr: u64) -> PauseAction {
 ///
 /// Returns an error if register reads or handler logic fails.
 pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<()> {
-    let regs = ptrace::getregs(pid)?;
+    let regs = super::regs::get_regs(pid)?;
     let nr = super::regs::syscall_nr(&regs);
 
     let _action = check_pause_rules(pid, nr);

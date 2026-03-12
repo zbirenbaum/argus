@@ -19,6 +19,8 @@
 
 **Deliverable:** `./supervisor --agent-id test -- /bin/bash` — complete event stream with dual timestamps, agent_id, stdout/stderr of subprocesses, pipe data flow, PTY traffic, exec events, TLS keylog active.
 
+**Validate with:** Tests 1 (process tracing), 2 (stdio), 4 (pipe topology), 5 (subprocess tree), 6 (escape test), 12 (initial state).
+
 **Not yet:** Content hashes, S3, write locking, Merkle tree, query API.
 
 ---
@@ -45,6 +47,8 @@
 
 **Deliverable:** Full content capture with before/after. Events streaming to S3. Digest cache working. Pause/resume + approval API functional. TLS bodies captured.
 
+**Validate with:** Tests 3 (file write/read/delete), 7 (write locking), 8 (TLS capture), 9 (pause/resume), 10 (pause-before-action).
+
 **Not yet:** Merkle tree, restore, indexes, query API, stdio reconstruction.
 
 ---
@@ -70,6 +74,8 @@
 - Cross-agent foundation: GET /agents (scan S3 for agent_start events)
 
 **Deliverable:** Full query API. Point-in-time restore. Indexes for fast lookups. Stdio reconstruction. CLI tools.
+
+**Validate with:** Tests 11 (snapshot and restore), 12 (initial state). Full integration test: trace coding agent building Argus.
 
 **Not yet:** Multi-agent orchestration, Helm chart, Web UI.
 

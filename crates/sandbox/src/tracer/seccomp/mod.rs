@@ -1,3 +1,4 @@
+// Rust guideline compliant 2026-02-21
 //! Seccomp-BPF filter for x86_64 syscall interception.
 //!
 //! Installs a BPF program that selectively traps syscalls via
@@ -6,7 +7,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::tracer::seccomp::bpf::{build_filter_program, SyscallAction};
+use crate::tracer::seccomp::bpf::{SockFilter, SyscallAction, build_filter_program};
 
 mod bpf;
 mod syscalls;
@@ -15,18 +16,20 @@ pub use syscalls::{BLOCKED_SYSCALLS, TRACED_SYSCALLS};
 
 /// Installs the seccomp-BPF filter for ptrace syscall tracing.
 ///
-/// Must be called in the child process after `fork()` and before `exec()`.
-/// Sets `PR_SET_NO_NEW_PRIVS` first (required by seccomp), then loads the
-/// BPF program that routes syscalls to ptrace stops, errno returns, or
-/// native execution.
+/// Must be called in the child process after `fork()` and before
+/// `exec()`. Sets `PR_SET_NO_NEW_PRIVS` first (required by seccomp),
+/// then loads the BPF program that routes syscalls to ptrace stops,
+/// errno returns, or native execution.
 ///
 /// # Errors
 ///
-/// Returns an error if `prctl` calls fail (e.g., missing `CAP_SYS_ADMIN`
-/// or kernel seccomp support).
+/// Returns an error if `prctl` calls fail (e.g., missing
+/// `CAP_SYS_ADMIN` or kernel seccomp support).
 pub fn install_seccomp_filter() -> Result<()> {
-    // Required before seccomp filter installation on unprivileged processes.
-    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    // SAFETY: prctl with PR_SET_NO_NEW_PRIVS is safe and idempotent.
+    let ret = unsafe {
+        nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+    };
     if ret != 0 {
         return Err(std::io::Error::last_os_error())
             .context("prctl(PR_SET_NO_NEW_PRIVS) failed");
@@ -47,20 +50,22 @@ pub fn install_seccomp_filter() -> Result<()> {
 
     let program = build_filter_program(&actions);
 
-    let prog = libc::sock_fprog {
+    // Cast our SockFilter array to libc::sock_filter — identical
+    // #[repr(C)] layout: {u16, u8, u8, u32}.
+    let filter_ptr = program.as_ptr().cast::<nix::libc::sock_filter>();
+
+    let prog = nix::libc::sock_fprog {
         len: program.len() as u16,
-        // SAFETY: kernel does not mutate the BPF filter array
-        filter: program.as_ptr() as *mut libc::sock_filter,
+        filter: filter_ptr as *mut nix::libc::sock_filter,
     };
 
     // SAFETY: `prog` points to a valid BPF program that lives for the
-    // duration of this call. `prctl` with `PR_SET_SECCOMP` copies the
-    // program into the kernel, so no lifetime issues after return.
+    // duration of this call. prctl copies the program into the kernel.
     let ret = unsafe {
-        libc::prctl(
-            libc::PR_SET_SECCOMP,
-            libc::SECCOMP_MODE_FILTER,
-            &prog as *const libc::sock_fprog,
+        nix::libc::prctl(
+            nix::libc::PR_SET_SECCOMP,
+            nix::libc::SECCOMP_MODE_FILTER,
+            &prog as *const nix::libc::sock_fprog,
         )
     };
     if ret != 0 {
@@ -76,9 +81,10 @@ pub fn trapped_syscalls() -> &'static [u64] {
     TRACED_SYSCALLS
 }
 
-/// Returns `true` if the given syscall number will be trapped by the filter.
+/// Returns `true` if the given syscall number will be trapped.
 pub fn is_trapped(syscall_nr: u64) -> bool {
-    TRACED_SYSCALLS.contains(&syscall_nr) || BLOCKED_SYSCALLS.contains(&syscall_nr)
+    TRACED_SYSCALLS.contains(&syscall_nr)
+        || BLOCKED_SYSCALLS.contains(&syscall_nr)
 }
 
 #[cfg(test)]
@@ -87,7 +93,10 @@ mod tests {
 
     #[test]
     fn trapped_syscalls_count() {
-        assert_eq!(TRACED_SYSCALLS.len(), 61, "expected 61 traced syscalls");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(TRACED_SYSCALLS.len(), 61, "expected 61 traced syscalls on x86_64");
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(TRACED_SYSCALLS.len(), 44, "expected 44 traced syscalls on aarch64");
         assert_eq!(BLOCKED_SYSCALLS.len(), 3, "expected 3 blocked syscalls");
     }
 
@@ -107,10 +116,17 @@ mod tests {
 
     #[test]
     fn is_trapped_returns_false_for_untraced() {
-        // getpid (39) is not in either list
-        assert!(!is_trapped(39), "getpid should not be trapped");
-        // getuid (102)
-        assert!(!is_trapped(102), "getuid should not be trapped");
+        // getpid: 39 on x86_64, 172 on aarch64
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert!(!is_trapped(39), "getpid should not be trapped");
+            assert!(!is_trapped(102), "getuid should not be trapped");
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert!(!is_trapped(172), "getpid should not be trapped");
+            assert!(!is_trapped(174), "getuid should not be trapped");
+        }
     }
 
     #[test]
@@ -158,45 +174,50 @@ mod tests {
     #[test]
     #[ignore]
     fn install_filter_succeeds_on_linux() {
-        // Fork a child, attach ptrace, install filter, and let it exit.
-        // SECCOMP_RET_TRACE without a ptracer kills the process, so the
-        // parent must act as a minimal tracer.
-        //
+        use nix::sys::ptrace;
+        use nix::sys::signal::Signal;
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+        use nix::unistd::ForkResult;
+
         // SAFETY: fork/ptrace/waitpid in a controlled test.
         unsafe {
-            let pid = libc::fork();
-            assert!(pid >= 0, "fork failed");
+            match nix::unistd::fork().expect("fork failed") {
+                ForkResult::Child => {
+                    ptrace::traceme().expect("traceme failed");
+                    nix::sys::signal::raise(Signal::SIGSTOP)
+                        .expect("raise failed");
+                    install_seccomp_filter()
+                        .expect("filter install failed");
+                    std::process::exit(0);
+                }
+                ForkResult::Parent { child } => {
+                    waitpid(child, None).expect("waitpid failed");
+                    ptrace::cont(child, None).expect("cont failed");
 
-            if pid == 0 {
-                // Let parent attach before we install the filter.
-                libc::ptrace(libc::PTRACE_TRACEME, 0, 0, 0);
-                libc::raise(libc::SIGSTOP);
-                install_seccomp_filter().expect("filter install failed");
-                libc::_exit(0);
-            }
-
-            // Wait for child's initial SIGSTOP.
-            let mut status: libc::c_int = 0;
-            libc::waitpid(pid, &mut status, 0);
-
-            // Resume and handle seccomp stops until child exits.
-            libc::ptrace(libc::PTRACE_CONT, pid, 0, 0);
-            loop {
-                let ret = libc::waitpid(pid, &mut status, 0);
-                if ret < 0 {
-                    let err = std::io::Error::last_os_error();
-                    // ECHILD means no more children (possible with threads).
-                    if err.raw_os_error() == Some(libc::ECHILD) {
-                        break;
+                    loop {
+                        match waitpid(
+                            child,
+                            Some(WaitPidFlag::__WALL),
+                        ) {
+                            Ok(WaitStatus::Exited(_, code)) => {
+                                assert_eq!(code, 0);
+                                break;
+                            }
+                            Ok(WaitStatus::Stopped(pid, _))
+                            | Ok(WaitStatus::PtraceEvent(
+                                pid,
+                                _,
+                                _,
+                            )) => {
+                                ptrace::cont(pid, None)
+                                    .expect("cont failed");
+                            }
+                            Err(nix::errno::Errno::ECHILD) => break,
+                            Err(e) => panic!("waitpid failed: {e}"),
+                            _ => {}
+                        }
                     }
-                    panic!("waitpid failed: {err}");
                 }
-                if libc::WIFEXITED(status) {
-                    assert_eq!(libc::WEXITSTATUS(status), 0);
-                    break;
-                }
-                // Continue past any ptrace stops (seccomp or signal).
-                libc::ptrace(libc::PTRACE_CONT, pid, 0, 0);
             }
         }
     }

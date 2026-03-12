@@ -24,3 +24,4 @@ sha2 = "0.10"
 nix = { version = "0.30", features = ["ptrace", "signal", "process", "fs", "dir", "mount"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

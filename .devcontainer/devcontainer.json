@@ -34,7 +34,5 @@
         "rust-analyzer.check.command": "clippy"
       }
     }
-  },
-  "postCreateCommand": "cargo fetch",
-  "remoteUser": "root"
+  }
 }
