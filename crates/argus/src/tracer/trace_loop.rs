@@ -23,6 +23,7 @@ use tracing::Level;
 use crate::cas::CasStore;
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::file as ef;
+use crate::snapshot::MerkleTree;
 use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
 use crate::tracer::{handlers, memory, process_events};
 
@@ -77,6 +78,7 @@ pub struct TracerLoop {
     pub pty_registry: PtyRegistry,
     pub write_locks: WriteLocks,
     pub cas: Arc<CasStore>,
+    pub tree: MerkleTree,
     /// Captures awaiting syscall-exit to hash the post-mutation content.
     pub pending_captures: HashMap<u32, PendingCapture>,
     /// Last known content hash per path, used as before_hash for the
@@ -109,6 +111,7 @@ impl TracerLoop {
             pty_registry: PtyRegistry::new(),
             write_locks: WriteLocks::new(),
             cas,
+            tree: MerkleTree::new(),
             pending_captures: HashMap::new(),
             path_hashes: HashMap::new(),
             active_writes: HashMap::new(),
@@ -285,6 +288,12 @@ impl TracerLoop {
 
             let path_for_queue = cap.path.clone();
 
+            let tree_hash = if let Some(ref h) = after_hash {
+                self.tree_update(&cap.path, h)
+            } else {
+                self.tree_root()
+            };
+
             match cap.kind {
                 CaptureKind::Write { fd, size } => {
                     self.emit(EventPayload::Write(ef::Write {
@@ -295,7 +304,7 @@ impl TracerLoop {
                         size,
                         before_hash,
                         after_hash: after_hash.clone(),
-                        tree_hash: None,
+                        tree_hash,
                     }));
                 }
                 CaptureKind::OpenTrunc => {
@@ -308,7 +317,7 @@ impl TracerLoop {
                             size: 0,
                             before_hash,
                             after_hash: after_hash.clone(),
-                            tree_hash: None,
+                            tree_hash,
                         }));
                     }
                 }
@@ -428,6 +437,35 @@ impl TracerLoop {
             .add_process(pid_u32, 0, binary, argv, cwd, fds);
 
         Ok(())
+    }
+
+    /// Updates the Merkle tree for a file write and returns the new root hash.
+    pub fn tree_update(&mut self, path: &str, content_hash: &str) -> Option<String> {
+        use crate::cas::ContentHash;
+        if let Ok(h) = ContentHash::try_from(content_hash.to_string()) {
+            self.tree.update(PathBuf::from(path), h);
+            Some(self.tree.root_hash().to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Removes a file from the Merkle tree and returns the new root hash.
+    pub fn tree_remove(&mut self, path: &str) -> Option<String> {
+        self.tree.remove(std::path::Path::new(path));
+        Some(self.tree.root_hash().to_string())
+    }
+
+    /// Renames a file in the Merkle tree and returns the new root hash.
+    pub fn tree_rename(&mut self, old: &str, new: &str) -> Option<String> {
+        self.tree
+            .rename(std::path::Path::new(old), PathBuf::from(new));
+        Some(self.tree.root_hash().to_string())
+    }
+
+    /// Returns the current Merkle tree root hash.
+    pub fn tree_root(&self) -> Option<String> {
+        Some(self.tree.root_hash().to_string())
     }
 
     /// Emits an event through the channel.
@@ -633,5 +671,45 @@ mod tests {
 
         // A write to a different path should not be blocked.
         assert!(!tracer.active_writes.contains_key("/workspace/b.txt"));
+    }
+
+    #[test]
+    fn tree_update_populates_root_hash() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let hash = crate::cas::ContentHash::from_data(b"hello");
+        let root = tracer.tree_update("/workspace/f.txt", hash.as_str());
+        assert!(root.is_some());
+        assert_eq!(tracer.tree.file_count(), 1);
+    }
+
+    #[test]
+    fn tree_rename_moves_entry() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let hash = crate::cas::ContentHash::from_data(b"data");
+        tracer.tree_update("/workspace/a.txt", hash.as_str());
+        tracer.tree_rename("/workspace/a.txt", "/workspace/b.txt");
+
+        assert!(!tracer.tree.contains(std::path::Path::new("/workspace/a.txt")));
+        assert!(tracer.tree.contains(std::path::Path::new("/workspace/b.txt")));
+    }
+
+    #[test]
+    fn tree_remove_deletes_entry() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let hash = crate::cas::ContentHash::from_data(b"data");
+        tracer.tree_update("/workspace/f.txt", hash.as_str());
+        assert_eq!(tracer.tree.file_count(), 1);
+
+        tracer.tree_remove("/workspace/f.txt");
+        assert_eq!(tracer.tree.file_count(), 0);
     }
 }

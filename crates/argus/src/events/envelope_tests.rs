@@ -292,6 +292,10 @@ fn all_variants_round_trip() {
         EventPayload::ApprovalDenied(control::ApprovalDenied {
             pid: 1, rule_name: "no_rm".into(), approver: "admin".into(),
         }),
+        EventPayload::InitialFile(snapshot::InitialFile {
+            pid: 1, path: "/workspace/f.txt".into(),
+            content_hash: "ab".repeat(32), size: 100, mode: 0o644,
+        }),
         EventPayload::InitialState(snapshot::InitialState {
             tree_hash: None, file_count: 10, total_size: 1024,
         }),

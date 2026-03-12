@@ -38,11 +38,12 @@ pub fn handle_rename(
         _ => return Ok(()),
     };
 
+    let tree_hash = tracer.tree_rename(&old_path, &new_path);
     tracer.emit(EventPayload::Rename(ef::Rename {
         pid: pid_u32,
         old_path,
         new_path,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -66,11 +67,12 @@ pub fn handle_unlink(
         _ => return Ok(()),
     };
 
+    let tree_hash = tracer.tree_remove(&path);
     tracer.emit(EventPayload::Unlink(ef::Unlink {
         pid: pid_u32,
         path,
         content_hash: None,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -94,10 +96,11 @@ pub fn handle_mkdir(
         _ => return Ok(()),
     };
 
+    let tree_hash = tracer.tree_root();
     tracer.emit(EventPayload::Mkdir(ef::Mkdir {
         pid: pid_u32,
         path,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -111,10 +114,11 @@ pub fn handle_rmdir(
     let pid_u32 = pid.as_raw() as u32;
     let path = memory::read_c_string(pid, regs::arg1(r))?;
 
+    let tree_hash = tracer.tree_root();
     tracer.emit(EventPayload::Rmdir(ef::Rmdir {
         pid: pid_u32,
         path,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -174,6 +178,7 @@ pub fn handle_truncate(
         _ => return Ok(()),
     };
 
+    let tree_hash = tracer.tree_root();
     tracer.emit(EventPayload::Truncate(ef::Truncate {
         pid: pid_u32,
         path,
@@ -181,7 +186,7 @@ pub fn handle_truncate(
         new_size,
         before_hash: None,
         after_hash: None,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -212,11 +217,19 @@ pub fn handle_link(
         _ => return Ok(()),
     };
 
+    // Hard link: link_path gets the same content hash as target.
+    let tree_hash = if let Some(h) = tracer.tree.get(std::path::Path::new(&target)) {
+        let h = h.clone();
+        tracer.tree.update(std::path::PathBuf::from(&link_path), h);
+        Some(tracer.tree.root_hash().to_string())
+    } else {
+        tracer.tree_root()
+    };
     tracer.emit(EventPayload::Link(ef::Link {
         pid: pid_u32,
         target,
         link_path,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }
@@ -284,11 +297,12 @@ pub fn handle_symlink(
         _ => return Ok(()),
     };
 
+    let tree_hash = tracer.tree_root();
     tracer.emit(EventPayload::Symlink(ef::Symlink {
         pid: pid_u32,
         target,
         link_path,
-        tree_hash: None,
+        tree_hash,
     }));
     Ok(())
 }

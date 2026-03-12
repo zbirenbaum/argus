@@ -125,6 +125,7 @@ pub fn handle_write(
 
     match target {
         FdTarget::File { path } => {
+            let tree_hash = tracer.tree_root();
             tracer.emit(EventPayload::Write(ef::Write {
                 pid: pid_u32,
                 path: path.to_string_lossy().into_owned(),
@@ -133,7 +134,7 @@ pub fn handle_write(
                 size,
                 before_hash: None,
                 after_hash: None,
-                tree_hash: None,
+                tree_hash,
             }));
         }
         FdTarget::Pipe { inode, .. } => {

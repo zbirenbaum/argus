@@ -24,6 +24,20 @@ pub struct Checkpoint {
     pub checkpoint_s3_key: String,
 }
 
+/// A pre-existing file discovered during the startup filesystem walk.
+///
+/// Emitted once per file before the [`InitialState`] summary event.
+/// Carries enough information for event-log-only replay to reconstruct
+/// the initial tree without reading CAS tree objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InitialFile {
+    pub pid: u32,
+    pub path: String,
+    pub content_hash: String,
+    pub size: u64,
+    pub mode: u32,
+}
+
 /// A memory-mapped file was detected (untrackable writes).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MmapWarning {
@@ -60,6 +74,20 @@ mod tests {
         let json = serde_json::to_string(&c).unwrap();
         let back: Checkpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn initial_file_round_trip() {
+        let f = InitialFile {
+            pid: 1,
+            path: "/workspace/existing.txt".into(),
+            content_hash: "ab".repeat(32),
+            size: 256,
+            mode: 0o644,
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: InitialFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
     }
 
     #[test]

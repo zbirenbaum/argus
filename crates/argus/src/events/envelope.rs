@@ -65,6 +65,7 @@ pub enum EventPayload {
     ApprovalDenied(control::ApprovalDenied),
 
     // Snapshot
+    InitialFile(snapshot::InitialFile),
     InitialState(snapshot::InitialState),
     Checkpoint(snapshot::Checkpoint),
     MmapWarning(snapshot::MmapWarning),
@@ -182,6 +183,7 @@ impl EventPayload {
             Self::PendingApproval(_) => "pending_approval",
             Self::ApprovalGranted(_) => "approval_granted",
             Self::ApprovalDenied(_) => "approval_denied",
+            Self::InitialFile(_) => "initial_file",
             Self::InitialState(_) => "initial_state",
             Self::Checkpoint(_) => "checkpoint",
             Self::MmapWarning(_) => "mmap_warning",
@@ -221,6 +223,7 @@ impl EventPayload {
             Self::ApprovalGranted(a) => Some(a.pid),
             Self::ApprovalDenied(a) => Some(a.pid),
             Self::MmapWarning(m) => Some(m.pid),
+            Self::InitialFile(f) => Some(f.pid),
             Self::AgentStart(_)
             | Self::AgentPause(_)
             | Self::AgentResume(_)
@@ -246,6 +249,7 @@ impl EventPayload {
             Self::Link(l) => vec![&l.target, &l.link_path],
             Self::Symlink(s) => vec![&s.target, &s.link_path],
             Self::MmapWarning(m) => vec![&m.path],
+            Self::InitialFile(f) => vec![&f.path],
             _ => vec![],
         }
     }

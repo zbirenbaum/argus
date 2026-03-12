@@ -49,7 +49,8 @@ Steps that can't be retrofitted are marked.
       REQUESTS_CA_BUNDLE=/etc/ssl/certs/argus-ca.pem
 7.  Snapshot initial filesystem state:                      ← CAN'T RETROFIT
       Walk watched paths → hash every file into CAS → build Merkle tree
-      This is commit zero. Emit initial_state event.
+      Emit initial_file event per file (path, content_hash, size, mode).
+      This is commit zero. Emit initial_state summary event (tree_hash, file_count, total_size).
       S3 uploads enqueued (agent doesn't wait for S3, only for hashing)
 8.  fork()
 9.  Child: PTRACE_TRACEME → exec(agent with env from step 6)

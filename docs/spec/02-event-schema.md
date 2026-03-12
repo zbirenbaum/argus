@@ -167,10 +167,13 @@ Local filesystem events don't need vclock (seq is sufficient within one agent).
 ### Snapshot
 
 | Type | Fields |
-|------|--------|
+|-|-|
+| initial_file | pid, path, content_hash, size, mode |
 | initial_state | tree_hash, file_count, total_size |
 | checkpoint | seq, tree_hash, checkpoint_s3_key |
 | mmap_warning | pid, path, fd, prot, flags |
+
+`initial_file` events are emitted once per pre-existing file during the startup filesystem walk, before the `initial_state` summary. They enable event-log-only replay without reading CAS tree objects.
 
 ## Ordering Rules
 
