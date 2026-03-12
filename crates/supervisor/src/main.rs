@@ -5,9 +5,12 @@
 //! (CA generation, mitmdump proxy, event writer), spawns the traced agent
 //! process, and enters the ptrace loop.
 
+mod event_sink;
 mod event_writer;
+mod pipeline_sink;
 mod signals;
 mod startup;
+mod stdout_sink;
 mod tls_watcher;
 
 use std::fs;
@@ -26,7 +29,12 @@ use argus::cas::LocalCas;
 use argus::config::SupervisorConfig;
 use argus::events::{Event, EventPayload, SequenceGenerator};
 use argus::net;
+use argus::storage::{DynObjectStore, S3Client, StoragePipeline};
 use argus::tracer::TracerLoop;
+
+use crate::event_sink::EventSink;
+use crate::pipeline_sink::PipelineSink;
+use crate::stdout_sink::StdoutSink;
 
 /// Argus supervisor -- ptrace-based filesystem versioning.
 #[derive(Debug, Parser)]
@@ -127,7 +135,8 @@ fn main() -> Result<()> {
     // with tracer sequences while both generators are lock-free.
     let tls_seq = SequenceGenerator::new(1_000_000);
 
-    let writer_handle = event_writer::spawn(event_rx);
+    let (sinks, _storage_rt) = build_sinks(&config)?;
+    let writer_handle = event_writer::spawn(event_rx, sinks);
 
     emit_agent_start(&event_tx, &config, &tracer_seq);
 
@@ -215,6 +224,7 @@ fn main() -> Result<()> {
         &config.agent_command,
         &agent_env,
         &config.workspace_dir,
+        config.run_as.as_ref(),
     )?;
 
     // Drain agent stdout/stderr to supervisor's stderr so stdout
@@ -266,8 +276,11 @@ fn main() -> Result<()> {
     event!(Level::DEBUG, "shutdown: dropping tracer");
     drop(tracer);
     event!(Level::DEBUG, "shutdown: joining writer thread");
-    writer_handle.join().expect("event writer thread panicked");
+    let sinks = writer_handle.join().expect("event writer thread panicked");
     event!(Level::DEBUG, "shutdown: writer thread joined");
+
+    // Drain the upload pool so all events reach S3 before exit.
+    shutdown_pipeline_sinks(sinks);
 
     event!(Level::DEBUG, "shutdown: joining stdout drain");
     let _ = stdout_drain.join();
@@ -377,6 +390,98 @@ fn emit_agent_start(
             error.message = %e,
             "failed to send AgentStart event: {{error.message}}",
         );
+    }
+}
+
+/// Build all event sinks: always stdout, plus S3 pipeline when configured.
+///
+/// Returns the sink list and an optional tokio runtime that must stay
+/// alive for the upload pool's background tasks.
+fn build_sinks(
+    config: &SupervisorConfig,
+) -> Result<(Vec<Box<dyn EventSink>>, Option<tokio::runtime::Runtime>)> {
+    let mut sinks: Vec<Box<dyn EventSink>> = vec![Box::new(StdoutSink::new())];
+    let mut rt = None;
+
+    if let Some(ref s3_config) = config.storage.s3 {
+        // The upload pool calls tokio::spawn, so we need a multi-thread
+        // runtime that stays alive for the process lifetime.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .context("tokio runtime for storage pipeline")?;
+
+        // Enter the runtime so tokio::spawn works during construction.
+        let _guard = runtime.enter();
+
+        let s3_client = runtime
+            .block_on(S3Client::new(s3_config))
+            .context("failed to create S3 client")?;
+
+        let dyn_store = DynObjectStore::new(s3_client);
+        let pipeline = StoragePipeline::new(
+            &config.storage,
+            config.agent_id.clone(),
+            dyn_store,
+            config.durability.default,
+        )
+        .context("failed to create storage pipeline")?;
+
+        event!(
+            name: "supervisor.storage.s3",
+            Level::INFO,
+            s3.bucket = %s3_config.bucket,
+            s3.endpoint = s3_config.endpoint.as_deref().unwrap_or("default"),
+            "storage pipeline initialized with S3 backend",
+        );
+
+        sinks.push(Box::new(PipelineSink::new(pipeline)));
+        rt = Some(runtime);
+    } else {
+        event!(
+            name: "supervisor.storage.local_only",
+            Level::INFO,
+            "no S3 config, running in local-only mode",
+        );
+    }
+
+    Ok((sinks, rt))
+}
+
+/// Extract any `PipelineSink` from the returned sinks and shut it down.
+fn shutdown_pipeline_sinks(sinks: Vec<Box<dyn EventSink>>) {
+    for sink in sinks {
+        // Downcast to PipelineSink to access the async shutdown.
+        let any_sink: Box<dyn std::any::Any> = sink.into_any();
+        if let Ok(ps) = any_sink.downcast::<PipelineSink>() {
+            event!(Level::DEBUG, "shutdown: finalizing storage pipeline");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime for pipeline shutdown");
+            match rt.block_on(ps.into_pipeline().shutdown()) {
+                Ok(stats) => {
+                    event!(
+                        name: "supervisor.pipeline.shutdown",
+                        Level::INFO,
+                        uploaded = stats.uploaded,
+                        failed = stats.failed,
+                        bytes = stats.bytes_uploaded,
+                        "storage pipeline: uploaded={}, failed={}, bytes={}",
+                        stats.uploaded, stats.failed, stats.bytes_uploaded,
+                    );
+                }
+                Err(e) => {
+                    event!(
+                        name: "supervisor.pipeline.error",
+                        Level::ERROR,
+                        error.message = %e,
+                        "storage pipeline shutdown failed: {{error.message}}",
+                    );
+                }
+            }
+        }
     }
 }
 

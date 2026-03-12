@@ -38,6 +38,7 @@ pub struct SupervisorConfig {
     pub agent_id: String,
 
     /// Command and arguments to exec as the traced agent process.
+    #[serde(default)]
     pub agent_command: Vec<String>,
 
     /// Root directory for local CAS, event segments, and indexes.
@@ -68,6 +69,15 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
+    /// Drop privileges to this UID:GID before exec'ing the agent.
+    ///
+    /// When set, the supervisor calls `setgid()`/`setuid()` in the
+    /// forked child before `execvpe()`. The supervisor itself stays
+    /// root (required for ptrace). Omit or set to `null` to run the
+    /// agent as root.
+    #[serde(default)]
+    pub run_as: Option<RunAs>,
+
     /// Rules that immediately deny syscalls with EPERM.
     #[serde(default)]
     pub block: Vec<Rule>,
@@ -75,6 +85,14 @@ pub struct SupervisorConfig {
     /// Rules that pause syscalls for operator approval.
     #[serde(default)]
     pub pause_before: Vec<PauseRule>,
+}
+
+/// UID/GID to drop to before exec'ing the agent process.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunAs {
+    pub uid: u32,
+    #[serde(default)]
+    pub gid: Option<u32>,
 }
 
 impl Default for SupervisorConfig {
@@ -89,6 +107,7 @@ impl Default for SupervisorConfig {
             listen_addr: default_listen_addr(),
             durability: DurabilityConfig::default(),
             tls: TlsConfig::default(),
+            run_as: None,
             block: Vec::new(),
             pause_before: Vec::new(),
         }

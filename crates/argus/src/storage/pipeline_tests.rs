@@ -107,6 +107,7 @@ fn test_config(dir: &std::path::Path) -> StorageConfig {
             event_dir: dir.join("events"),
             max_size: bytesize::ByteSize::mib(10),
             min_retention: Duration::from_secs(0),
+            segment_max_bytes: bytesize::ByteSize::mib(1),
         },
         digest_cache: DigestCacheConfig {
             path: dir.join("digest-cache.bin"),

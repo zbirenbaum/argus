@@ -10,6 +10,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use argus::config::RunAs;
 use nix::unistd::{ForkResult, Pid, execvpe, pipe, read};
 use tracing::{Level, event};
 
@@ -62,6 +63,7 @@ pub fn spawn_agent(
     command: &[String],
     env_vars: &HashMap<String, String>,
     working_dir: &Path,
+    run_as: Option<&RunAs>,
 ) -> Result<SpawnResult> {
     if command.is_empty() {
         bail!("agent command must not be empty");
@@ -107,7 +109,7 @@ pub fn spawn_agent(
             drop(stdout_w);
             drop(stderr_w);
 
-            child_setup(&c_program, &c_argv, &c_env, working_dir, pipe_r);
+            child_setup(&c_program, &c_argv, &c_env, working_dir, pipe_r, run_as);
         }
         ForkResult::Parent { child } => {
             // Extract the raw fd before dropping — the tracer loop
@@ -146,6 +148,7 @@ fn child_setup(
     envp: &[CString],
     working_dir: &Path,
     pipe_r: OwnedFd,
+    run_as: Option<&RunAs>,
 ) -> ! {
     if std::env::set_current_dir(working_dir).is_err() {
         // SAFETY: _exit is async-signal-safe and avoids running
@@ -166,6 +169,25 @@ fn child_setup(
     if let Err(e) = argus::tracer::seccomp::install_seccomp_filter() {
         let msg = format!("seccomp install failed (syscall tracing disabled): {e}\n");
         let _ = nix::unistd::write(std::io::stderr(), msg.as_bytes());
+    }
+
+    // Drop privileges before exec if configured. Must happen after
+    // seccomp install (which may need CAP_SYS_ADMIN) and after
+    // ptrace seize (which the parent does as root).
+    if let Some(ra) = run_as {
+        let gid = ra.gid.unwrap_or(ra.uid);
+        // SAFETY: setgid/setgroups/setuid are async-signal-safe.
+        unsafe {
+            if libc::setgid(gid) != 0 {
+                libc::_exit(74);
+            }
+            // Clear supplementary groups (initgroups needs a username
+            // which we don't have; setgroups(0, []) drops them all).
+            libc::setgroups(0, std::ptr::null());
+            if libc::setuid(ra.uid) != 0 {
+                libc::_exit(75);
+            }
+        }
     }
 
     // execvpe replaces the process image on success; unreachable
@@ -218,7 +240,7 @@ mod tests {
 
     #[test]
     fn spawn_agent_rejects_empty_command() {
-        let result = spawn_agent(&[], &HashMap::new(), Path::new("/"));
+        let result = spawn_agent(&[], &HashMap::new(), Path::new("/"), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }

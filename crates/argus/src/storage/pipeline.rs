@@ -52,10 +52,11 @@ impl StoragePipeline {
         let cas = LocalCas::new(cas_dir.clone())
             .context("create CAS store")?;
 
-        let event_log = EventLog::new(
+        let event_log = EventLog::with_max_segment_bytes(
             agent_id.clone(),
             config.local_buffer.event_dir.clone(),
             durability,
+            config.local_buffer.segment_max_bytes.as_u64(),
         )
         .context("create event log")?;
 
@@ -110,6 +111,18 @@ impl StoragePipeline {
     /// happen automatically when the size threshold is reached.
     pub fn append_event(&mut self, event: &Event) -> Result<()> {
         self.event_log.append(event, Some(&self.upload_pool))
+    }
+
+    /// Force-rotate the current segment and submit it for upload.
+    ///
+    /// Use this for streaming: call periodically so events reach S3
+    /// without waiting for the segment size threshold.
+    pub fn rotate_now(&mut self) -> Result<()> {
+        if self.event_log.current_segment_size() == 0 {
+            return Ok(());
+        }
+        self.event_log.finalize(Some(&self.upload_pool))?;
+        self.event_log.reopen()
     }
 
     /// Drain pending upload confirmations, updating digest cache

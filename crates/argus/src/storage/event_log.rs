@@ -150,7 +150,8 @@ impl EventLog {
     /// Finalize the current segment and submit it for upload.
     ///
     /// Called on explicit close or shutdown. Does not open a new
-    /// segment afterward.
+    /// segment afterward — call [`reopen`](Self::reopen) to continue
+    /// writing.
     ///
     /// # Errors
     ///
@@ -163,6 +164,18 @@ impl EventLog {
         self.submit_segment(upload_pool)?;
         self.writer = None;
         Ok(())
+    }
+
+    /// Open a new segment after finalization.
+    ///
+    /// Bumps the segment sequence and opens a fresh file for writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the new segment file cannot be created.
+    pub fn reopen(&mut self) -> Result<()> {
+        self.segment_seq += 1;
+        self.open_segment()
     }
 
     fn open_segment(&mut self) -> Result<()> {

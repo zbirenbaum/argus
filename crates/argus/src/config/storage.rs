@@ -121,6 +121,10 @@ pub struct LocalBufferConfig {
         with = "humantime_serde"
     )]
     pub min_retention: Duration,
+
+    /// Event log segment size threshold before rotation and upload.
+    #[serde(default = "default_segment_max_bytes")]
+    pub segment_max_bytes: bytesize::ByteSize,
 }
 
 impl Default for LocalBufferConfig {
@@ -130,6 +134,7 @@ impl Default for LocalBufferConfig {
             event_dir: default_event_dir(),
             max_size: default_max_size(),
             min_retention: default_min_retention(),
+            segment_max_bytes: default_segment_max_bytes(),
         }
     }
 }
@@ -218,6 +223,11 @@ fn default_snapshot_interval() -> Duration {
 
 fn default_rebuild_on_start() -> bool {
     true
+}
+
+/// 1 MiB segment threshold — small enough to upload frequently.
+fn default_segment_max_bytes() -> bytesize::ByteSize {
+    bytesize::ByteSize::mib(1)
 }
 
 #[cfg(test)]
