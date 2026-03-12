@@ -68,6 +68,18 @@ impl CasStats {
     }
 }
 
+/// Provider-agnostic storage statistics.
+///
+/// Returned by [`CasBackend::stats`](super::traits::CasBackend::stats)
+/// so callers can monitor any backend without knowing its type.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackendStats {
+    /// Number of objects currently stored.
+    pub object_count: u64,
+    /// Total bytes currently stored.
+    pub total_bytes: u64,
+}
+
 impl Default for CasStats {
     fn default() -> Self {
         Self::new()

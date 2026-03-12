@@ -13,8 +13,8 @@ use tempfile::NamedTempFile;
 use tracing::event;
 
 use super::hash::ContentHash;
-use super::stats::{CasStats, CasStatsSnapshot};
-use super::traits::Cas;
+use super::stats::{BackendStats, CasStats, CasStatsSnapshot};
+use super::traits::{Cas, CasBackend};
 
 /// Local content-addressable store backed by the filesystem.
 ///
@@ -42,29 +42,16 @@ impl LocalCas {
         })
     }
 
-    /// Remove an object from the store.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the object does not exist or removal fails.
-    pub fn delete(&self, hash: &ContentHash) -> Result<()> {
-        let path = self.object_path(hash);
-        let size = fs::metadata(&path)
-            .with_context(|| format!("stat CAS object {hash}"))?
-            .len();
-        fs::remove_file(&path)
-            .with_context(|| format!("delete CAS object {hash}"))?;
-        self.stats.record_delete(size);
-        Ok(())
-    }
-
     /// Filesystem path for an object: `{root}/{prefix}/{suffix}`.
     pub fn object_path(&self, hash: &ContentHash) -> PathBuf {
         self.root.join(hash.prefix()).join(hash.suffix())
     }
 
-    /// Take a snapshot of current store statistics.
-    pub fn stats(&self) -> CasStatsSnapshot {
+    /// Take a detailed snapshot of current store statistics.
+    ///
+    /// Returns the full [`CasStatsSnapshot`] with cumulative counters.
+    /// For the provider-agnostic summary, use [`CasBackend::stats`].
+    pub fn detailed_stats(&self) -> CasStatsSnapshot {
         self.stats.snapshot()
     }
 
@@ -139,6 +126,27 @@ impl Cas for LocalCas {
     }
 }
 
+impl CasBackend for LocalCas {
+    fn delete(&self, hash: &ContentHash) -> Result<()> {
+        let path = self.object_path(hash);
+        let size = fs::metadata(&path)
+            .with_context(|| format!("stat CAS object {hash}"))?
+            .len();
+        fs::remove_file(&path)
+            .with_context(|| format!("delete CAS object {hash}"))?;
+        self.stats.record_delete(size);
+        Ok(())
+    }
+
+    fn stats(&self) -> BackendStats {
+        let snap = self.stats.snapshot();
+        BackendStats {
+            object_count: snap.total_objects,
+            total_bytes: snap.total_bytes,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +180,7 @@ mod tests {
         assert!(path.exists());
 
         // Stats should show only one add (dedup skips the second).
-        let snap = store.stats();
+        let snap = store.detailed_stats();
         assert_eq!(snap.objects_added, 1);
     }
 
@@ -205,7 +213,7 @@ mod tests {
         let data = b"stats delete";
         let hash = store.put(data).expect("put");
         store.delete(&hash).expect("delete");
-        let snap = store.stats();
+        let snap = store.detailed_stats();
         assert_eq!(snap.total_objects, 0);
         assert_eq!(snap.total_bytes, 0);
         // Cumulative counters unchanged.
@@ -236,7 +244,7 @@ mod tests {
         let (_dir, store) = tmp_store();
         store.put(b"aaa").expect("put 1");
         store.put(b"bbbbb").expect("put 2");
-        let snap = store.stats();
+        let snap = store.detailed_stats();
         assert_eq!(snap.objects_added, 2);
         assert_eq!(snap.bytes_added, 8);
         assert_eq!(snap.total_objects, 2);
@@ -251,7 +259,7 @@ mod tests {
         assert!(read_back.is_empty());
         assert!(store.exists(&hash).expect("exists"));
 
-        let snap = store.stats();
+        let snap = store.detailed_stats();
         assert_eq!(snap.objects_added, 1);
         assert_eq!(snap.bytes_added, 0);
     }
@@ -283,7 +291,7 @@ mod tests {
 
         // Exactly one file on disk.
         assert!(store.exists(first).expect("exists"));
-        let snap = store.stats();
+        let snap = store.detailed_stats();
         // At least 1 add, at most 8 (races allowed), but no corruption.
         assert!(snap.objects_added >= 1 && snap.objects_added <= 8);
     }

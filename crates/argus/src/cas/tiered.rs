@@ -1,216 +1,244 @@
-//! Two-tier CAS: local filesystem with remote fallback.
+//! Generic two-tier CAS: fast front cache backed by slow store.
 //!
-//! Writes go to [`LocalCas`] only — async upload to remote is
-//! handled by the storage pipeline's worker pool, not here.
-//! Reads try local first, then pull from [`RemoteCas`] and
-//! backfill the local cache on hit.
+//! `put` writes to the front tier only. Flushing to the back tier
+//! is the caller's responsibility (e.g. an async upload pool).
+//! `get` tries the front first, falls back to the back, and
+//! backfills the front on a hit so subsequent reads are fast.
+
+use std::sync::Arc;
 
 use anyhow::Result;
 
 use super::hash::ContentHash;
-use super::remote::RemoteCas;
-use super::store::LocalCas;
-use super::traits::Cas;
+use super::stats::BackendStats;
+use super::traits::{Cas, CasBackend};
 
-/// Local-first CAS with remote read-through.
+/// Two-tier CAS with front-cache and back-store.
 ///
-/// `put` writes to local only. The storage pipeline is responsible
-/// for async upload to remote and digest cache bookkeeping.
-/// `get` tries local, falls back to remote, and backfills local on
-/// a remote hit so subsequent reads are fast.
+/// Both tiers are `Arc`-wrapped so the struct is cheap to clone.
+/// The ptrace thread and upload workers can each hold a clone
+/// without extra synchronization.
 #[derive(Debug)]
-pub struct TieredCas {
-    local: LocalCas,
-    remote: RemoteCas,
+pub struct TieredCas<Front: CasBackend, Back: CasBackend> {
+    front: Arc<Front>,
+    back: Arc<Back>,
 }
 
-impl TieredCas {
-    /// Create a tiered store from local and remote backends.
-    pub fn new(local: LocalCas, remote: RemoteCas) -> Self {
-        Self { local, remote }
-    }
-
-    /// Direct access to the local tier.
-    pub fn local(&self) -> &LocalCas {
-        &self.local
-    }
-
-    /// Direct access to the remote tier.
-    pub fn remote(&self) -> &RemoteCas {
-        &self.remote
+// Manual Clone: the derive would add `Front: Clone, Back: Clone` bounds,
+// but we only need `Arc<T>: Clone` which is always true.
+impl<Front: CasBackend, Back: CasBackend> Clone for TieredCas<Front, Back> {
+    fn clone(&self) -> Self {
+        Self {
+            front: Arc::clone(&self.front),
+            back: Arc::clone(&self.back),
+        }
     }
 }
 
-impl Cas for TieredCas {
+impl<Front: CasBackend, Back: CasBackend> TieredCas<Front, Back> {
+    /// Compose two backends into a cached tier.
+    pub fn new(front: Arc<Front>, back: Arc<Back>) -> Self {
+        Self { front, back }
+    }
+
+    /// Direct access to the front tier.
+    pub fn front(&self) -> &Front {
+        &self.front
+    }
+
+    /// Direct access to the back tier.
+    pub fn back(&self) -> &Back {
+        &self.back
+    }
+}
+
+impl<Front: CasBackend, Back: CasBackend> Cas for TieredCas<Front, Back> {
     fn get(&self, hash: &ContentHash) -> Result<Vec<u8>> {
-        if let Ok(data) = self.local.get(hash) {
+        if let Ok(data) = self.front.get(hash) {
             return Ok(data);
         }
-        let data = self.remote.get(hash)?;
-        let _ = self.local.put(&data);
+        let data = self.back.get(hash)?;
+        let _ = self.front.put(&data);
         Ok(data)
     }
 
     fn put(&self, content: &[u8]) -> Result<ContentHash> {
-        self.local.put(content)
+        self.front.put(content)
     }
 
     fn exists(&self, hash: &ContentHash) -> Result<bool> {
-        if Cas::exists(&self.local, hash)? {
+        if self.front.exists(hash)? {
             return Ok(true);
         }
-        self.remote.exists(hash)
+        self.back.exists(hash)
+    }
+}
+
+impl<Front: CasBackend, Back: CasBackend> CasBackend for TieredCas<Front, Back> {
+    fn delete(&self, hash: &ContentHash) -> Result<()> {
+        self.front.delete(hash)
+    }
+
+    fn stats(&self) -> BackendStats {
+        self.front.stats()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use super::*;
+    use crate::cas::MemoryCas;
 
-    use anyhow::Result;
+    #[test]
+    fn put_writes_to_front_only() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
 
-    use crate::cas::{Cas, ContentHash, LocalCas, RemoteCas};
-    use crate::storage::object_store_dyn::DynObjectStore;
-    use crate::storage::s3::ObjectStore;
-
-    use super::TieredCas;
-
-    /// Minimal in-memory object store for testing tiered CAS.
-    #[derive(Debug, Default)]
-    struct MockStore {
-        data: Mutex<HashMap<String, Vec<u8>>>,
+        let hash = cached.put(b"hello").unwrap();
+        assert!(front.exists(&hash).unwrap());
+        assert!(!back.exists(&hash).unwrap());
     }
 
-    impl ObjectStore for MockStore {
-        async fn put(&self, key: &str, data: Vec<u8>) -> Result<()> {
-            self.data.lock().unwrap().insert(key.to_owned(), data);
-            Ok(())
-        }
+    #[test]
+    fn get_from_front() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
 
-        async fn get(&self, key: &str) -> Result<Vec<u8>> {
-            self.data
-                .lock()
-                .unwrap()
-                .get(key)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("not found: {key}"))
-        }
-
-        async fn exists(&self, key: &str) -> Result<bool> {
-            Ok(self.data.lock().unwrap().contains_key(key))
-        }
-
-        async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-            Ok(self
-                .data
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|k| k.starts_with(prefix))
-                .cloned()
-                .collect())
-        }
-    }
-
-    fn make_tiered() -> (tempfile::TempDir, TieredCas) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let local = LocalCas::new(dir.path().join("cas")).expect("LocalCas");
-        let remote = RemoteCas::new(DynObjectStore::new(MockStore::default()));
-        (dir, TieredCas::new(local, remote))
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn put_writes_local_only() {
-        let (_dir, tiered) = make_tiered();
-        let hash = tiered.put(b"hello").unwrap();
-
-        assert!(Cas::exists(tiered.local(), &hash).unwrap());
-        // Remote should not have it — put only writes local.
-        let remote_exists = tiered.remote().exists(&hash).unwrap();
-        assert!(!remote_exists);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_from_local() {
-        let (_dir, tiered) = make_tiered();
-        let hash = tiered.put(b"local data").unwrap();
-        let data = tiered.get(&hash).unwrap();
+        let hash = cached.put(b"local data").unwrap();
+        let data = cached.get(&hash).unwrap();
         assert_eq!(data, b"local data");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_falls_back_to_remote() {
-        let (_dir, tiered) = make_tiered();
+    #[test]
+    fn get_falls_back_to_back() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
 
-        // Put directly into remote, bypassing local.
-        let hash = ContentHash::from_data(b"remote only");
-        tiered.remote().put(b"remote only").unwrap();
+        let hash = back.put(b"remote only").unwrap();
+        let cached = TieredCas::new(front.clone(), back.clone());
 
-        assert!(!Cas::exists(tiered.local(), &hash).unwrap());
-        let data = tiered.get(&hash).unwrap();
+        assert!(!front.exists(&hash).unwrap());
+        let data = cached.get(&hash).unwrap();
         assert_eq!(data, b"remote only");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_backfills_local_on_remote_hit() {
-        let (_dir, tiered) = make_tiered();
+    #[test]
+    fn get_backfills_front_on_miss() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
 
-        let hash = ContentHash::from_data(b"backfill me");
-        tiered.remote().put(b"backfill me").unwrap();
+        let hash = back.put(b"hello").unwrap();
+        let cached = TieredCas::new(front.clone(), back.clone());
 
-        assert!(!Cas::exists(tiered.local(), &hash).unwrap());
-        let _ = tiered.get(&hash).unwrap();
-        // Now local should have it.
-        assert!(Cas::exists(tiered.local(), &hash).unwrap());
-        let local_data = tiered.local().get(&hash).unwrap();
-        assert_eq!(local_data, b"backfill me");
+        assert!(!front.exists(&hash).unwrap());
+        let data = cached.get(&hash).unwrap();
+        assert_eq!(data, b"hello");
+        assert!(front.exists(&hash).unwrap());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn get_missing_from_both_errors() {
-        let (_dir, tiered) = make_tiered();
+    #[test]
+    fn get_missing_from_both_errors() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front, back);
+
         let hash = ContentHash::from_data(b"ghost");
-        assert!(tiered.get(&hash).is_err());
+        assert!(cached.get(&hash).is_err());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn exists_checks_local_first() {
-        let (_dir, tiered) = make_tiered();
-        let hash = tiered.put(b"exists local").unwrap();
-        assert!(Cas::exists(&tiered, &hash).unwrap());
+    #[test]
+    fn exists_checks_front_first() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
+
+        let hash = cached.put(b"exists local").unwrap();
+        assert!(cached.exists(&hash).unwrap());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn exists_falls_back_to_remote() {
-        let (_dir, tiered) = make_tiered();
-        let hash = ContentHash::from_data(b"exists remote");
-        tiered.remote().put(b"exists remote").unwrap();
-        assert!(Cas::exists(&tiered, &hash).unwrap());
+    #[test]
+    fn exists_falls_back_to_back() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+
+        let hash = back.put(b"exists remote").unwrap();
+        let cached = TieredCas::new(front, back);
+        assert!(cached.exists(&hash).unwrap());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn exists_false_when_missing() {
-        let (_dir, tiered) = make_tiered();
+    #[test]
+    fn exists_false_when_missing() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front, back);
+
         let hash = ContentHash::from_data(b"nope");
-        assert!(!Cas::exists(&tiered, &hash).unwrap());
+        assert!(!cached.exists(&hash).unwrap());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn second_get_served_from_local() {
-        let (_dir, tiered) = make_tiered();
+    #[test]
+    fn delete_removes_from_front() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
 
-        let hash = ContentHash::from_data(b"cached");
-        tiered.remote().put(b"cached").unwrap();
+        let hash = cached.put(b"evict me").unwrap();
+        assert!(front.exists(&hash).unwrap());
 
-        // First get pulls from remote and backfills.
-        let _ = tiered.get(&hash).unwrap();
-        // Delete from remote to prove second get uses local.
-        // (We can't delete from MockStore easily, but we can verify
-        // local has it and the get succeeds.)
-        assert!(Cas::exists(tiered.local(), &hash).unwrap());
-        let data = tiered.get(&hash).unwrap();
-        assert_eq!(data, b"cached");
+        cached.delete(&hash).unwrap();
+        assert!(!front.exists(&hash).unwrap());
+    }
+
+    #[test]
+    fn stats_reflects_front() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
+
+        cached.put(b"aaa").unwrap();
+        cached.put(b"bbbbb").unwrap();
+
+        let s = cached.stats();
+        assert_eq!(s.object_count, 2);
+        assert_eq!(s.total_bytes, 8);
+    }
+
+    #[test]
+    fn nested_composition() {
+        let inner_front = Arc::new(MemoryCas::new());
+        let inner_back = Arc::new(MemoryCas::new());
+        let inner = Arc::new(TieredCas::new(inner_front.clone(), inner_back.clone()));
+
+        let outer_front = Arc::new(MemoryCas::new());
+        let outer = TieredCas::new(outer_front.clone(), inner.clone());
+
+        // Put into inner back (simulating S3 content)
+        let hash = inner_back.put(b"deep").unwrap();
+
+        // Outer miss → inner miss on front → inner hit on back → backfill both
+        assert!(!outer_front.exists(&hash).unwrap());
+        assert!(!inner_front.exists(&hash).unwrap());
+
+        let data = outer.get(&hash).unwrap();
+        assert_eq!(data, b"deep");
+
+        // Inner front got backfilled by inner TieredCas
+        assert!(inner_front.exists(&hash).unwrap());
+        // Outer front got backfilled by outer TieredCas
+        assert!(outer_front.exists(&hash).unwrap());
+    }
+
+    #[test]
+    fn clone_shares_state() {
+        let front = Arc::new(MemoryCas::new());
+        let back = Arc::new(MemoryCas::new());
+        let cached = TieredCas::new(front.clone(), back.clone());
+
+        let cloned = cached.clone();
+        let hash = cached.put(b"shared").unwrap();
+        assert!(cloned.exists(&hash).unwrap());
     }
 }
 
