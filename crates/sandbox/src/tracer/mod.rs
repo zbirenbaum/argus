@@ -1,3 +1,12 @@
-// ptrace loop, seccomp BPF, syscall handlers
+// Rust guideline compliant 2026-02-21
+//! Ptrace loop, seccomp BPF, and syscall handlers.
 
+pub mod handlers;
+pub mod memory;
+pub mod regs;
 pub mod seccomp;
+pub mod syscall_nr;
+pub mod trace_loop;
+
+#[doc(inline)]
+pub use trace_loop::TracerLoop;
