@@ -21,6 +21,7 @@ serde_yaml = "0.9"
 glob = "0.3"
 humantime-serde = "1"
 bytesize = { version = "2", features = ["serde"] }
+bincode = "1"
 
 [dev-dependencies]
 tempfile = "3"

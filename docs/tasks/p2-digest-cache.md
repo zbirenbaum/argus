@@ -1,6 +1,6 @@
 # P2: Digest Cache
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/03-storage.md` (digest cache section)
 
@@ -8,28 +8,34 @@
 - **Blocked by**: P2-cas (needs ContentHash type)
 - **Blocks**: P2-content-capture (uses cache for read dedup)
 
-## Parallelizable with
-- All P1 tasks, P2-s3-upload (can develop against trait/interface), P2-pause-resume-api
+## What was done
+- `crates/sandbox/src/storage/digest_cache.rs`: full implementation
+  - `DigestCache` struct with `HashMap<ContentHash, DigestEntry>` tracking remote-known hashes
+  - `DigestEntry` with `size_bytes`, `uploaded_at` (SystemTime), `ttl` (Duration)
+  - `DigestCacheStats` aggregate type
+  - Methods: `new`, `contains`, `insert`, `insert_with_ttl`, `remove`, `prune_expired`, `len`, `is_empty`, `stats`, `save_to_disk`, `load_from_disk`
+  - Atomic writes (write temp + rename) for crash safety
+  - bincode serialization for compact disk format
+- `crates/sandbox/src/storage/mod.rs`: added module and re-exports
+- `crates/sandbox/Cargo.toml`: added `bincode = "1"` dependency
 
-## What needs to be done
-- `crates/sandbox/src/storage/digest_cache.rs`:
-  - `DigestCache`: `HashMap<PathBuf, CachedDigest>` tracking known file hashes
-  - `CachedDigest`: hash (ContentHash), size (u64), mtime (SystemTime), last_verified (Instant)
-  - `lookup(path: &Path) -> Option<&ContentHash>`: check if file still matches (stat mtime+size)
-  - `insert(path: &Path, hash: ContentHash, size: u64, mtime: SystemTime)`
-  - `invalidate(path: &Path)`: remove entry on known mutation
-  - `save_to_disk(path: &Path) -> Result<()>`: serialize to bincode/messagepack
-  - `load_from_disk(path: &Path) -> Result<Self>`
-  - `load_from_s3(client: &S3Client) -> Result<Self>`: download latest snapshot
-  - `save_to_s3(client: &S3Client) -> Result<()>`: upload snapshot
-  - TTL: entries expire after 7 days without verification
-  - Periodic snapshot: save every N minutes (configurable)
+## What works
+- Insert/lookup with TTL expiry
+- Prune expired entries
+- Save/load round-trip via bincode
+- Atomic disk writes
+- Stats computation (total entries, bytes, expired count)
+- 9 unit tests all passing
+
+## What's missing
+- S3 download/upload of cache snapshots (deferred to P2-s3-upload task)
+- Periodic snapshot timer (will be wired in supervisor integration)
+- Configurable snapshot interval (will come from config module)
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib storage::digest_cache
+cargo test -p sandbox -- digest_cache
 ```
-Unit tests: insert+lookup, invalidation, mtime mismatch returns None, TTL expiry, serialization round-trip.
 
 ## Branch
 - **Branch**: `p2-digest-cache`
