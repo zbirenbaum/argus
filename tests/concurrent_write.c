@@ -18,7 +18,7 @@
 #define ITERS 100
 #define NUM_THREADS 4
 
-static const char *target_path = "/workspace/shared.txt";
+static const char *target_path = "/tmp/argus-test-workspace/shared.txt";
 
 static void *writer(void *arg) {
     int id = *(int *)arg;

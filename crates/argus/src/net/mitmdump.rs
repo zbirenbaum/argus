@@ -189,6 +189,12 @@ fn start_mitmdump_with_addon(
         None
     };
 
+    // Suppress mitmdump output so it doesn't pollute supervisor stdout.
+    command.stderr(Stdio::null());
+    if flow_output.is_none() {
+        command.stdout(Stdio::null());
+    }
+
     let child = command
         .spawn()
         .context(

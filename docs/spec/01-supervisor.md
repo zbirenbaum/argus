@@ -138,6 +138,8 @@ write_locks: HashMap<PathBuf, Mutex>
 
 Competing writes to same path: second tracee is stopped by ptrace, supervisor delays resuming until lock is free. Process sees a longer pause — no errors. Different paths: zero contention.
 
+**Compound syscalls:** Some syscalls combine multiple semantic operations. `open(O_TRUNC)` is both an open (produces an fd) and a write (truncates content). `rename` across filesystems is copy+unlink. The exit handler for any compound syscall must update **all** affected state, not just the primary operation. For `open(O_TRUNC)`: capture the truncation in the hash chain **and** register the new fd in the process fd table. Forgetting any side-effect breaks downstream handlers that depend on that state (e.g., a `write(fd)` following an unregistered `open(O_TRUNC)` won't resolve to a file path, silently bypassing hash chain capture).
+
 ## Main Loop
 
 ```

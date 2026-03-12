@@ -23,11 +23,23 @@
 - `cleanup_dead_writer` handles process exit while active or queued
 - Different paths are completely unaffected — no contention
 
+### Phase 3: Compound syscall fix (open+truncate fd registration)
+- `open(O_TRUNC)` is a compound syscall: it truncates (write semantics) AND produces a new fd (open semantics)
+- `try_start_open_trunc_capture` returned true, skipping `handle_open` — the fd was never registered
+- After `close()` removed the previous fd entry, subsequent `write(fd)` couldn't resolve the fd to a file path and bypassed hash chain capture
+- Fix: `complete_write_capture` now registers the fd in the process fd table when `CaptureKind::OpenTrunc` completes
+- `CaptureKind::OpenTrunc` now carries `flags: i32` for correct `O_CLOEXEC` handling
+- Also fixed `tests/concurrent_write.c` target path (`/workspace/` → `/tmp/argus-test-workspace/`)
+- Also fixed `tests/validate.sh` test_7b: `cleanup_workspace` was deleting the compiled binary before running it
+
 ### Files changed
-- `crates/argus/src/tracer/trace_loop.rs` — active_writes, write_wait_queue, resume_next_queued_writer, cleanup_dead_writer
+- `crates/argus/src/tracer/trace_loop.rs` — active_writes, write_wait_queue, resume_next_queued_writer, cleanup_dead_writer, OpenTrunc fd registration in complete_write_capture
 - `crates/argus/src/tracer/handlers/mod.rs` — queue-aware try_start_write_capture, try_start_open_trunc_capture
+- `crates/argus/src/tracer/pending.rs` — `CaptureKind::OpenTrunc { flags: i32 }`
 - `tests/concurrent_write.c` — C test: 4 threads × 100 writes with O_TRUNC
+- `tests/validate.sh` — fixed test_7b cleanup ordering
 - `tests/validate_hash_chain.py` — hash chain validator script
+- `docs/spec/01-supervisor.md` — added compound syscall design note
 - `docs/spec/12-testing.md` — added Test 7b (hardened interleaving test)
 
 ## What works

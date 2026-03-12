@@ -151,9 +151,12 @@ pub fn arg5(regs: &UserRegs) -> u64 {
 
 /// Cancels a syscall by invalidating the syscall number.
 ///
-/// Sets `orig_rax` to -1 on x86_64 (or `x8` to -1 on aarch64)
-/// so the kernel skips execution and returns -ENOSYS. Caller must
-/// follow up at syscall exit to set the desired errno.
+/// On x86_64, sets `orig_rax` to -1 so the kernel skips execution.
+/// On aarch64, writes -1 via the `NT_ARM_SYSTEM_CALL` regset because
+/// the kernel's internal `syscallno` is separate from the GP x8
+/// register — modifying x8 alone has no effect after seccomp entry.
+///
+/// Caller must follow up at syscall exit to set the desired errno.
 pub fn cancel_syscall(regs: &mut UserRegs) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -161,7 +164,47 @@ pub fn cancel_syscall(regs: &mut UserRegs) {
     }
     #[cfg(target_arch = "aarch64")]
     {
+        // Also set x8 for consistency, though the kernel ignores it.
         regs.regs[8] = (-1_i64) as u64;
+    }
+}
+
+/// Writes the kernel's syscall number on aarch64 via `NT_ARM_SYSTEM_CALL`.
+///
+/// This is required to actually cancel a syscall on aarch64 because
+/// the kernel copies x8 into an internal `syscallno` field before the
+/// seccomp stop — changing x8 via `NT_PRSTATUS` does not affect the
+/// pending syscall.
+///
+/// On x86_64 this is a no-op (orig_rax serves both purposes).
+pub fn set_syscall_nr(pid: nix::unistd::Pid, nr: i32) -> anyhow::Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _ = (pid, nr);
+        Ok(())
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use anyhow::Context;
+        const NT_ARM_SYSTEM_CALL: libc::c_int = 0x404;
+        let val: i32 = nr;
+        let iov = libc::iovec {
+            iov_base: std::ptr::addr_of!(val).cast_mut().cast(),
+            iov_len: std::mem::size_of::<i32>(),
+        };
+        let ret = unsafe {
+            libc::ptrace(
+                libc::PTRACE_SETREGSET,
+                pid.as_raw() as libc::c_uint,
+                NT_ARM_SYSTEM_CALL,
+                std::ptr::addr_of!(iov),
+            )
+        };
+        if ret == -1 {
+            return Err(std::io::Error::last_os_error())
+                .context("PTRACE_SETREGSET(NT_ARM_SYSTEM_CALL) failed");
+        }
+        Ok(())
     }
 }
 

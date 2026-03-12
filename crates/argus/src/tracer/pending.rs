@@ -10,7 +10,7 @@ pub enum CaptureKind {
     /// A write/pwrite/writev/pwritev syscall.
     Write { fd: i32, size: u64 },
     /// An open with O_TRUNC that truncates existing content.
-    OpenTrunc,
+    OpenTrunc { flags: i32 },
 }
 
 /// Captured arguments from syscall entry, awaiting exit confirmation.

@@ -40,8 +40,8 @@ RESULTS=()
 # --- Helpers ---
 
 run_supervisor() {
-    # Run supervisor, capture stdout (events) and suppress stderr (tracing logs).
-    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" "$@" 2>/dev/null
+    # Run supervisor, capture stdout (events) and log stderr.
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" "$@" 2>/tmp/supervisor_debug.log
 }
 
 assert_event_type() {
@@ -77,6 +77,11 @@ record() {
 }
 
 cleanup_workspace() {
+    # Kill any stale supervisor to free port 9090.
+    if curl -sf --max-time 1 http://127.0.0.1:9090/agent/status >/dev/null 2>&1; then
+        pkill -9 -x supervisor 2>/dev/null || true
+        sleep 0.3
+    fi
     rm -f /tmp/argus-test-workspace/test.txt /tmp/argus-test-workspace/shared.txt /tmp/argus-test-workspace/tool-output.txt
     rm -f /tmp/tool.py /tmp/concurrent_write
 }
@@ -332,14 +337,14 @@ test_7b() {
         return
     fi
 
+    cleanup_workspace
+
     gcc -O0 -pthread -o /tmp/concurrent_write "$SCRIPT_DIR/concurrent_write.c" 2>/dev/null
     if [ $? -ne 0 ]; then
         echo "  SKIP: failed to compile concurrent_write.c"
         record "7b" "Write interleaving" "SKIP"
         return
     fi
-
-    cleanup_workspace
     local events
     events=$(run_supervisor -- /tmp/concurrent_write)
     local ok=true
@@ -375,14 +380,195 @@ test_8() {
 
 test_9() {
     echo "Test 9: Pause/Resume"
-    echo "  SKIP: requires API server wired into supervisor (not yet integrated)"
-    record 9 "Pause/resume" "SKIP"
+    cleanup_workspace
+
+    local ok=true
+    local events_file="/tmp/test9_events.jsonl"
+    rm -f "$events_file"
+    rm -f /tmp/argus-test-workspace/before.txt /tmp/argus-test-workspace/after.txt
+
+    # Start supervisor in background. The script writes a marker, sleeps,
+    # then writes a second marker. While sleeping we pause; the second
+    # marker should not appear until we resume.
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" \
+        -- bash -c '
+            echo before > /tmp/argus-test-workspace/before.txt
+            sleep 3
+            echo after > /tmp/argus-test-workspace/after.txt
+        ' > "$events_file" 2>/dev/null &
+    local sup_pid=$!
+
+    # Wait for supervisor + first marker to appear.
+    local waited=0
+    while [ ! -f /tmp/argus-test-workspace/before.txt ] && [ "$waited" -lt 20 ]; do
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+    if [ ! -f /tmp/argus-test-workspace/before.txt ]; then
+        echo "  FAIL: before.txt never appeared"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 9 "Pause/resume" "FAIL"
+        return
+    fi
+
+    # Pause the agent via API.
+    local pause_resp
+    pause_resp=$(curl -sf -X POST http://127.0.0.1:9090/agent/pause 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "  FAIL: could not reach pause API"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 9 "Pause/resume" "FAIL"
+        return
+    fi
+
+    # Check status reports paused.
+    local status
+    status=$(curl -sf http://127.0.0.1:9090/agent/status 2>/dev/null)
+    if ! echo "$status" | grep -q '"paused"'; then
+        echo "  FAIL: status not paused after pause request"
+        ok=false
+    fi
+
+    # Wait — the sleep(3) may finish but the next write should be frozen.
+    sleep 4
+
+    if [ -f /tmp/argus-test-workspace/after.txt ]; then
+        echo "  FAIL: process not frozen (after.txt appeared while paused)"
+        ok=false
+    fi
+
+    # Resume.
+    curl -sf -X POST http://127.0.0.1:9090/agent/resume > /dev/null 2>&1
+
+    # Wait for agent to finish.
+    wait "$sup_pid" 2>/dev/null
+
+    # after.txt should now exist.
+    if [ ! -f /tmp/argus-test-workspace/after.txt ]; then
+        echo "  FAIL: after.txt not created after resume"
+        ok=false
+    fi
+
+    # Check for pause/resume events.
+    local events
+    events=$(cat "$events_file")
+    local pause_count resume_count
+    pause_count=$(echo "$events" | jq -s '[.[] | select(.type == "agent_pause")] | length')
+    resume_count=$(echo "$events" | jq -s '[.[] | select(.type == "agent_resume")] | length')
+
+    if [ "$pause_count" -lt 1 ]; then
+        echo "  FAIL: missing agent_pause event"
+        ok=false
+    fi
+    if [ "$resume_count" -lt 1 ]; then
+        echo "  FAIL: missing agent_resume event"
+        ok=false
+    fi
+
+    if $ok; then
+        echo "  PASS"
+        record 9 "Pause/resume" "PASS"
+    else
+        record 9 "Pause/resume" "FAIL"
+    fi
 }
 
 test_10() {
     echo "Test 10: Pause-Before-Action"
-    echo "  SKIP: requires rules + API server wired into supervisor (not yet integrated)"
-    record 10 "Pause-before-action" "SKIP"
+    cleanup_workspace
+
+    local ok=true
+    local events_file="/tmp/test10_events.jsonl"
+    local pause_config="$SCRIPT_DIR/test-pause-config.yaml"
+    rm -f "$events_file"
+
+    if [ ! -f "$pause_config" ]; then
+        echo "  SKIP: test-pause-config.yaml not found"
+        record 10 "Pause-before-action" "SKIP"
+        return
+    fi
+
+    # Create a file to delete.
+    echo "important" > /tmp/argus-test-workspace/critical.txt
+
+    # Start supervisor with pause_before rules for unlink.
+    # The script tries to rm the file. The tracer should hold the
+    # unlink for approval. We deny it so rm sees EPERM.
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$pause_config" \
+        -- bash -c '
+            rm /tmp/argus-test-workspace/critical.txt 2>/tmp/argus-test-rm-err.txt
+            echo "exit=$?" > /tmp/argus-test-workspace/rm_result.txt
+        ' > "$events_file" 2>/dev/null &
+    local sup_pid=$!
+
+    # Wait for a pending approval to appear.
+    local waited=0
+    local action_id=""
+    while [ -z "$action_id" ] && [ "$waited" -lt 40 ]; do
+        sleep 0.3
+        action_id=$(curl -sf http://127.0.0.1:9090/approvals/pending 2>/dev/null \
+            | jq -r '.pending[0].action_id // empty' 2>/dev/null)
+        waited=$((waited + 1))
+    done
+
+    if [ -z "$action_id" ]; then
+        echo "  FAIL: no pending approval appeared"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 10 "Pause-before-action" "FAIL"
+        return
+    fi
+
+    # Deny the unlink — rm should get EPERM.
+    local deny_resp
+    deny_resp=$(curl -sf -X POST "http://127.0.0.1:9090/approvals/${action_id}/deny" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "  FAIL: deny request failed"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 10 "Pause-before-action" "FAIL"
+        return
+    fi
+
+    # Wait for agent to finish.
+    wait "$sup_pid" 2>/dev/null
+
+    # The file should still exist (unlink was denied).
+    if [ ! -f /tmp/argus-test-workspace/critical.txt ]; then
+        echo "  FAIL: critical.txt was deleted despite denial"
+        ok=false
+    fi
+
+    # rm should have exited with an error.
+    if [ -f /tmp/argus-test-workspace/rm_result.txt ]; then
+        local exit_code
+        exit_code=$(grep -o 'exit=[0-9]*' /tmp/argus-test-workspace/rm_result.txt | cut -d= -f2)
+        if [ "$exit_code" = "0" ]; then
+            echo "  FAIL: rm succeeded (expected EPERM)"
+            ok=false
+        fi
+    fi
+
+    # Check events.
+    local events
+    events=$(cat "$events_file")
+    local pending_count denied_count
+    pending_count=$(echo "$events" | jq -s '[.[] | select(.type == "pending_approval")] | length')
+    denied_count=$(echo "$events" | jq -s '[.[] | select(.type == "approval_denied")] | length')
+
+    if [ "$pending_count" -lt 1 ]; then
+        echo "  FAIL: missing pending_approval event"
+        ok=false
+    fi
+    if [ "$denied_count" -lt 1 ]; then
+        echo "  FAIL: missing approval_denied event"
+        ok=false
+    fi
+
+    if $ok; then
+        echo "  PASS"
+        record 10 "Pause-before-action" "PASS"
+    else
+        record 10 "Pause-before-action" "FAIL"
+    fi
 }
 
 test_11() {

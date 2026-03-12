@@ -40,20 +40,29 @@ pub fn build_router(state: SharedState) -> Router {
 
 /// Starts the API server on the given address.
 ///
-/// Runs until the server is shut down. Should be spawned on the tokio
+/// Runs until `shutdown` is signalled. Should be spawned on the tokio
 /// runtime, not called from the tracer thread.
 ///
 /// # Errors
 ///
 /// Returns an error if the TCP listener cannot bind to `addr`.
-pub async fn serve(state: SharedState, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve(
+    state: SharedState,
+    addr: SocketAddr,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(
         listen.addr = %addr,
         "API server listening on {{listen.addr}}"
     );
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let mut rx = shutdown;
+            let _ = rx.wait_for(|&v| v).await;
+        })
+        .await?;
     Ok(())
 }
 

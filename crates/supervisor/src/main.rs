@@ -112,6 +112,7 @@ fn main() -> Result<()> {
     // Spawn the API server on a background tokio runtime.
     let listen_addr = config.listen_addr;
     let api_shared = shared.clone();
+    let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(false);
     let api_thread = std::thread::Builder::new()
         .name("api-server".into())
         .spawn(move || {
@@ -120,7 +121,7 @@ fn main() -> Result<()> {
                 .build()
                 .expect("failed to build tokio runtime for API server");
             rt.block_on(async {
-                if let Err(e) = api::serve(api_shared, listen_addr).await {
+                if let Err(e) = api::serve(api_shared, listen_addr, api_shutdown_rx).await {
                     event!(
                         name: "supervisor.api.error",
                         Level::ERROR,
@@ -138,6 +139,36 @@ fn main() -> Result<()> {
         listen.addr = %listen_addr,
         "API server listening on {{listen.addr}}",
     );
+
+    // Forward API-originated events (pause, resume, approvals) to the
+    // main event channel so they appear in the JSONL output.
+    let api_event_tx = event_tx.clone();
+    let mut api_event_rx = shared.subscribe_events();
+    let bridge_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bridge_stop_flag = bridge_stop.clone();
+    let api_event_bridge = std::thread::Builder::new()
+        .name("api-event-bridge".into())
+        .spawn(move || {
+            use tokio::sync::broadcast::error::TryRecvError;
+            loop {
+                if bridge_stop_flag.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                match api_event_rx.try_recv() {
+                    Ok(evt) => {
+                        if api_event_tx.send(evt).is_err() {
+                            break;
+                        }
+                    }
+                    Err(TryRecvError::Empty) => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(TryRecvError::Closed) => break,
+                    Err(TryRecvError::Lagged(_)) => continue,
+                }
+            }
+        })
+        .context("failed to spawn API event bridge thread")?;
 
     let spawn = startup::spawn_agent(
         &config.agent_command,
@@ -161,27 +192,43 @@ fn main() -> Result<()> {
     .with_workspace(config.workspace_dir.clone())
     .with_rules(rules_handle)
     .with_shared_state(shared);
+    event!(Level::DEBUG, "main: entering tracer.run()");
     tracer.run(spawn.child_pid, spawn.sync_pipe_w)?;
+    event!(Level::DEBUG, "main: tracer.run() returned");
 
     event!(
         name: "supervisor.shutdown",
-        Level::INFO,
-        "agent exited, shutting down supervisor",
+        Level::DEBUG,
+        "shutdown: tracer.run() returned",
     );
 
     if let Some(ref mut m) = mitmdump {
+        event!(Level::DEBUG, "shutdown: stopping mitmdump");
         let _ = m.stop();
+        event!(Level::DEBUG, "shutdown: mitmdump stopped");
     }
 
-    // Drop the sender so the writer thread sees channel close.
-    drop(tracer);
-    writer_handle.join().expect("event writer thread panicked");
-    let _ = stdout_drain.join();
-    let _ = stderr_drain.join();
+    event!(Level::DEBUG, "shutdown: signalling bridge stop");
+    bridge_stop.store(true, std::sync::atomic::Ordering::Release);
+    event!(Level::DEBUG, "shutdown: joining bridge thread");
+    let _ = api_event_bridge.join();
+    event!(Level::DEBUG, "shutdown: bridge thread joined");
 
-    // API server thread exits when the process exits; don't block on
-    // it since it runs until cancelled.
-    drop(api_thread);
+    event!(Level::DEBUG, "shutdown: dropping tracer");
+    drop(tracer);
+    event!(Level::DEBUG, "shutdown: joining writer thread");
+    writer_handle.join().expect("event writer thread panicked");
+    event!(Level::DEBUG, "shutdown: writer thread joined");
+
+    event!(Level::DEBUG, "shutdown: joining stdout drain");
+    let _ = stdout_drain.join();
+    event!(Level::DEBUG, "shutdown: joining stderr drain");
+    let _ = stderr_drain.join();
+    event!(Level::DEBUG, "shutdown: stopping API server");
+    let _ = api_shutdown_tx.send(true);
+    event!(Level::DEBUG, "shutdown: joining API server thread");
+    let _ = api_thread.join();
+    event!(Level::DEBUG, "shutdown: all threads joined");
 
     Ok(())
 }

@@ -148,6 +148,9 @@ fn cancel_syscall_with_eperm(
     let mut modified = *r;
     regs::cancel_syscall(&mut modified);
     regs::set_regs(pid, &modified)?;
+    // On aarch64, NT_PRSTATUS alone cannot change the active syscall —
+    // must use NT_ARM_SYSTEM_CALL to overwrite the kernel's syscallno.
+    regs::set_syscall_nr(pid, -1)?;
     tracer.pending.insert(pid.as_raw() as u32, PendingSyscall::Eperm);
     ptrace::syscall(pid, None)?;
     Ok(())
@@ -491,6 +494,8 @@ fn try_start_open_trunc_capture(
     let path = resolve_open_path(pid, nr, r)?;
     let pid_u32 = pid.as_raw() as u32;
 
+    let open_flags = flags as i32;
+
     if tracer.active_writes.contains_key(&path) {
         tracer
             .write_wait_queue
@@ -500,7 +505,7 @@ fn try_start_open_trunc_capture(
                 before_hash: None,
                 path,
                 pid: pid_u32,
-                kind: CaptureKind::OpenTrunc,
+                kind: CaptureKind::OpenTrunc { flags: open_flags },
             });
         return Ok(true);
     }
@@ -517,7 +522,7 @@ fn try_start_open_trunc_capture(
         before_hash,
         path,
         pid: pid_u32,
-        kind: CaptureKind::OpenTrunc,
+        kind: CaptureKind::OpenTrunc { flags: open_flags },
     });
 
     ptrace::syscall(pid, None)?;

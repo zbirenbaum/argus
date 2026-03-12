@@ -106,6 +106,9 @@ pub struct TracerLoop {
     /// Shared state for submitting pending approvals to the API.
     pub shared_state: Option<SharedState>,
     pub alive_count: u32,
+    /// Tracees frozen by the pause mechanism. Each entry stores the
+    /// pid and optional signal to forward when resumed.
+    frozen: Vec<(Pid, Option<Signal>)>,
 }
 
 impl TracerLoop {
@@ -134,6 +137,7 @@ impl TracerLoop {
             rules: None,
             shared_state: None,
             alive_count: 0,
+            frozen: Vec::new(),
         }
     }
 
@@ -153,6 +157,25 @@ impl TracerLoop {
     pub fn with_shared_state(mut self, state: SharedState) -> Self {
         self.shared_state = Some(state);
         self
+    }
+
+    /// Whether the supervisor is currently paused.
+    fn is_paused(&self) -> bool {
+        self.shared_state.as_ref().is_some_and(|s| s.is_paused())
+    }
+
+    /// Resumes a tracee with `ptrace::cont`, or freezes it if paused.
+    ///
+    /// When the supervisor is paused, the tracee stays stopped and is
+    /// added to the frozen list. On resume, all frozen tracees are
+    /// continued with their saved signal.
+    fn resume_cont(&mut self, pid: Pid, sig: Option<Signal>) -> Result<()> {
+        if self.is_paused() {
+            self.frozen.push((pid, sig));
+            return Ok(());
+        }
+        ptrace::cont(pid, sig)?;
+        Ok(())
     }
 
     /// Runs the main ptrace loop until all traced processes exit.
@@ -192,6 +215,11 @@ impl TracerLoop {
     }
 
     /// The core wait loop. Blocks on `waitpid(-1)` and dispatches.
+    ///
+    /// When the supervisor is paused, switches to non-blocking
+    /// `waitpid(WNOHANG)` so it can poll for the resume signal
+    /// without deadlocking. Frozen tracees are resumed when the
+    /// pause flag is cleared.
     fn wait_loop(&mut self) -> Result<()> {
         loop {
             if self.alive_count == 0 {
@@ -203,18 +231,49 @@ impl TracerLoop {
                 return Ok(());
             }
 
-            let wall = WaitPidFlag::__WALL;
-            let status = match waitpid(Pid::from_raw(-1), Some(wall)) {
-                Ok(s) => s,
-                Err(nix::errno::Errno::ECHILD) => {
-                    event!(
-                        name: "tracer.loop.no_children",
-                        Level::INFO,
-                        "no more children to wait for",
-                    );
-                    return Ok(());
+            // Drain frozen tracees when resumed.
+            if !self.frozen.is_empty() && !self.is_paused() {
+                let frozen = std::mem::take(&mut self.frozen);
+                for (pid, sig) in frozen {
+                    ptrace::cont(pid, sig)?;
                 }
-                Err(e) => return Err(e).context("waitpid failed"),
+            }
+
+            let wall = WaitPidFlag::__WALL;
+
+            // When processes are frozen, poll with WNOHANG to avoid
+            // deadlocking (no running tracees → blocking waitpid
+            // would never return).
+            let status = if !self.frozen.is_empty() {
+                match waitpid(Pid::from_raw(-1), Some(wall | WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::StillAlive) => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
+                    Ok(s) => s,
+                    Err(nix::errno::Errno::ECHILD) => {
+                        event!(
+                            name: "tracer.loop.no_children",
+                            Level::INFO,
+                            "no more children to wait for",
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e).context("waitpid failed"),
+                }
+            } else {
+                match waitpid(Pid::from_raw(-1), Some(wall)) {
+                    Ok(s) => s,
+                    Err(nix::errno::Errno::ECHILD) => {
+                        event!(
+                            name: "tracer.loop.no_children",
+                            Level::INFO,
+                            "no more children to wait for",
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e).context("waitpid failed"),
+                }
             };
 
             self.handle_wait_status(status)?;
@@ -227,7 +286,7 @@ impl TracerLoop {
             WaitStatus::PtraceEvent(pid, _sig, evt) => {
                 let already_resumed = self.handle_ptrace_event(pid, evt)?;
                 if !already_resumed {
-                    ptrace::cont(pid, None)?;
+                    self.resume_cont(pid, None)?;
                 }
             }
             WaitStatus::PtraceSyscall(pid) => {
@@ -277,6 +336,10 @@ impl TracerLoop {
         } else if evt == exit {
             process_events::handle_exit_event(self, pid)?;
         } else if evt == seccomp {
+            if self.is_paused() {
+                self.frozen.push((pid, None));
+                return Ok(true);
+            }
             match handlers::handle_seccomp_stop(self, pid) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
@@ -304,26 +367,26 @@ impl TracerLoop {
         let pid_u32 = pid.as_raw() as u32;
 
         let Some(entry) = self.pending.remove(&pid_u32) else {
-            ptrace::cont(pid, None)?;
+            self.resume_cont(pid, None)?;
             return Ok(());
         };
 
         match entry {
             PendingSyscall::Eperm => {
                 inject_eperm(pid)?;
-                ptrace::cont(pid, None)?;
+                self.resume_cont(pid, None)?;
             }
             PendingSyscall::Open { path, flags } => {
                 self.complete_open(pid, &path, flags)?;
-                ptrace::cont(pid, None)?;
+                self.resume_cont(pid, None)?;
             }
             PendingSyscall::Read { pid: p, fd, path, buf_addr, .. } => {
                 self.complete_read(pid, p, fd, &path, buf_addr)?;
-                ptrace::cont(pid, None)?;
+                self.resume_cont(pid, None)?;
             }
             PendingSyscall::Pipe { pid: p, pipefd_addr } => {
                 self.complete_pipe(pid, p, pipefd_addr)?;
-                ptrace::cont(pid, None)?;
+                self.resume_cont(pid, None)?;
             }
             PendingSyscall::WriteCapture { before_hash, path, pid: p, kind } => {
                 self.complete_write_capture(pid, p, path, before_hash, kind)?;
@@ -405,7 +468,7 @@ impl TracerLoop {
     }
 
     /// Checks the syscall return value, runs `action` only on success,
-    /// then resumes with `ptrace::cont`.
+    /// then resumes the tracee (respecting the pause flag).
     fn complete_if_ok(
         &mut self,
         pid: Pid,
@@ -417,7 +480,7 @@ impl TracerLoop {
         if ret >= 0 {
             action(self);
         }
-        ptrace::cont(pid, None)?;
+        self.resume_cont(pid, None)?;
         Ok(())
     }
 
@@ -666,7 +729,7 @@ impl TracerLoop {
         if ret < 0 {
             // Write failed — release lock and resume next queued.
             self.resume_next_queued_writer(&path, before_hash)?;
-            ptrace::cont(pid, None)?;
+            self.resume_cont(pid, None)?;
             return Ok(());
         }
 
@@ -693,11 +756,28 @@ impl TracerLoop {
                     tree_hash,
                 }));
             }
-            CaptureKind::OpenTrunc => {
+            CaptureKind::OpenTrunc { flags } => {
+                let new_fd = ret as i32;
+
+                // Register the fd so subsequent write() calls resolve
+                // to this file path — otherwise the fd table entry is
+                // missing (handle_open was skipped) and writes bypass
+                // hash chain capture.
+                if let Some(proc_state) = self.process_tree.get_process_mut(orig_pid) {
+                    let target = FdTarget::File {
+                        path: PathBuf::from(&path),
+                    };
+                    if flags & libc::O_CLOEXEC != 0 {
+                        proc_state.fds.insert_cloexec(new_fd, target);
+                    } else {
+                        proc_state.fds.insert(new_fd, target);
+                    }
+                }
+
                 self.emit(EventPayload::Write(ef::Write {
                     pid: orig_pid,
                     path: path.clone(),
-                    fd: -1,
+                    fd: new_fd,
                     offset: 0,
                     size: 0,
                     before_hash,
@@ -708,7 +788,7 @@ impl TracerLoop {
         }
 
         self.resume_next_queued_writer(&path, after_hash)?;
-        ptrace::cont(pid, None)?;
+        self.resume_cont(pid, None)?;
         Ok(())
     }
 
@@ -727,7 +807,7 @@ impl TracerLoop {
         if self.pending.contains_key(&pid_u32) {
             ptrace::syscall(pid, forward)?;
         } else {
-            ptrace::cont(pid, forward)?;
+            self.resume_cont(pid, forward)?;
         }
         Ok(())
     }

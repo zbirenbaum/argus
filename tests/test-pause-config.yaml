@@ -1,0 +1,6 @@
+agent_command: ["true"]
+workspace_dir: /tmp/argus-test-workspace
+data_dir: /tmp/argus-test-data
+pause_before:
+  - type: unlink
+    paths: ["/tmp/argus-test-workspace/**"]

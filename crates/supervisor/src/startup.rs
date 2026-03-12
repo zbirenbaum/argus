@@ -14,6 +14,7 @@ use nix::unistd::{ForkResult, Pid, execvpe, pipe, read};
 use tracing::{Level, event};
 
 /// Handles returned from `spawn_agent` for stdio forwarding.
+#[derive(Debug)]
 pub struct SpawnResult {
     pub child_pid: Pid,
     pub sync_pipe_w: RawFd,
