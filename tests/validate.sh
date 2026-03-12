@@ -374,8 +374,113 @@ test_7b() {
 
 test_8() {
     echo "Test 8: TLS Capture"
-    echo "  SKIP: requires mitmdump + external network"
-    record 8 "TLS capture" "SKIP"
+
+    # Check prerequisites.
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "  SKIP: openssl not found"
+        record 8 "TLS capture" "SKIP"
+        return
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "  SKIP: curl not found"
+        record 8 "TLS capture" "SKIP"
+        return
+    fi
+
+    local ok=true
+
+    # Generate ephemeral self-signed cert for local HTTPS server.
+    openssl req -x509 -newkey rsa:2048 \
+        -keyout /tmp/argus-test-key.pem -out /tmp/argus-test-cert.pem \
+        -days 1 -nodes -subj '/CN=localhost' 2>/dev/null
+
+    # Start local HTTPS server (serves exactly one request then exits).
+    python3 -c "
+import ssl, http.server, json
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({'status': 'ok'}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain('/tmp/argus-test-cert.pem', '/tmp/argus-test-key.pem')
+server = http.server.HTTPServer(('127.0.0.1', 8443), Handler)
+server.socket = ctx.wrap_socket(server.socket, server_side=True)
+server.timeout = 5
+server.handle_request()
+server.handle_request()
+" &
+    local server_pid=$!
+    sleep 0.5
+
+    # Verify server is listening.
+    if ! python3 -c "import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1',8443)); s.close()" 2>/dev/null; then
+        echo "  SKIP: local HTTPS server failed to start"
+        kill "$server_pid" 2>/dev/null
+        record 8 "TLS capture" "SKIP"
+        return
+    fi
+
+    # Write a test-specific config with upstream_insecure so mitmdump
+    # accepts the self-signed cert from our local HTTPS server.
+    local tls_config="/tmp/argus-test-tls-config.yaml"
+    cat > "$tls_config" <<CFGEOF
+agent_command: ["true"]
+workspace_dir: /tmp/argus-test-workspace
+data_dir: /tmp/argus-test-data
+tls:
+  upstream_insecure: true
+CFGEOF
+
+    # Run curl through the supervisor. Use -sk to accept self-signed cert.
+    # Sleep after curl so the 200ms TLS watcher poll can drain the flow file
+    # before the agent exits and the supervisor shuts down.
+    local events
+    events=$("$SUPERVISOR" --agent-id "validate-$$" --config "$tls_config" -- bash -c 'curl -sk https://localhost:8443/; sleep 1' 2>/tmp/supervisor_debug.log)
+
+    # Clean up server (should already be done after handle_request).
+    wait "$server_pid" 2>/dev/null
+
+    # 1. connect events (may be absent under Rosetta or in some environments).
+    local connect_count
+    connect_count=$(echo "$events" | jq -s '[.[] | select(.type == "connect")] | length')
+    if [ "$connect_count" -lt 1 ]; then
+        echo "  INFO: no connect events (expected under Rosetta/emulation)"
+    fi
+
+    # 2. tls_keys event from SSLKEYLOGFILE — the core assertion.
+    local tls_count
+    tls_count=$(echo "$events" | jq -s '[.[] | select(.type == "tls_keys")] | length')
+    if [ "$tls_count" -lt 1 ]; then
+        echo "  FAIL: no tls_keys events"
+        ok=false
+    fi
+
+    # 3. http_request / http_response (requires mitmdump).
+    local http_req_count http_resp_count
+    http_req_count=$(echo "$events" | jq -s '[.[] | select(.type == "http_request")] | length')
+    http_resp_count=$(echo "$events" | jq -s '[.[] | select(.type == "http_response")] | length')
+    if [ "$http_req_count" -ge 1 ] && [ "$http_resp_count" -ge 1 ]; then
+        echo "  mitmdump: http_request=$http_req_count http_response=$http_resp_count"
+    else
+        echo "  WARN: no http_request/http_response events (mitmdump may not be installed)"
+    fi
+
+    # Clean up temp certs.
+    rm -f /tmp/argus-test-key.pem /tmp/argus-test-cert.pem
+
+    if $ok; then
+        echo "  PASS: connect=$connect_count tls_keys=$tls_count http_req=$http_req_count http_resp=$http_resp_count"
+        record 8 "TLS capture" "PASS"
+    else
+        record 8 "TLS capture" "FAIL"
+    fi
 }
 
 test_9() {

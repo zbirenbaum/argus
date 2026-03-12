@@ -15,6 +15,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tracing::{event, Level};
 
+use crate::config::UpstreamVerify;
 use crate::net::CaPaths;
 
 /// Maximum time to wait for mitmdump to accept connections.
@@ -130,7 +131,13 @@ pub struct AddonConfig {
 /// Returns an error if `mitmdump` is not installed, fails to start,
 /// or does not become ready within the timeout.
 pub fn start_mitmdump(ca: &CaPaths, port: u16) -> Result<MitmdumpHandle> {
-    start_mitmdump_with_addon("mitmdump", ca, port, &AddonConfig::default())
+    start_mitmdump_inner(
+        "mitmdump",
+        ca,
+        port,
+        &AddonConfig::default(),
+        &UpstreamVerify::SystemStore,
+    )
 }
 
 /// Spawn `mitmdump` with an addon script for flow capture.
@@ -147,16 +154,24 @@ pub fn start_mitmdump_with_flow_capture(
     ca: &CaPaths,
     port: u16,
     addon: &AddonConfig,
+    upstream: &UpstreamVerify,
 ) -> Result<MitmdumpHandle> {
-    start_mitmdump_with_addon("mitmdump", ca, port, addon)
+    start_mitmdump_inner("mitmdump", ca, port, addon, upstream)
 }
 
 /// Spawn a mitmdump-compatible binary with optional addon.
-fn start_mitmdump_with_addon(
+///
+/// Upstream TLS verification is controlled by `upstream`:
+/// - `SystemStore` — mitmdump verifies using the OS trust store (default).
+/// - `CustomCa(path)` — mitmdump verifies against a specific CA bundle,
+///   for internal services using private PKI.
+/// - `Insecure` — mitmdump skips all upstream verification. Dev/test only.
+fn start_mitmdump_inner(
     cmd: &str,
     ca: &CaPaths,
     port: u16,
     addon: &AddonConfig,
+    upstream: &UpstreamVerify,
 ) -> Result<MitmdumpHandle> {
     let ca_dir = ca
         .cert
@@ -173,6 +188,19 @@ fn start_mitmdump_with_addon(
         &format!("confdir={}", ca_dir.display()),
         "--quiet",
     ]);
+
+    match upstream {
+        UpstreamVerify::SystemStore => {}
+        UpstreamVerify::CustomCa(ca_path) => {
+            command.arg("--set").arg(format!(
+                "ssl_verify_upstream_trusted_ca={}",
+                ca_path.display()
+            ));
+        }
+        UpstreamVerify::Insecure => {
+            command.args(["--set", "ssl_insecure=true"]);
+        }
+    }
 
     let flow_output = if let Some(script) = &addon.script {
         command.args(["-s", &script.to_string_lossy()]);
@@ -272,11 +300,12 @@ mod tests {
             key: PathBuf::from("/nonexistent/ca-key.pem"),
         };
 
-        let result = start_mitmdump_with_addon(
+        let result = start_mitmdump_inner(
             "/nonexistent/mitmdump",
             &ca,
             18081,
             &AddonConfig::default(),
+            &UpstreamVerify::SystemStore,
         );
 
         let msg = result.unwrap_err().to_string();

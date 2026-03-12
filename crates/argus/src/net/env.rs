@@ -49,6 +49,8 @@ mod tests {
             ca_dir: PathBuf::from("/data/tls"),
             keylog_path: PathBuf::from("/data/tls/keylog.txt"),
             mitm_proxy_port: 8080,
+            upstream_ca: None,
+            upstream_insecure: false,
         }
     }
 

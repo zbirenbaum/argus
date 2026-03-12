@@ -8,6 +8,7 @@
 mod event_writer;
 mod signals;
 mod startup;
+mod tls_watcher;
 
 use std::fs;
 use std::os::fd::OwnedFd;
@@ -60,27 +61,30 @@ fn main() -> Result<()> {
 
     startup::create_data_dirs(&config.data_dir)?;
 
+    // Embed the mitmdump addon so the binary is self-contained.
+    const ADDON_SCRIPT: &str = include_str!("../../../scripts/argus_addon.py");
+    let addon_script = config.data_dir.join("argus_addon.py");
+    fs::write(&addon_script, ADDON_SCRIPT)
+        .context("failed to write embedded addon script")?;
+
     let ca_paths = net::generate_ca(&config.tls.ca_dir)?;
     let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
-    let addon_script = config.data_dir.join("argus_addon.py");
     let flow_output = config.data_dir.join("flows.jsonl");
 
     let addon = net::AddonConfig {
-        script: if addon_script.exists() {
-            Some(addon_script)
-        } else {
-            None
-        },
+        script: Some(addon_script),
         output_file: Some(flow_output),
     };
 
     // mitmdump is optional; log a warning if it fails to start but
     // continue so the supervisor works without mitmproxy installed.
+    let upstream = config.tls.upstream_verify();
     let mut mitmdump = match net::start_mitmdump_with_flow_capture(
         &ca_paths,
         config.tls.mitm_proxy_port,
         &addon,
+        &upstream,
     ) {
         Ok(handle) => Some(handle),
         Err(e) => {
@@ -101,15 +105,32 @@ fn main() -> Result<()> {
     // Second CAS handle for the API Bridge (same directory, safe
     // because CAS is append-only with content-addressed dedup).
     let api_cas: std::sync::Arc<dyn argus::cas::Cas> = std::sync::Arc::new(
-        LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
+        LocalCas::new(cas_path.clone()).context("failed to initialize API CAS handle")?,
     );
 
     let (event_tx, event_rx) = mpsc::channel::<Event>();
-    let seq_gen = SequenceGenerator::default();
+    let tracer_seq = SequenceGenerator::default();
+    // Separate sequence space so TLS watcher sequences never collide
+    // with tracer sequences while both generators are lock-free.
+    let tls_seq = SequenceGenerator::new(1_000_000);
 
     let writer_handle = event_writer::spawn(event_rx);
 
-    emit_agent_start(&event_tx, &config, &seq_gen);
+    emit_agent_start(&event_tx, &config, &tracer_seq);
+
+    let tls_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let tls_cas = LocalCas::new(cas_path.clone())
+        .context("failed to initialize TLS watcher CAS handle")?;
+    let flow_path = mitmdump.as_ref().and_then(|m| m.flow_output_path().cloned());
+    let tls_watcher_handle = tls_watcher::spawn(
+        config.tls.keylog_path.clone(),
+        flow_path,
+        tls_cas,
+        event_tx.clone(),
+        tls_seq,
+        config.agent_id.clone(),
+        tls_stop.clone(),
+    );
 
     // Build lock-free bridge for API server + tracer.
     let shared = new_shared_state(config.agent_id.clone(), api_cas);
@@ -193,7 +214,7 @@ fn main() -> Result<()> {
     let mut tracer = TracerLoop::new(
         config.agent_id.clone(),
         event_tx,
-        seq_gen,
+        tracer_seq,
         cas,
     )
     .with_workspace(config.workspace_dir.clone())
@@ -208,6 +229,13 @@ fn main() -> Result<()> {
         Level::DEBUG,
         "shutdown: tracer.run() returned",
     );
+
+    // Stop TLS watcher first so it can drain final data before
+    // mitmdump exits and the flow file stops being written.
+    event!(Level::DEBUG, "shutdown: stopping tls-watcher");
+    tls_stop.store(true, std::sync::atomic::Ordering::Release);
+    let _ = tls_watcher_handle.join();
+    event!(Level::DEBUG, "shutdown: tls-watcher stopped");
 
     if let Some(ref mut m) = mitmdump {
         event!(Level::DEBUG, "shutdown: stopping mitmdump");
