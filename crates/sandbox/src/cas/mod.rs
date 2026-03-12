@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Content-addressable storage using SHA-256.
 //!
 //! All content (file bodies, stdio, network payloads) is addressed by
@@ -12,7 +10,7 @@ mod stats;
 mod store;
 
 #[doc(inline)]
-pub use hash::ContentHash;
+pub use hash::{ContentHash, InvalidHashError};
 #[doc(inline)]
 pub use stats::{CasStats, CasStatsSnapshot};
 #[doc(inline)]

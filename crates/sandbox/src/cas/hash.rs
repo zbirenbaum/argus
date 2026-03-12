@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! SHA-256 content hash newtype for CAS addressing.
 //!
 //! Wraps a 64-character lowercase hex SHA-256 digest and provides
@@ -11,12 +9,53 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Expected length of a SHA-256 hex digest.
+const SHA256_HEX_LEN: usize = 64;
+
 /// Lowercase hex SHA-256 digest used as a CAS key.
 ///
 /// The hash is split into a 2-char prefix and 62-char suffix to
 /// avoid placing too many entries in a single directory.
-#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Deserialization validates that the string is exactly 64 lowercase
+/// hex characters, rejecting malformed hashes early.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ContentHash(String);
+
+impl<'de> Deserialize<'de> for ContentHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        ContentHash::try_from(s).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<String> for ContentHash {
+    type Error = InvalidHashError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if s.len() != SHA256_HEX_LEN {
+            return Err(InvalidHashError::BadLength(s.len()));
+        }
+        if !s.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            return Err(InvalidHashError::BadCharacters);
+        }
+        Ok(Self(s))
+    }
+}
+
+/// Reasons a string cannot be interpreted as a `ContentHash`.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvalidHashError {
+    /// String is not exactly 64 characters.
+    #[error("expected {SHA256_HEX_LEN}-char hex string, got {0} chars")]
+    BadLength(usize),
+    /// String contains non-hex or uppercase characters.
+    #[error("hash must be lowercase hex only")]
+    BadCharacters,
+}
 
 impl ContentHash {
     /// Compute a SHA-256 hash from raw bytes.
@@ -145,5 +184,38 @@ mod tests {
         let deserialized: ContentHash =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(h, deserialized);
+    }
+
+    #[test]
+    fn deserialize_rejects_wrong_length() {
+        let json = "\"abcd\"";
+        let result: Result<ContentHash, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_uppercase() {
+        let hex = "AAAA".to_string()
+            + "a".repeat(60).as_str();
+        let json = format!("\"{hex}\"");
+        let result: Result<ContentHash, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_rejects_non_hex() {
+        let hex = "zzzz".to_string()
+            + "0".repeat(60).as_str();
+        let json = format!("\"{hex}\"");
+        let result: Result<ContentHash, _> = serde_json::from_str(&json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_from_valid_string() {
+        let h = ContentHash::from_data(b"test");
+        let s = h.as_str().to_owned();
+        let h2 = ContentHash::try_from(s).expect("valid hash");
+        assert_eq!(h, h2);
     }
 }

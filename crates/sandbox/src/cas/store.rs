@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Filesystem-backed content-addressable store.
 //!
 //! Objects are stored under `{root}/{hash[0:2]}/{hash[2:]}`. Writes
@@ -11,6 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tempfile::NamedTempFile;
 use tracing::event;
 
 use super::hash::ContentHash;
@@ -54,6 +53,10 @@ impl CasStore {
         let hash = ContentHash::from_data(data);
         let path = self.object_path(&hash);
 
+        // TOCTOU: concurrent stores of the same content may both pass
+        // this check and double-count stats. Acceptable trade-off vs.
+        // locking, since the CAS file itself is written atomically and
+        // rename-overwrites are idempotent for identical content.
         if path.exists() {
             return Ok(hash);
         }
@@ -66,7 +69,7 @@ impl CasStore {
             tracing::Level::DEBUG,
             cas.hash = hash.as_str(),
             cas.size = data.len(),
-            "stored new object {{cas.hash}} ({{cas.size}} bytes)",
+            "stored new CAS object",
         );
 
         Ok(hash)
@@ -115,6 +118,9 @@ impl CasStore {
     }
 
     /// Write data atomically: temp file -> fsync -> rename.
+    ///
+    /// Uses `NamedTempFile` in the target directory to guarantee
+    /// unique temp filenames even under high concurrency.
     fn atomic_write(&self, final_path: &Path, data: &[u8]) -> Result<()> {
         let parent = final_path
             .parent()
@@ -122,59 +128,26 @@ impl CasStore {
         fs::create_dir_all(parent)
             .with_context(|| format!("create CAS dir {}", parent.display()))?;
 
-        let temp_path = parent.join(format!(
-            ".tmp-{tid}-{rand}",
-            tid = std::process::id(),
-            rand = fastrand_u32(),
-        ));
-
-        let result = write_and_sync(&temp_path, data);
-
-        if let Err(e) = &result {
-            // Clean up the temp file on failure; ignore removal errors.
-            let _ = fs::remove_file(&temp_path);
-            return Err(anyhow::anyhow!(
-                "atomic write to {}: {e}",
-                final_path.display()
-            ));
-        }
+        let mut tmp = NamedTempFile::new_in(parent)
+            .with_context(|| format!("create temp file in {}", parent.display()))?;
+        tmp.write_all(data)
+            .with_context(|| format!("write temp file {}", tmp.path().display()))?;
+        tmp.as_file().sync_all()
+            .with_context(|| format!("fsync temp file {}", tmp.path().display()))?;
 
         // Rename is atomic on POSIX; if the target appeared between our
         // exists-check and now, rename silently overwrites (same content).
-        fs::rename(&temp_path, final_path).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                temp_path.display(),
-                final_path.display()
+        tmp.persist(final_path).map_err(|e| {
+            anyhow::anyhow!(
+                "rename {} -> {}: {}",
+                e.file.path().display(),
+                final_path.display(),
+                e.error,
             )
         })?;
 
         Ok(())
     }
-}
-
-/// Write data and fsync, separated for clarity and borrow scoping.
-fn write_and_sync(path: &Path, data: &[u8]) -> Result<()> {
-    let mut file = fs::File::create(path)
-        .with_context(|| format!("create temp file {}", path.display()))?;
-    file.write_all(data)
-        .with_context(|| format!("write temp file {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("fsync temp file {}", path.display()))?;
-    Ok(())
-}
-
-/// Cheap pseudo-random u32 using the thread's address as entropy. Good
-/// enough for temp file naming; not cryptographic.
-fn fastrand_u32() -> u32 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::SystemTime;
-
-    let mut h = DefaultHasher::new();
-    SystemTime::now().hash(&mut h);
-    std::thread::current().id().hash(&mut h);
-    h.finish() as u32
 }
 
 #[cfg(test)]
@@ -279,6 +252,19 @@ mod tests {
         assert_eq!(snap.bytes_added, 8);
         assert_eq!(snap.total_objects, 2);
         assert_eq!(snap.total_bytes, 8);
+    }
+
+    #[test]
+    fn store_empty_data() {
+        let (_dir, store) = tmp_store();
+        let hash = store.store(b"").expect("store empty");
+        let read_back = store.read(&hash).expect("read empty");
+        assert!(read_back.is_empty());
+        assert!(store.exists(&hash));
+
+        let snap = store.stats();
+        assert_eq!(snap.objects_added, 1);
+        assert_eq!(snap.bytes_added, 0);
     }
 
     #[test]

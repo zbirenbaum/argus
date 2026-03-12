@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Atomic counters for CAS store metrics.
 //!
 //! All fields use `AtomicU64` so they can be updated from any thread

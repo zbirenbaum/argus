@@ -29,7 +29,7 @@
 - Full serde round-trip for `ContentHash`
 
 ## What's missing
-- Nothing — all spec requirements implemented
+- Large file chunking (4MB Rabin fingerprint) tracked separately per spec
 
 ## How to test
 ```bash
