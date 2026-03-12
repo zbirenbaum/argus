@@ -1,301 +1,129 @@
-use std::fs;
-use std::io::{self, Write};
-use std::path::PathBuf;
+// Rust guideline compliant 2026-02-21
+//! Argus CLI — HTTP client for the supervisor REST API.
 
-use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
-use argus::cas::ContentHash;
-use argus::events::envelope::{Event, EventPayload};
-use argus::events::io::StdioSubtype;
+mod client;
+mod commands;
+mod helpers;
+mod output;
+mod types;
+
+use anyhow::Result;
+use clap::Parser;
+
+use client::Client;
+use commands::{Command, RulesCommand};
+
+/// Supervisor API address used when ARGUS_URL is unset.
+const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
 #[derive(Parser)]
-#[command(name = "argus", about = "Argus CLI")]
+#[command(name = "argus", about = "Argus filesystem versioning CLI")]
 struct Cli {
-    /// CAS directory (default: /data/cas)
-    #[arg(long, default_value = "/data/cas", global = true)]
-    cas_dir: PathBuf,
-
-    /// Event log directory (default: /data/events)
-    #[arg(long, default_value = "/data/events", global = true)]
-    event_dir: PathBuf,
+    /// Supervisor API base URL.
+    #[arg(long, default_value = DEFAULT_URL, global = true, env = "ARGUS_URL")]
+    url: String,
 
     #[command(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
-enum Command {
-    /// Show event log entries
-    Log {
-        /// Filter by path (exact match)
-        #[arg(long)]
-        path: Option<String>,
-
-        /// Filter by PID
-        #[arg(long)]
-        pid: Option<u32>,
-
-        /// Filter by event type (e.g. write, read, exec)
-        #[arg(long, name = "type")]
-        event_type: Option<String>,
-
-        /// Filter events after this wall-clock timestamp (RFC 3339)
-        #[arg(long)]
-        since: Option<String>,
-
-        /// Maximum number of events to display
-        #[arg(long, default_value = "1000")]
-        limit: usize,
-
-        /// Output raw JSON lines instead of human-readable format
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Print CAS object content to stdout
-    Cat {
-        /// Content hash (64-char hex SHA-256)
-        hash: String,
-    },
-
-    /// Reconstruct stdio output for a process
-    Stdio {
-        /// Process ID
-        pid: u32,
-
-        /// Stream to show: stdout, stderr, or all (default: all)
-        #[arg(long, default_value = "all")]
-        stream: String,
-    },
-}
-
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let c = Client::new(cli.url);
 
     match cli.command {
-        Command::Log {
-            path,
-            pid,
-            event_type,
-            since,
-            limit,
-            json,
-        } => cmd_log(
-            &cli.event_dir,
-            path.as_deref(),
-            pid,
-            event_type.as_deref(),
-            since.as_deref(),
-            limit,
-            json,
-        ),
-        Command::Cat { hash } => cmd_cat(&cli.cas_dir, &hash),
-        Command::Stdio { pid, stream } => {
-            cmd_stdio(&cli.event_dir, &cli.cas_dir, pid, &stream)
+        Command::Status => output::print_status(&c.status().await?),
+        Command::Pause => output::print_pause(&c.pause().await?),
+        Command::Resume => output::print_resume(&c.resume().await?),
+        Command::Log { since, path, pid, event_type, limit, json } => {
+            let params = helpers::build_event_params(since.as_deref(), path.as_deref(), pid, event_type.as_deref(), limit)?;
+            let body = c.events(&params).await?;
+            if json { print!("{body}"); } else { output::print_events_human(&body); }
         }
-    }
-}
-
-fn cmd_log(
-    event_dir: &PathBuf,
-    path: Option<&str>,
-    pid: Option<u32>,
-    event_type: Option<&str>,
-    since: Option<&str>,
-    limit: usize,
-    json_output: bool,
-) -> Result<()> {
-    let events = read_all_events(event_dir)?;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut count = 0;
-
-    for event in &events {
-        if count >= limit {
-            break;
+        Command::History { path } => {
+            output::print_file_history(&c.file_history(&path).await?);
         }
-
-        if let Some(filter_pid) = pid {
-            if event.payload.pid() != Some(filter_pid) {
-                continue;
-            }
-        }
-
-        if let Some(filter_type) = event_type {
-            if event.payload.event_type_tag() != filter_type {
-                continue;
-            }
-        }
-
-        if let Some(filter_path) = path {
-            let paths = event.payload.paths();
-            if !paths.iter().any(|p| *p == filter_path) {
-                continue;
-            }
-        }
-
-        if let Some(since_ts) = since {
-            if event.ts_wall.as_str() < since_ts {
-                continue;
-            }
-        }
-
-        if json_output {
-            serde_json::to_writer(&mut out, event)
-                .context("serialize event")?;
-            writeln!(out)?;
-        } else {
-            write_event_human(&mut out, event)?;
-        }
-
-        count += 1;
-    }
-
-    Ok(())
-}
-
-fn cmd_cat(cas_dir: &PathBuf, hash_str: &str) -> Result<()> {
-    let hash = ContentHash::try_from(hash_str.to_string())
-        .map_err(|e| anyhow::anyhow!("invalid hash: {e}"))?;
-
-    let path = cas_dir.join(hash.prefix()).join(hash.suffix());
-
-    let data = fs::read(&path)
-        .with_context(|| format!("read CAS object at {}", path.display()))?;
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    out.write_all(&data)?;
-
-    Ok(())
-}
-
-fn cmd_stdio(
-    event_dir: &PathBuf,
-    cas_dir: &PathBuf,
-    pid: u32,
-    stream: &str,
-) -> Result<()> {
-    let events = read_all_events(event_dir)?;
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for event in &events {
-        if let EventPayload::Stdio(stdio) = &event.payload {
-            if stdio.pid != pid {
-                continue;
-            }
-
-            let include = match stream {
-                "stdout" => stdio.subtype == StdioSubtype::Stdout,
-                "stderr" => stdio.subtype == StdioSubtype::Stderr,
-                "stdin" => stdio.subtype == StdioSubtype::Stdin,
-                "all" => true,
-                other => bail!("unknown stream: {other} (use stdout, stderr, stdin, or all)"),
-            };
-
-            if !include {
-                continue;
-            }
-
-            if let Some(hash_str) = &stdio.content_hash {
-                let hash = ContentHash::try_from(hash_str.clone())
-                    .map_err(|e| anyhow::anyhow!("invalid hash in event: {e}"))?;
-                let path = cas_dir.join(hash.prefix()).join(hash.suffix());
-                match fs::read(&path) {
-                    Ok(data) => out.write_all(&data)?,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: CAS object {} not found: {e}",
-                            hash_str
-                        );
-                    }
+        Command::Stdio { pid, stream, follow } => {
+            if follow {
+                let s = stream.as_deref().unwrap_or("stdout");
+                let mut resp = c.stdio_follow(pid, s).await?;
+                while let Some(chunk) = resp.chunk().await? {
+                    let text = String::from_utf8_lossy(&chunk);
+                    print!("{text}");
                 }
+            } else {
+                output::print_stdio(&c.stdio(pid, stream.as_deref()).await?);
             }
         }
-    }
-
-    Ok(())
-}
-
-/// Read and parse all JSONL event files from the event directory,
-/// sorted by segment sequence number.
-fn read_all_events(event_dir: &PathBuf) -> Result<Vec<Event>> {
-    if !event_dir.exists() {
-        bail!("event directory does not exist: {}", event_dir.display());
-    }
-
-    let mut segments: Vec<PathBuf> = fs::read_dir(event_dir)
-        .with_context(|| format!("read event dir {}", event_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("jsonl")
-        })
-        .collect();
-
-    segments.sort_by(|a, b| {
-        let seq_a = segment_seq(a);
-        let seq_b = segment_seq(b);
-        seq_a.cmp(&seq_b)
-    });
-
-    let mut events = Vec::new();
-    for path in &segments {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("read segment {}", path.display()))?;
-
-        for (line_num, line) in content.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
+        Command::Pipeline { shell_pid } => {
+            output::print_pipeline(&c.pipeline(shell_pid).await?);
+        }
+        Command::ProcessTree { root, stdio, depth } => {
+            let tree = c.process_tree(root, stdio, depth).await?;
+            output::print_process_tree(&tree, 0);
+        }
+        Command::Cat { hash } => print!("{}", c.cat(&hash).await?),
+        Command::Diff { before, after, from, to } => {
+            if let (Some(from), Some(to)) = (from, to) {
+                output::print_tree_diff(&c.tree_diff(from, to).await?);
+            } else if let (Some(before), Some(after)) = (before, after) {
+                print!("{}", c.diff(&before, &after).await?);
+            } else {
+                anyhow::bail!("usage: argus diff <before> <after> OR argus diff --from <seq> --to <seq>");
             }
-            let event: Event = serde_json::from_str(line)
-                .with_context(|| {
-                    format!(
-                        "parse event at {}:{}",
-                        path.display(),
-                        line_num + 1,
-                    )
-                })?;
-            events.push(event);
+        }
+        Command::Snapshot { seq, path } => {
+            output::print_tree(&c.tree(seq, path.as_deref()).await?);
+        }
+        Command::Restore { timestamp, seq, target, in_place, force, path } => {
+            let req = helpers::build_restore_request(timestamp, seq, target, in_place, force, path)?;
+            output::print_restore(&c.restore(&req).await?);
+        }
+        Command::Undo { last, last_by_pid } => {
+            let req = types::UndoRequest { last, last_by_pid };
+            output::print_restore(&c.restore_undo(&req).await?);
+        }
+        Command::Connections { pid, active } => {
+            output::print_connections(&c.connections(pid, active).await?);
+        }
+        Command::StorageStatus => {
+            output::print_storage_status(&c.storage_status().await?);
+        }
+        Command::Rules { action } => match action {
+            None => output::print_rules(&c.rules().await?),
+            Some(RulesCommand::Set { file }) => {
+                let body = helpers::read_rules_file(&file)?;
+                output::print_rules_applied(&c.rules_set(body).await?);
+            }
+            Some(RulesCommand::Remove { index }) => {
+                output::print_rules_applied(&c.rules_remove(index).await?);
+            }
+        },
+        Command::Approvals => output::print_approvals(&c.pending_approvals().await?),
+        Command::Approve { action_id } => {
+            output::print_approve(&c.approve(&action_id).await?);
+        }
+        Command::Deny { action_id } => {
+            output::print_deny(&c.deny(&action_id).await?);
+        }
+        Command::DumpCheckpoint { seq, format } => {
+            eprintln!("dump-checkpoint not yet implemented (seq={seq}, format={format})");
+        }
+        Command::Agents { bucket: _ } => {
+            output::print_agents(&c.agents().await?);
+        }
+        Command::Timeline { agents, since, event_type } => {
+            let params = helpers::build_timeline_params(&agents, since.as_deref(), event_type.as_deref());
+            let body = c.timeline(&params).await?;
+            print!("{body}");
+        }
+        Command::Correlate { write_agent, read_agent, resource } => {
+            output::print_correlations(
+                &c.correlate(&write_agent, &read_agent, resource.as_deref()).await?,
+            );
         }
     }
-
-    Ok(events)
-}
-
-/// Extract segment sequence number from filename like "0.jsonl".
-fn segment_seq(path: &PathBuf) -> u64 {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(u64::MAX)
-}
-
-fn write_event_human(out: &mut impl Write, event: &Event) -> Result<()> {
-    let tag = event.payload.event_type_tag();
-    let pid_str = event
-        .payload
-        .pid()
-        .map(|p| format!(" pid={p}"))
-        .unwrap_or_default();
-
-    let paths = event.payload.paths();
-    let path_str = if paths.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", paths.join(" → "))
-    };
-
-    writeln!(
-        out,
-        "[{seq}] {ts} {tag}{pid}{path}",
-        seq = event.seq,
-        ts = &event.ts_wall[..19],
-        tag = tag,
-        pid = pid_str,
-        path = path_str,
-    )?;
 
     Ok(())
 }
