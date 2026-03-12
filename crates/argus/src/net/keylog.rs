@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::{event, Level};
 
-use crate::cas::{Cas, LocalCas};
+use crate::cas::Cas;
 use crate::events::network::TlsKeys;
 
 /// Parsed NSS Key Log line with label, client random, and secret.
@@ -106,7 +106,7 @@ impl KeylogWatcher {
     /// Returns an error if CAS storage fails.
     pub fn process_new_lines(
         &mut self,
-        cas: &LocalCas,
+        cas: &impl Cas,
         pid: u32,
         fd: i32,
     ) -> Result<Vec<TlsKeys>> {
@@ -186,6 +186,8 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    use crate::cas::LocalCas;
 
     /// 64 hex character client_random for tests (32 bytes).
     const TEST_CR: &str = "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";

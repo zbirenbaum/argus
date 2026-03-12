@@ -37,4 +37,18 @@ pub trait Cas: Send + Sync {
     fn exists(&self, hash: &ContentHash) -> Result<bool>;
 }
 
+impl<T: Cas> Cas for std::sync::Arc<T> {
+    fn get(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+        (**self).get(hash)
+    }
+
+    fn put(&self, content: &[u8]) -> Result<ContentHash> {
+        (**self).put(content)
+    }
+
+    fn exists(&self, hash: &ContentHash) -> Result<bool> {
+        (**self).exists(hash)
+    }
+}
+
 // Rust guideline compliant 2026-02-21

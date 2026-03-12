@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use nix::unistd::Pid;
 use tracing::{Level, event};
 
-use crate::cas::{Cas, LocalCas, ContentHash};
+use crate::cas::{Cas, ContentHash};
 
 use super::memory;
 
@@ -27,7 +27,7 @@ const MAX_SINGLE_READ: usize = 16 * 1024 * 1024;
 ///
 /// Returns an error if reading tracee memory or CAS storage fails.
 pub fn capture_write_buffer(
-    cas: &LocalCas,
+    cas: &impl Cas,
     pid: Pid,
     buf_addr: u64,
     len: u64,
@@ -61,7 +61,7 @@ pub fn capture_write_buffer(
 ///
 /// Returns an error if reading tracee memory or CAS storage fails.
 pub fn capture_iovec_buffer(
-    cas: &LocalCas,
+    cas: &impl Cas,
     pid: Pid,
     iov_addr: u64,
     iov_cnt: u64,
@@ -96,7 +96,7 @@ pub fn capture_iovec_buffer(
 /// propagating errors. Syscall handling should not abort on capture
 /// failure since the tracee must always be resumed.
 pub fn try_capture_flat(
-    cas: &LocalCas,
+    cas: &impl Cas,
     pid: Pid,
     buf_addr: u64,
     len: u64,
@@ -121,7 +121,7 @@ pub fn try_capture_flat(
 ///
 /// Same error-swallowing behavior as [`try_capture_flat`].
 pub fn try_capture_iovec(
-    cas: &LocalCas,
+    cas: &impl Cas,
     pid: Pid,
     iov_addr: u64,
     iov_cnt: u64,

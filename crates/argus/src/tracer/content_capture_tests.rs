@@ -1,4 +1,5 @@
 use super::*;
+use crate::cas::LocalCas;
 
 fn test_cas() -> LocalCas {
     let dir = tempfile::tempdir().expect("tempdir");

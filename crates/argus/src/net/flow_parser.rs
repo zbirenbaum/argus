@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{event, Level};
 
-use crate::cas::{Cas, LocalCas};
+use crate::cas::Cas;
 use crate::events::network::{HttpRequest, HttpResponse};
 
 /// Raw flow structure deserialized from mitmdump addon JSON output.
@@ -75,7 +75,7 @@ pub fn parse_flow_line(line: &str) -> Result<MitmdumpFlow> {
 /// Returns an error if JSON parsing, base64 decoding, or CAS storage fails.
 pub fn process_flow(
     flow: &MitmdumpFlow,
-    cas: &LocalCas,
+    cas: &impl Cas,
     pid: u32,
 ) -> Result<ProcessedFlow> {
     let req_headers_hash = store_headers(cas, &flow.request.headers)?;
@@ -120,7 +120,7 @@ pub fn process_flow(
 
 /// Serialize headers as JSON and store in CAS.
 fn store_headers(
-    cas: &LocalCas,
+    cas: &impl Cas,
     headers: &[(String, String)],
 ) -> Result<Option<String>> {
     if headers.is_empty() {
@@ -133,7 +133,7 @@ fn store_headers(
 
 /// Decode base64 body and store in CAS.
 fn store_body(
-    cas: &LocalCas,
+    cas: &impl Cas,
     body_b64: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(encoded) = body_b64 else {

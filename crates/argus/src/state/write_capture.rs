@@ -62,7 +62,7 @@ pub struct RenameCaptureGuard {
 ///
 /// Returns `None` if the file does not exist or cannot be read (e.g.,
 /// the path refers to a directory, device, or was already deleted).
-fn hash_and_store(cas: &LocalCas, path: &Path) -> Option<ContentHash> {
+fn hash_and_store(cas: &impl Cas, path: &Path) -> Option<ContentHash> {
     let data = match fs::read(path) {
         Ok(d) => d,
         Err(e) => {
@@ -100,7 +100,7 @@ fn hash_and_store(cas: &LocalCas, path: &Path) -> Option<ContentHash> {
 /// [`CaptureGuard`].
 fn lock_and_hash(
     locks: &WriteLocks,
-    cas: &LocalCas,
+    cas: &impl Cas,
     path: &Path,
 ) -> (Arc<Mutex<()>>, MutexGuard<'static, ()>, Option<ContentHash>) {
     let arc = locks.get_or_create(path);
@@ -125,7 +125,7 @@ fn lock_and_hash(
 /// is `None`).
 pub fn acquire_for_path(
     locks: &WriteLocks,
-    cas: &LocalCas,
+    cas: &impl Cas,
     path: &Path,
 ) -> CaptureGuard {
     let (arc, guard, before_hash) = lock_and_hash(locks, cas, path);
@@ -143,7 +143,7 @@ pub fn acquire_for_path(
 /// two renames cross paths concurrently.
 pub fn acquire_for_rename(
     locks: &WriteLocks,
-    cas: &LocalCas,
+    cas: &impl Cas,
     src: &Path,
     dst: &Path,
 ) -> RenameCaptureGuard {
@@ -195,7 +195,7 @@ impl CaptureGuard {
     /// Hashes the file after the syscall and produces the final result.
     ///
     /// Consumes `self`, releasing the per-path lock.
-    pub fn complete(self, cas: &LocalCas) -> CaptureResult {
+    pub fn complete(self, cas: &impl Cas) -> CaptureResult {
         let after_hash = hash_and_store(cas, &self.path);
         CaptureResult {
             before_hash: self.before_hash,
@@ -226,7 +226,7 @@ impl RenameCaptureGuard {
     /// destination has the source's former content.
     ///
     /// Consumes `self`, releasing both per-path locks.
-    pub fn complete(self, cas: &LocalCas) -> (CaptureResult, CaptureResult) {
+    pub fn complete(self, cas: &impl Cas) -> (CaptureResult, CaptureResult) {
         let src_result = CaptureResult {
             before_hash: self.src_before_hash,
             after_hash: None,

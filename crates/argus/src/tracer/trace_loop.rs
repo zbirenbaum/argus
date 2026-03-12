@@ -61,7 +61,7 @@ pub struct PendingCapture {
 }
 
 /// Hashes a file's content via CAS, returning `None` on any error.
-pub fn hash_file_content(cas: &LocalCas, path: &str) -> Option<String> {
+pub fn hash_file_content(cas: &impl Cas, path: &str) -> Option<String> {
     let data = std::fs::read(path).ok()?;
     cas.put(&data).ok().map(|h| h.to_string())
 }
