@@ -1,0 +1,48 @@
+# Argus supervisor + Claude Code agent image.
+#
+# Builds on the production supervisor image and adds everything
+# Claude Code needs to run as the traced agent process:
+#   - Node.js 22 (Claude Code runtime)
+#   - Claude Code CLI
+#   - mitmproxy (TLS interception)
+#   - Python 3 (mitmproxy + addon script)
+
+FROM argus-supervisor:latest AS base
+
+# System deps: Node.js, Python for mitmproxy, curl for health checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    python3-pip \
+    pipx \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code
+RUN npm install -g @anthropic-ai/claude-code
+
+# mitmproxy (mitmdump is spawned by the supervisor)
+RUN pipx install mitmproxy
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Non-root user for Claude Code (refuses --dangerously-skip-permissions as root).
+# Supervisor stays root (ptrace requires it) and spawns the agent command,
+# which uses `su` to drop privileges before exec.
+RUN useradd -m -s /bin/bash -u 1000 agent \
+    && mkdir -p /data /workspace \
+    && chown agent:agent /workspace
+
+# The supervisor generates its CA at startup into /data/tls/.
+# It sets NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, HTTPS_PROXY, HTTP_PROXY
+# on the agent process automatically — no manual cert wiring needed.
+
+VOLUME ["/data", "/workspace"]
+WORKDIR /workspace
+
+# supervisor is PID 1 (root); run_as config drops to agent (uid 1000) before exec.
+ENTRYPOINT ["/usr/local/bin/supervisor", "--config", "/etc/argus/supervisor.yaml", "--"]
+CMD ["claude", "--dangerously-skip-permissions"]

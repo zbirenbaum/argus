@@ -1,0 +1,36 @@
+# Supervisor config for Claude Code agent with MinIO sync.
+#
+# The supervisor captures all file I/O, network, and process events
+# from the Claude Code session and syncs them to MinIO.
+
+storage:
+  s3:
+    bucket: argus-events
+    region: us-east-1
+    prefix: "agents/"
+    endpoint: http://minio:9000
+  upload:
+    max_concurrent: 4
+    max_attempts: 5
+    retry_backoff_base: 1s
+  local_buffer:
+    cas_dir: /data/cas
+    event_dir: /data/events
+    max_size: 2GB
+    min_retention: 5m
+  digest_cache:
+    path: /data/digest-cache.bin
+    ttl: 7d
+    snapshot_interval: 10m
+    rebuild_on_start: true
+
+tls:
+  proxy_mode: transparent
+  mitm_proxy_port: 8080
+
+run_as:
+  uid: 1000
+  gid: 1000
+
+durability:
+  default: remote

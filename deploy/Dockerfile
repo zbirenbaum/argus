@@ -1,8 +1,9 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.94-bookworm AS builder
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY scripts/ scripts/
 
 RUN cargo build --release --bin supervisor
 
