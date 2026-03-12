@@ -1,26 +1,28 @@
-//! Pause-before-action rule configuration.
+// Rust guideline compliant 2026-02-21
+//! Rule configuration for syscall interception.
 //!
-//! Rules are evaluated on every intercepted syscall entry. When a rule
-//! matches, the supervisor either pauses the tracee (awaiting approval)
-//! or denies the syscall outright by injecting `EPERM`.
+//! Rules are evaluated on every intercepted syscall entry. Block rules
+//! deny immediately with EPERM. Pause-before-action rules hold the
+//! tracee and wait for operator approval.
+//!
+//! The [`RuleSet`] is hot-reloadable via `Arc<ArcSwap<RuleSet>>` —
+//! the API handler swaps atomically and the ptrace loop loads on each
+//! syscall stop.
 
 use serde::{Deserialize, Serialize};
 
-/// A single pause-before-action rule.
+/// A single rule targeting a syscall category.
 ///
-/// Each rule targets a specific syscall category and narrows the match
-/// with path globs, binary names, or network destinations.
-///
-/// Glob patterns in `paths` and `destinations` are pre-compiled at
-/// deserialization time via [`PauseRule::validate_patterns`].
+/// Each rule narrows the match with path globs, binary names, or
+/// network destinations. Glob patterns are pre-compiled at load time
+/// via [`Rule::validate_patterns`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PauseRule {
+pub struct Rule {
     /// Which syscall category this rule applies to.
     #[serde(rename = "type")]
-    pub match_kind: PauseMatchKind,
+    pub match_kind: MatchKind,
 
     /// Glob patterns matched against the syscall's resolved path.
-    /// Only relevant for file-oriented match kinds.
     #[serde(default)]
     pub paths: Vec<String>,
 
@@ -29,13 +31,8 @@ pub struct PauseRule {
     pub binaries: Vec<String>,
 
     /// Network destination patterns like `*:22` or `10.0.0.0/8:*`.
-    /// Only relevant for `connect` match kind.
     #[serde(default)]
     pub destinations: Vec<String>,
-
-    /// What to do when the rule matches. Defaults to pause.
-    #[serde(default)]
-    pub action: PauseAction,
 
     /// Pre-compiled glob patterns for `paths`. Built by `validate_patterns`.
     #[serde(skip)]
@@ -46,20 +43,22 @@ pub struct PauseRule {
     compiled_destinations: Vec<glob::Pattern>,
 }
 
-impl PartialEq for PauseRule {
+impl PartialEq for Rule {
     fn eq(&self, other: &Self) -> bool {
         self.match_kind == other.match_kind
             && self.paths == other.paths
             && self.binaries == other.binaries
             && self.destinations == other.destinations
-            && self.action == other.action
     }
 }
 
-/// Syscall category that a pause rule targets.
+/// Syscall category that a rule targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum PauseMatchKind {
+pub enum MatchKind {
+    /// File reads (`read`, `pread64`, `readv`).
+    Read,
+
     /// File deletion (`unlink`, `unlinkat`).
     Unlink,
 
@@ -79,7 +78,105 @@ pub enum PauseMatchKind {
     Chmod,
 }
 
-/// Action taken when a pause rule matches.
+/// Combined block + pause-before-action rule set.
+///
+/// Block rules evaluate first (instant EPERM, no approval queue).
+/// Pause-before-action rules evaluate second (hold + wait for approval).
+/// First match wins within each category.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RuleSet {
+    /// Rules that immediately deny with EPERM.
+    #[serde(default)]
+    pub block: Vec<Rule>,
+
+    /// Rules that pause for operator approval.
+    #[serde(default)]
+    pub pause_before: Vec<Rule>,
+}
+
+impl RuleSet {
+    /// Pre-compile all glob patterns in both rule lists.
+    pub fn compile_patterns(&mut self) {
+        for rule in &mut self.block {
+            rule.validate_patterns();
+        }
+        for rule in &mut self.pause_before {
+            rule.validate_patterns();
+        }
+    }
+
+    /// Total number of rules across both lists.
+    pub fn rule_count(&self) -> usize {
+        self.block.len() + self.pause_before.len()
+    }
+
+    /// Evaluate all rules against a syscall context.
+    ///
+    /// Returns the action to take: `Block` if a block rule matched,
+    /// `Pause` if a pause-before-action rule matched, or `Allow` if
+    /// no rules matched.
+    pub fn evaluate(
+        &self,
+        kind: MatchKind,
+        path: Option<&str>,
+        binary: Option<&str>,
+        destination: Option<&str>,
+    ) -> RuleDecision {
+        for (i, rule) in self.block.iter().enumerate() {
+            if rule.matches(kind, path, binary, destination) {
+                return RuleDecision::Block { rule_index: i };
+            }
+        }
+        for (i, rule) in self.pause_before.iter().enumerate() {
+            if rule.matches(kind, path, binary, destination) {
+                return RuleDecision::Pause { rule_index: i };
+            }
+        }
+        RuleDecision::Allow
+    }
+
+    /// Human-readable description of a block rule by index.
+    pub fn block_rule_description(&self, index: usize) -> String {
+        self.block
+            .get(index)
+            .map(Rule::description)
+            .unwrap_or_else(|| "unknown".into())
+    }
+
+    /// Human-readable description of a pause rule by index.
+    pub fn pause_rule_description(&self, index: usize) -> String {
+        self.pause_before
+            .get(index)
+            .map(Rule::description)
+            .unwrap_or_else(|| "unknown".into())
+    }
+}
+
+/// Outcome of evaluating the rule set against a syscall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleDecision {
+    /// No rules matched — allow the syscall.
+    Allow,
+    /// A block rule matched — inject EPERM immediately.
+    Block {
+        /// Index into `RuleSet::block`.
+        rule_index: usize,
+    },
+    /// A pause-before-action rule matched — hold for approval.
+    Pause {
+        /// Index into `RuleSet::pause_before`.
+        rule_index: usize,
+    },
+}
+
+// --- Backwards compatibility aliases for config deserialization ---
+
+/// Alias for [`Rule`] used in config YAML `pause_before` section.
+pub type PauseRule = Rule;
+/// Alias for [`MatchKind`].
+pub type PauseMatchKind = MatchKind;
+
+/// Action taken when a pause rule matches (legacy config field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PauseAction {
@@ -91,9 +188,8 @@ pub enum PauseAction {
     Deny,
 }
 
-impl PauseRule {
-    /// Compile glob patterns in `paths` and `destinations`, logging
-    /// warnings for any invalid patterns.
+impl Rule {
+    /// Compile glob patterns in `paths` and `destinations`.
     ///
     /// Must be called after deserialization before using `matches`.
     pub fn validate_patterns(&mut self) {
@@ -102,13 +198,9 @@ impl PauseRule {
     }
 
     /// Test whether this rule matches a syscall with the given context.
-    ///
-    /// `kind` is the syscall category, `path` is the resolved filesystem
-    /// path (if any), `binary` is the executable basename (for exec),
-    /// and `destination` is the network target (for connect).
     pub fn matches(
         &self,
-        kind: PauseMatchKind,
+        kind: MatchKind,
         path: Option<&str>,
         binary: Option<&str>,
         destination: Option<&str>,
@@ -118,12 +210,30 @@ impl PauseRule {
         }
 
         match kind {
-            PauseMatchKind::Unlink
-            | PauseMatchKind::Write
-            | PauseMatchKind::Rename
-            | PauseMatchKind::Chmod => self.matches_path(path),
-            PauseMatchKind::Exec => self.matches_binary(binary),
-            PauseMatchKind::Connect => self.matches_destination(destination),
+            MatchKind::Read
+            | MatchKind::Unlink
+            | MatchKind::Write
+            | MatchKind::Rename
+            | MatchKind::Chmod => self.matches_path(path),
+            MatchKind::Exec => self.matches_binary(binary),
+            MatchKind::Connect => self.matches_destination(destination),
+        }
+    }
+
+    /// Human-readable summary of this rule.
+    pub fn description(&self) -> String {
+        let kind = serde_json::to_string(&self.match_kind)
+            .unwrap_or_else(|_| format!("{:?}", self.match_kind));
+        let kind = kind.trim_matches('"');
+
+        if !self.paths.is_empty() {
+            format!("{kind} {}", self.paths.join(", "))
+        } else if !self.binaries.is_empty() {
+            format!("{kind} {}", self.binaries.join(", "))
+        } else if !self.destinations.is_empty() {
+            format!("{kind} {}", self.destinations.join(", "))
+        } else {
+            format!("{kind} *")
         }
     }
 
@@ -181,18 +291,16 @@ mod tests {
     use super::*;
 
     fn make_rule(
-        kind: PauseMatchKind,
+        kind: MatchKind,
         paths: Vec<String>,
         binaries: Vec<String>,
         destinations: Vec<String>,
-        action: PauseAction,
-    ) -> PauseRule {
-        let mut rule = PauseRule {
+    ) -> Rule {
+        let mut rule = Rule {
             match_kind: kind,
             paths,
             binaries,
             destinations,
-            action,
             compiled_paths: Vec::new(),
             compiled_destinations: Vec::new(),
         };
@@ -200,33 +308,39 @@ mod tests {
         rule
     }
 
-    fn unlink_rule() -> PauseRule {
+    fn unlink_rule() -> Rule {
         make_rule(
-            PauseMatchKind::Unlink,
+            MatchKind::Unlink,
             vec!["/workspace/**".into()],
             Vec::new(),
             Vec::new(),
-            PauseAction::Pause,
         )
     }
 
-    fn exec_rule() -> PauseRule {
+    fn exec_rule() -> Rule {
         make_rule(
-            PauseMatchKind::Exec,
+            MatchKind::Exec,
             Vec::new(),
             vec!["rm".into(), "curl".into(), "wget".into()],
             Vec::new(),
-            PauseAction::Pause,
         )
     }
 
-    fn connect_rule() -> PauseRule {
+    fn connect_rule() -> Rule {
         make_rule(
-            PauseMatchKind::Connect,
+            MatchKind::Connect,
             Vec::new(),
             Vec::new(),
             vec!["*:22".into(), "*:25".into()],
-            PauseAction::Deny,
+        )
+    }
+
+    fn read_block_rule() -> Rule {
+        make_rule(
+            MatchKind::Read,
+            vec!["*.env".into(), "*.key".into(), "*.pem".into()],
+            Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -234,7 +348,7 @@ mod tests {
     fn unlink_matches_workspace_path() {
         let rule = unlink_rule();
         assert!(rule.matches(
-            PauseMatchKind::Unlink,
+            MatchKind::Unlink,
             Some("/workspace/important.txt"),
             None,
             None,
@@ -245,7 +359,7 @@ mod tests {
     fn unlink_ignores_outside_workspace() {
         let rule = unlink_rule();
         assert!(!rule.matches(
-            PauseMatchKind::Unlink,
+            MatchKind::Unlink,
             Some("/tmp/scratch.txt"),
             None,
             None,
@@ -256,7 +370,7 @@ mod tests {
     fn unlink_rule_ignores_wrong_kind() {
         let rule = unlink_rule();
         assert!(!rule.matches(
-            PauseMatchKind::Write,
+            MatchKind::Write,
             Some("/workspace/foo.txt"),
             None,
             None,
@@ -266,27 +380,27 @@ mod tests {
     #[test]
     fn exec_matches_listed_binary() {
         let rule = exec_rule();
-        assert!(rule.matches(PauseMatchKind::Exec, None, Some("rm"), None));
-        assert!(rule.matches(PauseMatchKind::Exec, None, Some("curl"), None));
+        assert!(rule.matches(MatchKind::Exec, None, Some("rm"), None));
+        assert!(rule.matches(MatchKind::Exec, None, Some("curl"), None));
     }
 
     #[test]
     fn exec_ignores_unlisted_binary() {
         let rule = exec_rule();
-        assert!(!rule.matches(PauseMatchKind::Exec, None, Some("ls"), None));
+        assert!(!rule.matches(MatchKind::Exec, None, Some("ls"), None));
     }
 
     #[test]
     fn connect_matches_port_glob() {
         let rule = connect_rule();
         assert!(rule.matches(
-            PauseMatchKind::Connect,
+            MatchKind::Connect,
             None,
             None,
             Some("10.0.0.1:22"),
         ));
         assert!(rule.matches(
-            PauseMatchKind::Connect,
+            MatchKind::Connect,
             None,
             None,
             Some("mail.example.com:25"),
@@ -297,7 +411,7 @@ mod tests {
     fn connect_ignores_unmatched_port() {
         let rule = connect_rule();
         assert!(!rule.matches(
-            PauseMatchKind::Connect,
+            MatchKind::Connect,
             None,
             None,
             Some("api.example.com:443"),
@@ -305,13 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn deny_action_serde() {
-        let rule = connect_rule();
-        assert_eq!(rule.action, PauseAction::Deny);
-        let yaml = serde_yaml::to_string(&rule).unwrap();
-        let mut parsed: PauseRule = serde_yaml::from_str(&yaml).unwrap();
-        parsed.validate_patterns();
-        assert_eq!(parsed.action, PauseAction::Deny);
+    fn read_rule_matches_sensitive_files() {
+        let rule = read_block_rule();
+        assert!(rule.matches(MatchKind::Read, Some(".env"), None, None));
+        assert!(rule.matches(MatchKind::Read, Some("server.key"), None, None));
+        assert!(rule.matches(MatchKind::Read, Some("cert.pem"), None, None));
+        assert!(!rule.matches(MatchKind::Read, Some("main.py"), None, None));
     }
 
     #[test]
@@ -322,15 +435,16 @@ mod tests {
     #[test]
     fn match_kind_round_trip() {
         for kind in [
-            PauseMatchKind::Unlink,
-            PauseMatchKind::Exec,
-            PauseMatchKind::Write,
-            PauseMatchKind::Connect,
-            PauseMatchKind::Rename,
-            PauseMatchKind::Chmod,
+            MatchKind::Read,
+            MatchKind::Unlink,
+            MatchKind::Exec,
+            MatchKind::Write,
+            MatchKind::Connect,
+            MatchKind::Rename,
+            MatchKind::Chmod,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
-            let parsed: PauseMatchKind = serde_json::from_str(&json).unwrap();
+            let parsed: MatchKind = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, kind);
         }
     }
@@ -338,14 +452,13 @@ mod tests {
     #[test]
     fn empty_paths_matches_any_path() {
         let rule = make_rule(
-            PauseMatchKind::Write,
+            MatchKind::Write,
             Vec::new(),
             Vec::new(),
             Vec::new(),
-            PauseAction::Pause,
         );
         assert!(rule.matches(
-            PauseMatchKind::Write,
+            MatchKind::Write,
             Some("/any/path/file.txt"),
             None,
             None,
@@ -355,25 +468,24 @@ mod tests {
     #[test]
     fn write_rule_with_extension_globs() {
         let rule = make_rule(
-            PauseMatchKind::Write,
+            MatchKind::Write,
             vec!["*.env".into(), "*.key".into(), "*.pem".into()],
             Vec::new(),
             Vec::new(),
-            PauseAction::Pause,
         );
-        assert!(rule.matches(PauseMatchKind::Write, Some(".env"), None, None));
-        assert!(rule.matches(PauseMatchKind::Write, Some("server.key"), None, None));
-        assert!(!rule.matches(PauseMatchKind::Write, Some("main.py"), None, None));
+        assert!(rule.matches(MatchKind::Write, Some(".env"), None, None));
+        assert!(rule.matches(MatchKind::Write, Some("server.key"), None, None));
+        assert!(!rule.matches(MatchKind::Write, Some("main.py"), None, None));
     }
 
     #[test]
     fn serde_uses_type_key() {
         let yaml = "type: unlink\npaths: [\"/workspace/**\"]\n";
-        let mut rule: PauseRule = serde_yaml::from_str(yaml).unwrap();
+        let mut rule: Rule = serde_yaml::from_str(yaml).unwrap();
         rule.validate_patterns();
-        assert_eq!(rule.match_kind, PauseMatchKind::Unlink);
+        assert_eq!(rule.match_kind, MatchKind::Unlink);
         assert!(rule.matches(
-            PauseMatchKind::Unlink,
+            MatchKind::Unlink,
             Some("/workspace/foo.txt"),
             None,
             None,
@@ -385,5 +497,74 @@ mod tests {
         let a = unlink_rule();
         let b = unlink_rule();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rule_description_includes_kind_and_targets() {
+        let rule = exec_rule();
+        let desc = rule.description();
+        assert!(desc.contains("exec"), "got: {desc}");
+        assert!(desc.contains("rm"), "got: {desc}");
+    }
+
+    // --- RuleSet tests ---
+
+    fn sample_ruleset() -> RuleSet {
+        let mut rs = RuleSet {
+            block: vec![read_block_rule()],
+            pause_before: vec![unlink_rule(), exec_rule()],
+        };
+        rs.compile_patterns();
+        rs
+    }
+
+    #[test]
+    fn ruleset_block_takes_priority() {
+        let rs = sample_ruleset();
+        let decision = rs.evaluate(MatchKind::Read, Some(".env"), None, None);
+        assert!(matches!(decision, RuleDecision::Block { rule_index: 0 }));
+    }
+
+    #[test]
+    fn ruleset_pause_when_no_block() {
+        let rs = sample_ruleset();
+        let decision = rs.evaluate(
+            MatchKind::Unlink,
+            Some("/workspace/foo.txt"),
+            None,
+            None,
+        );
+        assert!(matches!(decision, RuleDecision::Pause { rule_index: 0 }));
+    }
+
+    #[test]
+    fn ruleset_allow_when_no_match() {
+        let rs = sample_ruleset();
+        let decision = rs.evaluate(MatchKind::Read, Some("main.py"), None, None);
+        assert_eq!(decision, RuleDecision::Allow);
+    }
+
+    #[test]
+    fn ruleset_rule_count() {
+        let rs = sample_ruleset();
+        assert_eq!(rs.rule_count(), 3);
+    }
+
+    #[test]
+    fn ruleset_serde_round_trip() {
+        let rs = sample_ruleset();
+        let json = serde_json::to_string(&rs).unwrap();
+        let mut parsed: RuleSet = serde_json::from_str(&json).unwrap();
+        parsed.compile_patterns();
+        assert_eq!(parsed, rs);
+    }
+
+    #[test]
+    fn empty_ruleset_allows_everything() {
+        let rs = RuleSet::default();
+        assert_eq!(
+            rs.evaluate(MatchKind::Write, Some("/anything"), None, None),
+            RuleDecision::Allow,
+        );
     }
 }

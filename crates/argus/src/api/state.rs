@@ -9,9 +9,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
 use crate::api::types::PendingApprovalEntry;
+use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
 
 /// Shared supervisor state for API and tracer threads.
@@ -26,6 +28,7 @@ pub struct SupervisorState {
     seq_gen: SequenceGenerator,
     pending_approvals: HashMap<String, PendingApprovalEntry>,
     event_tx: Option<mpsc::UnboundedSender<Event>>,
+    rules: Arc<ArcSwap<RuleSet>>,
 }
 
 impl SupervisorState {
@@ -38,6 +41,7 @@ impl SupervisorState {
             seq_gen: SequenceGenerator::default(),
             pending_approvals: HashMap::new(),
             event_tx: None,
+            rules: Arc::new(ArcSwap::from_pointee(RuleSet::default())),
         }
     }
 
@@ -50,6 +54,7 @@ impl SupervisorState {
             seq_gen: SequenceGenerator::default(),
             pending_approvals: HashMap::new(),
             event_tx: Some(event_tx),
+            rules: Arc::new(ArcSwap::from_pointee(RuleSet::default())),
         }
     }
 
@@ -111,6 +116,25 @@ impl SupervisorState {
     /// Number of pending approvals.
     pub fn pending_count(&self) -> usize {
         self.pending_approvals.len()
+    }
+
+    /// Returns a handle to the `ArcSwap<RuleSet>` for lock-free reads.
+    ///
+    /// The tracer thread calls `rules_handle().load()` on each syscall
+    /// stop. The API thread calls `rules_handle().store()` to swap
+    /// atomically.
+    pub fn rules_handle(&self) -> &Arc<ArcSwap<RuleSet>> {
+        &self.rules
+    }
+
+    /// Load the current rule set snapshot.
+    pub fn load_rules(&self) -> arc_swap::Guard<Arc<RuleSet>> {
+        self.rules.load()
+    }
+
+    /// Atomically replace the active rule set.
+    pub fn store_rules(&self, new_rules: RuleSet) {
+        self.rules.store(Arc::new(new_rules));
     }
 }
 

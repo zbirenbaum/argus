@@ -21,6 +21,22 @@ pub enum ApiError {
         /// Current state description.
         state: &'static str,
     },
+
+    /// The rule index is out of bounds.
+    #[error("rule index {index} out of bounds (total: {total})")]
+    RuleIndexOutOfBounds {
+        /// The requested index.
+        index: usize,
+        /// Total number of rules.
+        total: usize,
+    },
+
+    /// The request body could not be parsed.
+    #[error("invalid request body: {reason}")]
+    InvalidBody {
+        /// Description of the problem.
+        reason: String,
+    },
 }
 
 impl IntoResponse for ApiError {
@@ -28,6 +44,8 @@ impl IntoResponse for ApiError {
         let (status, message) = match &self {
             ApiError::ActionNotFound { .. } => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::AlreadyInState { .. } => (StatusCode::CONFLICT, self.to_string()),
+            ApiError::RuleIndexOutOfBounds { .. } => (StatusCode::NOT_FOUND, self.to_string()),
+            ApiError::InvalidBody { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
         };
 
         let body = axum::Json(json!({ "error": message }));

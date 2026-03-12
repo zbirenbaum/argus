@@ -10,13 +10,38 @@ POST /agent/resume  → Resume all. Returns immediately.
 GET  /agent/status  → running | paused | partially_paused + process list
 ```
 
-## Pause-Before-Action Rules
+## Rules
 
-Hook point is in the supervisor main loop (see `01-supervisor.md`). Rule check runs on every syscall entry. Phase 1: stub that returns "allow." The hook shape must exist from day one.
+Rules control what traced processes can do. Two types share the same hook point (syscall entry in the ptrace loop) and the same matching logic. Evaluated on every syscall stop, sequentially — the ptrace loop is single-threaded, so no concurrent access.
+
+### Rule Types
+
+**Block rules** — instant deny, no approval prompt. The syscall gets EPERM injected immediately and a `blocked` event is emitted. Use for hard security boundaries.
+
+**Pause-before-action rules** — hold the process, emit `pending_approval`, wait for operator decision via API/WebSocket. Approve resumes normally; deny injects EPERM.
+
+### Evaluation Order
+
+1. Block rules evaluate first (highest priority)
+2. Pause-before-action rules evaluate second
+3. No match → allow (syscall proceeds normally)
+
+First matching rule wins within each category.
 
 ### Configuration
 
 ```yaml
+block:
+  - type: read
+    paths: ["*.env", "*.key", "*.pem", "*.credentials"]
+    action: deny
+  - type: write
+    paths: ["/etc/passwd", "/etc/shadow"]
+    action: deny
+  - type: exec
+    binaries: ["rm -rf /"]
+    action: deny
+
 pause_before:
   - type: unlink
     paths: ["/workspace/**"]
@@ -28,20 +53,58 @@ pause_before:
     destinations: ["*:22", "*:25"]
 ```
 
-### Decision Flow
+### Hot Reload
 
-1. Tracee stops at syscall entry (already stopped — free)
-2. Check rules against syscall + path/binary
-3. If match: emit `pending_approval` event, notify via API
+Rules are hot-reloadable via API. No restart required, no downtime.
+
+**Implementation:** Rules live in `Arc<ArcSwap<RuleSet>>`. The API handler builds and validates a new `RuleSet`, then calls `rules.store(Arc::new(new_rules))`. The ptrace loop calls `rules.load()` on each syscall stop — it sees either the old set or the new set, never a partial update. Zero locking, zero contention.
+
+A `rules_updated` event is emitted on every change so the log shows when rules changed relative to other events.
+
+### Rules API
+
+```
+GET  /rules                → Current active ruleset
+POST /rules                → Replace entire ruleset (validates, swaps atomically)
+  Body: {block: [...], pause_before: [...]}
+  → {applied: true, rule_count: 5}
+DELETE /rules/{index}      → Remove single rule, swap
+  → {applied: true, rule_count: 4}
+```
+
+### Decision Flow (block)
+
+1. Tracee stops at syscall entry
+2. Check block rules against syscall + path/binary
+3. If match: inject EPERM, emit `blocked` event, resume tracee
+4. Process sees "permission denied" — no approval queue involved
+
+### Decision Flow (pause-before-action)
+
+1. Tracee stops at syscall entry (no block rule matched)
+2. Check pause-before-action rules against syscall + path/binary
+3. If match: emit `pending_approval` event, notify via API/WebSocket
 4. Wait for `POST /approvals/{action_id}/approve` or `/deny`
-5. Approve → resume normally. Deny → inject EPERM (process sees "permission denied")
+5. Approve → resume normally. Deny → inject EPERM
 
-### API
+### Approvals API
 
 ```
 GET  /approvals/pending                  → List pending actions
 POST /approvals/{action_id}/approve      → Allow syscall
 POST /approvals/{action_id}/deny         → Inject EPERM
+```
+
+### Events
+
+Block events:
+```json
+{"type": "blocked", "pid": 42, "syscall": "read", "path": "/workspace/.env", "rule": "*.env"}
+```
+
+Rules change events:
+```json
+{"type": "rules_updated", "block_count": 3, "pause_before_count": 4, "source": "api"}
 ```
 
 ### WebSocket

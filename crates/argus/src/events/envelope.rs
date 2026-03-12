@@ -63,6 +63,8 @@ pub enum EventPayload {
     PendingApproval(control::PendingApproval),
     ApprovalGranted(control::ApprovalGranted),
     ApprovalDenied(control::ApprovalDenied),
+    Blocked(control::Blocked),
+    RulesUpdated(control::RulesUpdated),
 
     // Snapshot
     InitialFile(snapshot::InitialFile),
@@ -183,6 +185,8 @@ impl EventPayload {
             Self::PendingApproval(_) => "pending_approval",
             Self::ApprovalGranted(_) => "approval_granted",
             Self::ApprovalDenied(_) => "approval_denied",
+            Self::Blocked(_) => "blocked",
+            Self::RulesUpdated(_) => "rules_updated",
             Self::InitialFile(_) => "initial_file",
             Self::InitialState(_) => "initial_state",
             Self::Checkpoint(_) => "checkpoint",
@@ -222,11 +226,13 @@ impl EventPayload {
             Self::PendingApproval(p) => Some(p.pid),
             Self::ApprovalGranted(a) => Some(a.pid),
             Self::ApprovalDenied(a) => Some(a.pid),
+            Self::Blocked(b) => Some(b.pid),
             Self::MmapWarning(m) => Some(m.pid),
             Self::InitialFile(f) => Some(f.pid),
             Self::AgentStart(_)
             | Self::AgentPause(_)
             | Self::AgentResume(_)
+            | Self::RulesUpdated(_)
             | Self::InitialState(_)
             | Self::Checkpoint(_) => None,
         }
@@ -250,6 +256,7 @@ impl EventPayload {
             Self::Symlink(s) => vec![&s.target, &s.link_path],
             Self::MmapWarning(m) => vec![&m.path],
             Self::InitialFile(f) => vec![&f.path],
+            Self::Blocked(b) => b.path.as_deref().into_iter().collect(),
             _ => vec![],
         }
     }

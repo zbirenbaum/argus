@@ -13,8 +13,9 @@ use crate::api::errors::ApiError;
 use crate::api::state::{SharedState, resolve_approval};
 use crate::api::types::{
     ApproveResponse, DenyResponse, HealthResponse, PauseResponse, PendingAction,
-    PendingApprovalsResponse, ResumeResponse, StatusResponse,
+    PendingApprovalsResponse, ResumeResponse, RulesAppliedResponse, StatusResponse,
 };
+use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, EventPayload};
 use crate::events::control;
 
@@ -168,6 +169,81 @@ pub async fn health_handler(State(state): State<SharedState>) -> Json<HealthResp
         agent_id: guard.agent_id().to_owned(),
         event_count: guard.event_seq(),
     })
+}
+
+/// `GET /rules` — current active rule set.
+pub async fn get_rules_handler(State(state): State<SharedState>) -> Json<RuleSet> {
+    let guard = state.lock().expect("state lock poisoned");
+    let rules = guard.load_rules();
+    Json((**rules).clone())
+}
+
+/// `POST /rules` — replace the entire rule set atomically.
+///
+/// # Errors
+///
+/// Returns `400 Bad Request` if the JSON body is invalid.
+pub async fn set_rules_handler(
+    State(state): State<SharedState>,
+    Json(mut new_rules): Json<RuleSet>,
+) -> Result<Json<RulesAppliedResponse>, ApiError> {
+    new_rules.compile_patterns();
+    let count = new_rules.rule_count();
+
+    let guard = state.lock().expect("state lock poisoned");
+    guard.store_rules(new_rules);
+    guard.emit(EventPayload::RulesUpdated(control::RulesUpdated {
+        block_count: guard.load_rules().block.len(),
+        pause_before_count: guard.load_rules().pause_before.len(),
+        source: "api".into(),
+    }));
+
+    Ok(Json(RulesAppliedResponse {
+        applied: true,
+        rule_count: count,
+    }))
+}
+
+/// `DELETE /rules/{index}` — remove a single rule by global index.
+///
+/// Indices `0..block.len()` refer to block rules; indices
+/// `block.len()..` refer to pause-before-action rules.
+///
+/// # Errors
+///
+/// Returns `404 Not Found` if the index is out of bounds.
+pub async fn delete_rule_handler(
+    State(state): State<SharedState>,
+    Path(index): Path<usize>,
+) -> Result<Json<RulesAppliedResponse>, ApiError> {
+    let guard = state.lock().expect("state lock poisoned");
+    let current = guard.load_rules();
+    let total = current.rule_count();
+
+    if index >= total {
+        return Err(ApiError::RuleIndexOutOfBounds { index, total });
+    }
+
+    let mut new_rules = (**current).clone();
+    let block_len = new_rules.block.len();
+    if index < block_len {
+        new_rules.block.remove(index);
+    } else {
+        new_rules.pause_before.remove(index - block_len);
+    }
+
+    let count = new_rules.rule_count();
+    guard.store_rules(new_rules);
+    guard.emit(EventPayload::RulesUpdated(control::RulesUpdated {
+        block_count: guard.load_rules().block.len(),
+        pause_before_count: guard.load_rules().pause_before.len(),
+        source: "api".into(),
+    }));
+
+    Ok(Json(RulesAppliedResponse {
+        applied: true,
+        rule_count: count,
+    }))
 }
 
 /// Submits a pending approval from the tracer thread.

@@ -14,7 +14,9 @@ mod storage;
 mod tls;
 
 pub use durability::{DurabilityConfig, DurabilityMode, DurabilityOverride};
-pub use pause_rules::{PauseAction, PauseMatchKind, PauseRule};
+pub use pause_rules::{
+    MatchKind, PauseAction, PauseMatchKind, PauseRule, Rule, RuleDecision, RuleSet,
+};
 pub use storage::{DigestCacheConfig, LocalBufferConfig, S3Config, StorageConfig, UploadConfig};
 pub use tls::TlsConfig;
 
@@ -65,7 +67,11 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Rules that pause or deny syscalls before execution.
+    /// Rules that immediately deny syscalls with EPERM.
+    #[serde(default)]
+    pub block: Vec<Rule>,
+
+    /// Rules that pause syscalls for operator approval.
     #[serde(default)]
     pub pause_before: Vec<PauseRule>,
 }
@@ -82,8 +88,23 @@ impl Default for SupervisorConfig {
             listen_addr: default_listen_addr(),
             durability: DurabilityConfig::default(),
             tls: TlsConfig::default(),
+            block: Vec::new(),
             pause_before: Vec::new(),
         }
+    }
+}
+
+impl SupervisorConfig {
+    /// Build a [`RuleSet`] from the config's block and pause rules.
+    ///
+    /// The returned rule set has all glob patterns pre-compiled.
+    pub fn build_ruleset(&self) -> RuleSet {
+        let mut rs = RuleSet {
+            block: self.block.clone(),
+            pause_before: self.pause_before.clone(),
+        };
+        rs.compile_patterns();
+        rs
     }
 }
 
@@ -126,9 +147,12 @@ impl SupervisorConfig {
         Ok(())
     }
 
-    /// Pre-compile all glob patterns in durability overrides and pause rules.
+    /// Pre-compile all glob patterns in durability overrides and rules.
     fn compile_patterns(&mut self) {
         self.durability.validate_patterns();
+        for rule in &mut self.block {
+            rule.validate_patterns();
+        }
         for rule in &mut self.pause_before {
             rule.validate_patterns();
         }
@@ -217,6 +241,7 @@ mod tests {
         assert_eq!(cfg.workspace_dir, PathBuf::from("/workspace"));
         assert_eq!(cfg.listen_addr.port(), 9090);
         assert_eq!(cfg.durability.default, DurabilityMode::Local);
+        assert!(cfg.block.is_empty());
         assert!(cfg.pause_before.is_empty());
         assert!(cfg.storage.s3.is_none());
     }
@@ -300,6 +325,9 @@ tls:
   ca_dir: /custom/ca
   keylog_path: /custom/keylog.txt
   mitm_proxy_port: 9999
+block:
+  - type: read
+    paths: ["*.env", "*.key"]
 pause_before:
   - type: unlink
     paths: ["/workspace/**"]
@@ -311,6 +339,7 @@ pause_before:
         assert_eq!(cfg.listen_addr.port(), 8080);
         assert_eq!(cfg.durability.default, DurabilityMode::Memory);
         assert_eq!(cfg.durability.overrides.len(), 1);
+        assert_eq!(cfg.block.len(), 1);
         assert_eq!(cfg.pause_before.len(), 2);
         assert!(cfg.storage.s3.is_some());
         let s3 = cfg.storage.s3.as_ref().unwrap();
@@ -327,5 +356,27 @@ pause_before:
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         let parsed: SupervisorConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn build_ruleset_combines_block_and_pause() {
+        let yaml = r#"
+agent_id: rs-agent
+agent_command: ["bash"]
+block:
+  - type: read
+    paths: ["*.env"]
+pause_before:
+  - type: exec
+    binaries: ["rm"]
+"#;
+        let cfg = SupervisorConfig::load(yaml.as_bytes()).unwrap();
+        let rs = cfg.build_ruleset();
+        assert_eq!(rs.block.len(), 1);
+        assert_eq!(rs.pause_before.len(), 1);
+        assert_eq!(rs.rule_count(), 2);
+
+        let decision = rs.evaluate(MatchKind::Read, Some(".env"), None, None);
+        assert!(matches!(decision, RuleDecision::Block { .. }));
     }
 }

@@ -65,6 +65,24 @@ pub struct ApprovalDenied {
     pub approver: String,
 }
 
+/// A syscall was blocked by a block rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocked {
+    pub pid: u32,
+    pub syscall: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub rule: String,
+}
+
+/// The active rule set was updated via the API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesUpdated {
+    pub block_count: usize,
+    pub pause_before_count: usize,
+    pub source: String,
+}
+
 /// Outcome of an approval request delivered to the tracer thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -111,6 +129,43 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: AgentResume = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn blocked_round_trip() {
+        let b = Blocked {
+            pid: 42,
+            syscall: "read".into(),
+            path: Some("/workspace/.env".into()),
+            rule: "*.env".into(),
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let back: Blocked = serde_json::from_str(&json).unwrap();
+        assert_eq!(b, back);
+    }
+
+    #[test]
+    fn blocked_omits_none_path() {
+        let b = Blocked {
+            pid: 10,
+            syscall: "exec".into(),
+            path: None,
+            rule: "exec rule".into(),
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        assert!(!json.contains("\"path\""));
+    }
+
+    #[test]
+    fn rules_updated_round_trip() {
+        let ru = RulesUpdated {
+            block_count: 3,
+            pause_before_count: 2,
+            source: "api".into(),
+        };
+        let json = serde_json::to_string(&ru).unwrap();
+        let back: RulesUpdated = serde_json::from_str(&json).unwrap();
+        assert_eq!(ru, back);
     }
 
     #[test]

@@ -15,9 +15,11 @@ use std::net::SocketAddr;
 use axum::Router;
 use axum::routing::{get, post};
 
+use axum::routing::delete;
+
 use crate::api::routes::{
-    approve_handler, deny_handler, health_handler, pause_handler, pending_approvals_handler,
-    resume_handler, status_handler,
+    approve_handler, delete_rule_handler, deny_handler, get_rules_handler, health_handler,
+    pause_handler, pending_approvals_handler, resume_handler, set_rules_handler, status_handler,
 };
 use crate::api::state::SharedState;
 
@@ -30,6 +32,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/approvals/pending", get(pending_approvals_handler))
         .route("/approvals/{action_id}/approve", post(approve_handler))
         .route("/approvals/{action_id}/deny", post(deny_handler))
+        .route("/rules", get(get_rules_handler).post(set_rules_handler))
+        .route("/rules/{index}", delete(delete_rule_handler))
         .route("/health", get(health_handler))
         .with_state(state)
 }

@@ -102,6 +102,15 @@ pub struct DenyResponse {
     pub injected_errno: String,
 }
 
+/// Response body for `POST /rules`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesAppliedResponse {
+    /// Always `true` on success.
+    pub applied: bool,
+    /// Total rules in the new rule set.
+    pub rule_count: usize,
+}
+
 /// Health check response for `GET /health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {

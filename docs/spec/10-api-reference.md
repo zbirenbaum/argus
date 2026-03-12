@@ -12,6 +12,17 @@ POST /agent/resume               → Resume all. Response: {status, resumed_coun
 GET  /agent/status               → {status, agent_id, uptime_seconds, event_count, processes: [{pid, ppid, binary, argv, state}]}
 ```
 
+## Rules
+
+```
+GET  /rules                                → {block: [...], pause_before: [...]}
+POST /rules                                → Replace entire ruleset (validates, swaps atomically)
+  Body: {block: [{type, paths?, binaries?, destinations?, action}], pause_before: [{type, paths?, binaries?, destinations?}]}
+  → {applied: true, rule_count: 5}
+DELETE /rules/{index}                      → Remove single rule, swap
+  → {applied: true, rule_count: 4}
+```
+
 ## Approvals
 
 ```
@@ -195,6 +206,11 @@ argus undo --last N                                    → POST /restore/undo
 # Network & storage
 argus connections [--pid N] [--active]                 → GET /connections
 argus storage-status                                   → GET /storage/status
+
+# Rules
+argus rules                                            → GET /rules
+argus rules set --file rules.yaml                      → POST /rules
+argus rules remove <index>                             → DELETE /rules/{index}
 
 # Approvals
 argus approvals                                        → GET /approvals/pending
