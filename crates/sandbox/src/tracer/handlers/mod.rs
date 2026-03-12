@@ -3,10 +3,11 @@
 //!
 //! Each handler reads arguments from the tracee's registers, updates
 //! in-memory state, and emits the corresponding event. Phase 1 does
-//! not capture file content — hashes are `None`.
+//! not capture file content -- hashes are `None`.
 
 mod file_ops;
 mod io_ops;
+mod metadata_ops;
 mod net_ops;
 
 use anyhow::Result;
@@ -20,7 +21,7 @@ use super::trace_loop::TracerLoop;
 
 /// Pause-before-action stub for P2 integration.
 ///
-/// Always returns `Allow` — the hook point is wired up in the
+/// Always returns `Allow`. The hook point is wired up in the
 /// pause-resume-api phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseAction {
@@ -33,7 +34,7 @@ fn check_pause_rules(_pid: Pid, _syscall_nr: u64) -> PauseAction {
 
 /// Dispatches a seccomp stop to the appropriate handler.
 ///
-/// Reads the syscall number from `orig_rax` and delegates to
+/// Reads the syscall number from registers and delegates to
 /// category-specific handler functions.
 ///
 /// # Errors
@@ -70,28 +71,28 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<()> {
 
         // File metadata
         SYS_RENAME | SYS_RENAMEAT | SYS_RENAMEAT2 => {
-            file_ops::handle_rename(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_rename(tracer, pid, nr, &regs)?;
         }
         SYS_UNLINK | SYS_UNLINKAT => {
-            file_ops::handle_unlink(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_unlink(tracer, pid, nr, &regs)?;
         }
         SYS_MKDIR | SYS_MKDIRAT => {
-            file_ops::handle_mkdir(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_mkdir(tracer, pid, nr, &regs)?;
         }
         SYS_RMDIR => {
-            file_ops::handle_rmdir(tracer, pid, &regs)?;
+            metadata_ops::handle_rmdir(tracer, pid, &regs)?;
         }
         SYS_CHMOD | SYS_FCHMOD | SYS_FCHMODAT => {
-            file_ops::handle_chmod(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_chmod(tracer, pid, nr, &regs)?;
         }
         SYS_TRUNCATE | SYS_FTRUNCATE => {
-            file_ops::handle_truncate(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_truncate(tracer, pid, nr, &regs)?;
         }
         SYS_LINK | SYS_LINKAT => {
-            file_ops::handle_link(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_link(tracer, pid, nr, &regs)?;
         }
         SYS_SYMLINK | SYS_SYMLINKAT => {
-            file_ops::handle_symlink(tracer, pid, nr, &regs)?;
+            metadata_ops::handle_symlink(tracer, pid, nr, &regs)?;
         }
         SYS_READLINK | SYS_READLINKAT => {
             // Readlink is informational; no event needed in phase 1.

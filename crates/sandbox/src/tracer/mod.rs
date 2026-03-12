@@ -3,6 +3,7 @@
 
 pub mod handlers;
 pub mod memory;
+pub mod process_events;
 pub mod regs;
 pub mod seccomp;
 pub mod syscall_nr;

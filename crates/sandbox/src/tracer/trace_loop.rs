@@ -20,11 +20,10 @@ use tracing::Level;
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::process as ep;
 use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
-use crate::tracer::handlers;
-use crate::tracer::memory;
+use crate::tracer::{handlers, memory, process_events};
 
 /// Ptrace options to set on every traced process.
-const PTRACE_OPTS: ptrace::Options = ptrace::Options::from_bits_truncate(
+pub const PTRACE_OPTS: ptrace::Options = ptrace::Options::from_bits_truncate(
     ptrace::Options::PTRACE_O_TRACEFORK.bits()
         | ptrace::Options::PTRACE_O_TRACEVFORK.bits()
         | ptrace::Options::PTRACE_O_TRACECLONE.bits()
@@ -46,7 +45,7 @@ pub struct TracerLoop {
     event_tx: Sender<Event>,
     seq_gen: SequenceGenerator,
     agent_id: String,
-    alive_count: u32,
+    pub alive_count: u32,
 }
 
 impl TracerLoop {
@@ -130,10 +129,15 @@ impl TracerLoop {
                 self.handle_signal_stop(pid, sig)?;
             }
             WaitStatus::Exited(pid, code) => {
-                self.handle_process_exit(pid, code, None);
+                process_events::handle_process_exit(self, pid, code, None);
             }
             WaitStatus::Signaled(pid, sig, _core) => {
-                self.handle_process_exit(pid, 128 + sig as i32, Some(sig as i32));
+                process_events::handle_process_exit(
+                    self,
+                    pid,
+                    128 + sig as i32,
+                    Some(sig as i32),
+                );
             }
             _ => {}
         }
@@ -146,13 +150,13 @@ impl TracerLoop {
             libc::PTRACE_EVENT_FORK
             | libc::PTRACE_EVENT_VFORK
             | libc::PTRACE_EVENT_CLONE => {
-                self.handle_fork_event(pid)?;
+                process_events::handle_fork(self, pid)?;
             }
             libc::PTRACE_EVENT_EXEC => {
-                self.handle_exec_event(pid)?;
+                process_events::handle_program_replace(self, pid)?;
             }
             libc::PTRACE_EVENT_EXIT => {
-                self.handle_exit_event(pid)?;
+                process_events::handle_exit_event(self, pid)?;
             }
             libc::PTRACE_EVENT_SECCOMP => {
                 if let Err(e) = handlers::handle_seccomp_stop(self, pid) {
@@ -168,129 +172,6 @@ impl TracerLoop {
             _ => {}
         }
         Ok(())
-    }
-
-    /// Handles fork/vfork/clone by registering the child process.
-    fn handle_fork_event(&mut self, parent_pid: Pid) -> Result<()> {
-        let child_raw = ptrace::getevent(parent_pid)? as i32;
-        let child_pid = Pid::from_raw(child_raw);
-        let parent_u32 = parent_pid.as_raw() as u32;
-        let child_u32 = child_raw as u32;
-
-        let child_fds = self
-            .process_tree
-            .get_process(parent_u32)
-            .map(|p| p.fds.clone_for_fork())
-            .unwrap_or_default();
-
-        let (binary, argv, cwd) = self
-            .process_tree
-            .get_process(parent_u32)
-            .map(|p| (p.binary.clone(), p.argv.clone(), p.cwd.clone()))
-            .unwrap_or_else(|| {
-                (PathBuf::from("unknown"), vec![], PathBuf::from("/"))
-            });
-
-        self.pipe_registry.on_fork(child_u32, &child_fds);
-
-        self.process_tree.add_process(
-            child_u32, parent_u32, binary, argv, cwd, child_fds,
-        );
-        self.alive_count += 1;
-
-        if let Err(e) = ptrace::setoptions(child_pid, PTRACE_OPTS) {
-            event!(
-                name: "tracer.fork.setoptions_error",
-                Level::WARN,
-                pid = child_raw,
-                error.message = %e,
-                "failed to set ptrace options on child {{pid}}: {{error.message}}",
-            );
-        }
-
-        self.emit(EventPayload::Fork(ep::Fork {
-            parent_pid: parent_u32,
-            child_pid: child_u32,
-        }));
-
-        Ok(())
-    }
-
-    /// Handles a program replacement by updating binary/argv and closing cloexec fds.
-    fn handle_exec_event(&mut self, pid: Pid) -> Result<()> {
-        let pid_u32 = pid.as_raw() as u32;
-
-        let binary = memory::read_proc_exe(pid)
-            .unwrap_or_else(|_| PathBuf::from("unknown"));
-        let argv = memory::read_proc_cmdline(pid).unwrap_or_default();
-        let cwd = std::fs::read_link(format!("/proc/{}/cwd", pid.as_raw()))
-            .unwrap_or_else(|_| PathBuf::from("/"));
-
-        let ppid = self
-            .process_tree
-            .get_process(pid_u32)
-            .map(|p| p.ppid)
-            .unwrap_or(0);
-
-        self.process_tree
-            .update_on_program_replace(pid_u32, binary.clone(), argv.clone());
-
-        if let Some(proc_state) = self.process_tree.get_process_mut(pid_u32) {
-            proc_state.cwd = cwd.clone();
-        }
-
-        self.emit(EventPayload::Exec(ep::Exec {
-            pid: pid_u32,
-            ppid,
-            binary: binary.to_string_lossy().into_owned(),
-            argv,
-            envp: vec![], // Phase 1: envp capture not implemented.
-            cwd: cwd.to_string_lossy().into_owned(),
-        }));
-
-        Ok(())
-    }
-
-    /// Handles PTRACE_EVENT_EXIT (process about to exit).
-    fn handle_exit_event(&mut self, pid: Pid) -> Result<()> {
-        let exit_status = ptrace::getevent(pid)? as i32;
-        let pid_u32 = pid.as_raw() as u32;
-        let exit_code = (exit_status >> 8) & 0xFF;
-        let signal = exit_status & 0x7F;
-
-        self.process_tree.mark_exited(pid_u32);
-        self.alive_count = self.alive_count.saturating_sub(1);
-
-        let sig_opt = if signal != 0 { Some(signal) } else { None };
-
-        self.emit(EventPayload::Exit(ep::Exit {
-            pid: pid_u32,
-            exit_code,
-            signal: sig_opt,
-        }));
-
-        Ok(())
-    }
-
-    /// Handles an actual process exit (Exited/Signaled wait status).
-    fn handle_process_exit(&mut self, pid: Pid, code: i32, signal: Option<i32>) {
-        let pid_u32 = pid.as_raw() as u32;
-
-        // Only emit if we haven't already via PTRACE_EVENT_EXIT.
-        if self
-            .process_tree
-            .get_process(pid_u32)
-            .is_some_and(|p| p.alive)
-        {
-            self.process_tree.mark_exited(pid_u32);
-            self.alive_count = self.alive_count.saturating_sub(1);
-
-            self.emit(EventPayload::Exit(ep::Exit {
-                pid: pid_u32,
-                exit_code: code,
-                signal,
-            }));
-        }
     }
 
     /// Forwards non-ptrace signals to the tracee.
@@ -321,8 +202,8 @@ impl TracerLoop {
 
     /// Emits an event through the channel.
     pub fn emit(&self, payload: EventPayload) {
-        let event = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
-        if let Err(e) = self.event_tx.send(event) {
+        let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
+        if let Err(e) = self.event_tx.send(evt) {
             event!(
                 name: "tracer.event.send_error",
                 Level::ERROR,
@@ -358,9 +239,9 @@ mod tests {
             parent_pid: 1,
             child_pid: 2,
         }));
-        let event = rx.recv().unwrap();
-        assert_eq!(event.agent_id, "agent-42");
-        assert_eq!(event.seq, 0);
+        let evt = rx.recv().unwrap();
+        assert_eq!(evt.agent_id, "agent-42");
+        assert_eq!(evt.seq, 0);
     }
 
     #[test]
