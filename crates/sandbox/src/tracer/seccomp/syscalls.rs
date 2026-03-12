@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! x86_64 syscall number tables for seccomp filtering.
 //!
 //! All numbers are from the Linux x86_64 ABI. Grouped by category for
@@ -17,6 +16,7 @@ const SYS_WRITE: u64 = 1;
 const SYS_PWRITE64: u64 = 18;
 const SYS_WRITEV: u64 = 20;
 const SYS_PWRITEV: u64 = 296;
+const SYS_LSEEK: u64 = 8;
 
 // --- File metadata ---
 const SYS_RENAME: u64 = 82;
@@ -30,6 +30,9 @@ const SYS_RMDIR: u64 = 84;
 const SYS_CHMOD: u64 = 90;
 const SYS_FCHMOD: u64 = 91;
 const SYS_FCHMODAT: u64 = 268;
+const SYS_CHOWN: u64 = 92;
+const SYS_FCHOWN: u64 = 93;
+const SYS_FCHOWNAT: u64 = 260;
 const SYS_TRUNCATE: u64 = 76;
 const SYS_FTRUNCATE: u64 = 77;
 const SYS_LINK: u64 = 86;
@@ -84,11 +87,13 @@ pub static TRACED_SYSCALLS: &[u64] = &[
     SYS_OPEN, SYS_OPENAT, SYS_OPENAT2, SYS_CREAT,
     SYS_READ, SYS_PREAD64, SYS_READV, SYS_PREADV,
     SYS_WRITE, SYS_PWRITE64, SYS_WRITEV, SYS_PWRITEV,
+    SYS_LSEEK,
     // File metadata
     SYS_RENAME, SYS_RENAMEAT, SYS_RENAMEAT2,
     SYS_UNLINK, SYS_UNLINKAT,
     SYS_MKDIR, SYS_MKDIRAT, SYS_RMDIR,
     SYS_CHMOD, SYS_FCHMOD, SYS_FCHMODAT,
+    SYS_CHOWN, SYS_FCHOWN, SYS_FCHOWNAT,
     SYS_TRUNCATE, SYS_FTRUNCATE,
     SYS_LINK, SYS_LINKAT,
     SYS_SYMLINK, SYS_SYMLINKAT,

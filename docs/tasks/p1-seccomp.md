@@ -13,20 +13,20 @@
 
 ## What was done
 - `crates/sandbox/src/tracer/seccomp/mod.rs` — public API: `install_seccomp_filter()`, `trapped_syscalls()`, `is_trapped()`
-- `crates/sandbox/src/tracer/seccomp/syscalls.rs` — x86_64 syscall number constants and static lists (57 traced, 3 blocked)
+- `crates/sandbox/src/tracer/seccomp/syscalls.rs` — x86_64 syscall number constants and static lists (61 traced, 3 blocked)
 - `crates/sandbox/src/tracer/seccomp/bpf.rs` — raw BPF program builder (`SyscallAction` enum, `build_filter_program()`)
 - `crates/sandbox/src/tracer/mod.rs` — added `pub mod seccomp;`
 
 ## What works
 - BPF program validates x86_64 arch, kills on mismatch
-- 57 syscalls trapped with `SECCOMP_RET_TRACE` (file content, metadata, FD, process, PTY, network)
+- 61 syscalls trapped with `SECCOMP_RET_TRACE` (file content, metadata, FD, process, PTY, network)
 - 3 io_uring syscalls blocked with `SECCOMP_RET_ERRNO(ENOSYS)`
 - All other syscalls allowed at native speed
 - `install_seccomp_filter()` sets `PR_SET_NO_NEW_PRIVS` then loads filter via `prctl(PR_SET_SECCOMP)`
 - Integration test verifies filter installs and child exits cleanly under ptrace
 
 ## Deviations from spec
-- Spec says "~55 syscalls" but the enumerated list contains 57 traced syscalls. All 57 from the spec are included.
+- Spec says "~55 syscalls" but the enumerated list contains 61 traced syscalls. All 61 from the spec are included (including lseek, chown, fchown, fchownat).
 
 ## What's missing
 - Nothing

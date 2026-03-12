@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Raw BPF program builder for seccomp filters.
 //!
 //! Constructs a classic BPF (cBPF) program that inspects `seccomp_data`

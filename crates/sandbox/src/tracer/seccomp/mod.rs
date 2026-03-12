@@ -1,4 +1,3 @@
-// Rust guideline compliant 2026-02-21
 //! Seccomp-BPF filter for x86_64 syscall interception.
 //!
 //! Installs a BPF program that selectively traps syscalls via
@@ -50,6 +49,7 @@ pub fn install_seccomp_filter() -> Result<()> {
 
     let prog = libc::sock_fprog {
         len: program.len() as u16,
+        // SAFETY: kernel does not mutate the BPF filter array
         filter: program.as_ptr() as *mut libc::sock_filter,
     };
 
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn trapped_syscalls_count() {
-        assert_eq!(TRACED_SYSCALLS.len(), 57, "expected 57 traced syscalls");
+        assert_eq!(TRACED_SYSCALLS.len(), 61, "expected 61 traced syscalls");
         assert_eq!(BLOCKED_SYSCALLS.len(), 3, "expected 3 blocked syscalls");
     }
 
