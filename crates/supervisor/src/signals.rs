@@ -25,8 +25,8 @@ pub fn install_handler() {
     // SAFETY: the handler function only performs an atomic store,
     // which is async-signal-safe. We register for SIGTERM and SIGINT.
     unsafe {
-        libc::signal(libc::SIGTERM, signal_handler as libc::sighandler_t);
-        libc::signal(libc::SIGINT, signal_handler as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
     }
 
     event!(

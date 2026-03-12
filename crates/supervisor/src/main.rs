@@ -229,7 +229,7 @@ mod tests {
     fn load_config_reads_yaml_file() {
         init_tracing_for_test();
         let dir = tempfile::TempDir::new().unwrap();
-        let yaml = "data_dir: /custom/data\nworkspace_dir: /custom/ws\n";
+        let yaml = "agent_id: yaml-agent\nagent_command: [\"python\", \"run.py\"]\ndata_dir: /custom/data\nworkspace_dir: /custom/ws\n";
         let config_path = dir.path().join("test.yaml");
         fs::write(&config_path, yaml).unwrap();
 
