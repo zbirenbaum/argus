@@ -4,17 +4,19 @@
 //! matches, the supervisor either pauses the tracee (awaiting approval)
 //! or denies the syscall outright by injecting `EPERM`.
 
-// Rust guideline compliant 2026-02-21
-
 use serde::{Deserialize, Serialize};
 
 /// A single pause-before-action rule.
 ///
 /// Each rule targets a specific syscall category and narrows the match
 /// with path globs, binary names, or network destinations.
+///
+/// Glob patterns in `paths` and `destinations` are pre-compiled at
+/// deserialization time via [`PauseRule::validate_patterns`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PauseRule {
     /// Which syscall category this rule applies to.
+    #[serde(rename = "type")]
     pub match_kind: PauseMatchKind,
 
     /// Glob patterns matched against the syscall's resolved path.
@@ -34,6 +36,24 @@ pub struct PauseRule {
     /// What to do when the rule matches. Defaults to pause.
     #[serde(default)]
     pub action: PauseAction,
+
+    /// Pre-compiled glob patterns for `paths`. Built by `validate_patterns`.
+    #[serde(skip)]
+    compiled_paths: Vec<glob::Pattern>,
+
+    /// Pre-compiled glob patterns for `destinations`. Built by `validate_patterns`.
+    #[serde(skip)]
+    compiled_destinations: Vec<glob::Pattern>,
+}
+
+impl PartialEq for PauseRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.match_kind == other.match_kind
+            && self.paths == other.paths
+            && self.binaries == other.binaries
+            && self.destinations == other.destinations
+            && self.action == other.action
+    }
 }
 
 /// Syscall category that a pause rule targets.
@@ -72,6 +92,15 @@ pub enum PauseAction {
 }
 
 impl PauseRule {
+    /// Compile glob patterns in `paths` and `destinations`, logging
+    /// warnings for any invalid patterns.
+    ///
+    /// Must be called after deserialization before using `matches`.
+    pub fn validate_patterns(&mut self) {
+        self.compiled_paths = compile_patterns(&self.paths);
+        self.compiled_destinations = compile_patterns(&self.destinations);
+    }
+
     /// Test whether this rule matches a syscall with the given context.
     ///
     /// `kind` is the syscall category, `path` is the resolved filesystem
@@ -99,17 +128,13 @@ impl PauseRule {
     }
 
     fn matches_path(&self, path: Option<&str>) -> bool {
-        if self.paths.is_empty() {
+        if self.compiled_paths.is_empty() {
             return true;
         }
         let Some(path) = path else {
             return false;
         };
-        self.paths.iter().any(|pattern| {
-            glob::Pattern::new(pattern)
-                .map(|p| p.matches(path))
-                .unwrap_or(false)
-        })
+        self.compiled_paths.iter().any(|p| p.matches(path))
     }
 
     fn matches_binary(&self, binary: Option<&str>) -> bool {
@@ -123,52 +148,86 @@ impl PauseRule {
     }
 
     fn matches_destination(&self, destination: Option<&str>) -> bool {
-        if self.destinations.is_empty() {
+        if self.compiled_destinations.is_empty() {
             return true;
         }
         let Some(dest) = destination else {
             return false;
         };
-        self.destinations.iter().any(|pattern| {
-            glob::Pattern::new(pattern)
-                .map(|p| p.matches(dest))
-                .unwrap_or(false)
-        })
+        self.compiled_destinations.iter().any(|p| p.matches(dest))
     }
+}
+
+/// Compile a list of glob pattern strings, warning on invalid ones.
+fn compile_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
+    patterns
+        .iter()
+        .filter_map(|s| match glob::Pattern::new(s) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    pattern = %s,
+                    error = %e,
+                    "invalid glob pattern, skipping"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn make_rule(
+        kind: PauseMatchKind,
+        paths: Vec<String>,
+        binaries: Vec<String>,
+        destinations: Vec<String>,
+        action: PauseAction,
+    ) -> PauseRule {
+        let mut rule = PauseRule {
+            match_kind: kind,
+            paths,
+            binaries,
+            destinations,
+            action,
+            compiled_paths: Vec::new(),
+            compiled_destinations: Vec::new(),
+        };
+        rule.validate_patterns();
+        rule
+    }
+
     fn unlink_rule() -> PauseRule {
-        PauseRule {
-            match_kind: PauseMatchKind::Unlink,
-            paths: vec!["/workspace/**".into()],
-            binaries: Vec::new(),
-            destinations: Vec::new(),
-            action: PauseAction::Pause,
-        }
+        make_rule(
+            PauseMatchKind::Unlink,
+            vec!["/workspace/**".into()],
+            Vec::new(),
+            Vec::new(),
+            PauseAction::Pause,
+        )
     }
 
     fn exec_rule() -> PauseRule {
-        PauseRule {
-            match_kind: PauseMatchKind::Exec,
-            paths: Vec::new(),
-            binaries: vec!["rm".into(), "curl".into(), "wget".into()],
-            destinations: Vec::new(),
-            action: PauseAction::Pause,
-        }
+        make_rule(
+            PauseMatchKind::Exec,
+            Vec::new(),
+            vec!["rm".into(), "curl".into(), "wget".into()],
+            Vec::new(),
+            PauseAction::Pause,
+        )
     }
 
     fn connect_rule() -> PauseRule {
-        PauseRule {
-            match_kind: PauseMatchKind::Connect,
-            paths: Vec::new(),
-            binaries: Vec::new(),
-            destinations: vec!["*:22".into(), "*:25".into()],
-            action: PauseAction::Deny,
-        }
+        make_rule(
+            PauseMatchKind::Connect,
+            Vec::new(),
+            Vec::new(),
+            vec!["*:22".into(), "*:25".into()],
+            PauseAction::Deny,
+        )
     }
 
     #[test]
@@ -250,7 +309,8 @@ mod tests {
         let rule = connect_rule();
         assert_eq!(rule.action, PauseAction::Deny);
         let yaml = serde_yaml::to_string(&rule).unwrap();
-        let parsed: PauseRule = serde_yaml::from_str(&yaml).unwrap();
+        let mut parsed: PauseRule = serde_yaml::from_str(&yaml).unwrap();
+        parsed.validate_patterns();
         assert_eq!(parsed.action, PauseAction::Deny);
     }
 
@@ -277,13 +337,13 @@ mod tests {
 
     #[test]
     fn empty_paths_matches_any_path() {
-        let rule = PauseRule {
-            match_kind: PauseMatchKind::Write,
-            paths: Vec::new(),
-            binaries: Vec::new(),
-            destinations: Vec::new(),
-            action: PauseAction::Pause,
-        };
+        let rule = make_rule(
+            PauseMatchKind::Write,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            PauseAction::Pause,
+        );
         assert!(rule.matches(
             PauseMatchKind::Write,
             Some("/any/path/file.txt"),
@@ -294,15 +354,36 @@ mod tests {
 
     #[test]
     fn write_rule_with_extension_globs() {
-        let rule = PauseRule {
-            match_kind: PauseMatchKind::Write,
-            paths: vec!["*.env".into(), "*.key".into(), "*.pem".into()],
-            binaries: Vec::new(),
-            destinations: Vec::new(),
-            action: PauseAction::Pause,
-        };
+        let rule = make_rule(
+            PauseMatchKind::Write,
+            vec!["*.env".into(), "*.key".into(), "*.pem".into()],
+            Vec::new(),
+            Vec::new(),
+            PauseAction::Pause,
+        );
         assert!(rule.matches(PauseMatchKind::Write, Some(".env"), None, None));
         assert!(rule.matches(PauseMatchKind::Write, Some("server.key"), None, None));
         assert!(!rule.matches(PauseMatchKind::Write, Some("main.py"), None, None));
+    }
+
+    #[test]
+    fn serde_uses_type_key() {
+        let yaml = "type: unlink\npaths: [\"/workspace/**\"]\n";
+        let mut rule: PauseRule = serde_yaml::from_str(yaml).unwrap();
+        rule.validate_patterns();
+        assert_eq!(rule.match_kind, PauseMatchKind::Unlink);
+        assert!(rule.matches(
+            PauseMatchKind::Unlink,
+            Some("/workspace/foo.txt"),
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn partial_eq_compares_by_value() {
+        let a = unlink_rule();
+        let b = unlink_rule();
+        assert_eq!(a, b);
     }
 }

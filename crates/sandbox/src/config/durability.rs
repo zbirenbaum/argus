@@ -4,12 +4,10 @@
 //! complete.  Higher durability costs more latency but reduces data-loss
 //! risk.
 
-// Rust guideline compliant 2026-02-21
-
 use serde::{Deserialize, Serialize};
 
 /// Durability envelope: a default mode plus path-specific overrides.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DurabilityConfig {
     /// Mode applied when no override matches.
     #[serde(default)]
@@ -32,6 +30,16 @@ impl DurabilityConfig {
             }
         }
         self.default
+    }
+
+    /// Compile all glob patterns in overrides, logging warnings for
+    /// any invalid patterns.
+    ///
+    /// Must be called after deserialization before using `mode_for_path`.
+    pub fn validate_patterns(&mut self) {
+        for ov in &mut self.overrides {
+            ov.compile_patterns();
+        }
     }
 }
 
@@ -60,22 +68,66 @@ pub struct DurabilityOverride {
 
     /// Durability mode applied when any pattern matches.
     pub mode: DurabilityMode,
+
+    /// Pre-compiled glob patterns. Built by `compile_patterns`.
+    #[serde(skip)]
+    compiled: Vec<glob::Pattern>,
+}
+
+impl PartialEq for DurabilityOverride {
+    fn eq(&self, other: &Self) -> bool {
+        self.paths == other.paths && self.mode == other.mode
+    }
 }
 
 impl DurabilityOverride {
-    /// Test whether `path` matches any of this override's glob patterns.
+    /// Test whether `path` matches any of this override's compiled patterns.
     fn matches(&self, path: &str) -> bool {
-        self.paths.iter().any(|pattern| {
-            glob::Pattern::new(pattern)
-                .map(|p| p.matches(path))
-                .unwrap_or(false)
-        })
+        self.compiled.iter().any(|p| p.matches(path))
+    }
+
+    /// Compile glob patterns from string list, warning on invalid ones.
+    fn compile_patterns(&mut self) {
+        self.compiled = self
+            .paths
+            .iter()
+            .filter_map(|s| match glob::Pattern::new(s) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %s,
+                        error = %e,
+                        "invalid glob pattern in durability override, skipping"
+                    );
+                    None
+                }
+            })
+            .collect();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_override(paths: Vec<String>, mode: DurabilityMode) -> DurabilityOverride {
+        let mut ov = DurabilityOverride {
+            paths,
+            mode,
+            compiled: Vec::new(),
+        };
+        ov.compile_patterns();
+        ov
+    }
+
+    fn make_config(
+        default: DurabilityMode,
+        overrides: Vec<DurabilityOverride>,
+    ) -> DurabilityConfig {
+        let mut cfg = DurabilityConfig { default, overrides };
+        cfg.validate_patterns();
+        cfg
+    }
 
     #[test]
     fn default_is_local() {
@@ -114,19 +166,19 @@ mod tests {
 
     #[test]
     fn mode_for_path_matches_glob_override() {
-        let cfg = DurabilityConfig {
-            default: DurabilityMode::Local,
-            overrides: vec![
-                DurabilityOverride {
-                    paths: vec!["*.key".into(), "*.pem".into()],
-                    mode: DurabilityMode::Remote,
-                },
-                DurabilityOverride {
-                    paths: vec!["/workspace/checkpoints/**".into()],
-                    mode: DurabilityMode::Memory,
-                },
+        let cfg = make_config(
+            DurabilityMode::Local,
+            vec![
+                make_override(
+                    vec!["*.key".into(), "*.pem".into()],
+                    DurabilityMode::Remote,
+                ),
+                make_override(
+                    vec!["/workspace/checkpoints/**".into()],
+                    DurabilityMode::Memory,
+                ),
             ],
-        };
+        );
         assert_eq!(cfg.mode_for_path("server.key"), DurabilityMode::Remote);
         assert_eq!(cfg.mode_for_path("cert.pem"), DurabilityMode::Remote);
         assert_eq!(
@@ -138,35 +190,39 @@ mod tests {
 
     #[test]
     fn first_matching_override_wins() {
-        let cfg = DurabilityConfig {
-            default: DurabilityMode::Local,
-            overrides: vec![
-                DurabilityOverride {
-                    paths: vec!["*.key".into()],
-                    mode: DurabilityMode::Remote,
-                },
-                DurabilityOverride {
-                    paths: vec!["*.key".into()],
-                    mode: DurabilityMode::Memory,
-                },
+        let cfg = make_config(
+            DurabilityMode::Local,
+            vec![
+                make_override(vec!["*.key".into()], DurabilityMode::Remote),
+                make_override(vec!["*.key".into()], DurabilityMode::Memory),
             ],
-        };
+        );
         assert_eq!(cfg.mode_for_path("secret.key"), DurabilityMode::Remote);
     }
 
     #[test]
     fn durability_config_yaml_round_trip() {
-        let cfg = DurabilityConfig {
-            default: DurabilityMode::Memory,
-            overrides: vec![DurabilityOverride {
-                paths: vec!["*.credentials".into()],
-                mode: DurabilityMode::Remote,
-            }],
-        };
+        let cfg = make_config(
+            DurabilityMode::Memory,
+            vec![make_override(
+                vec!["*.credentials".into()],
+                DurabilityMode::Remote,
+            )],
+        );
         let yaml = serde_yaml::to_string(&cfg).unwrap();
-        let parsed: DurabilityConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.default, DurabilityMode::Memory);
-        assert_eq!(parsed.overrides.len(), 1);
-        assert_eq!(parsed.overrides[0].mode, DurabilityMode::Remote);
+        let mut parsed: DurabilityConfig = serde_yaml::from_str(&yaml).unwrap();
+        parsed.validate_patterns();
+        assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn partial_eq_ignores_compiled() {
+        let a = make_override(vec!["*.key".into()], DurabilityMode::Remote);
+        let b = DurabilityOverride {
+            paths: vec!["*.key".into()],
+            mode: DurabilityMode::Remote,
+            compiled: Vec::new(),
+        };
+        assert_eq!(a, b);
     }
 }

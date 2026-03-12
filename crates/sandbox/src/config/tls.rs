@@ -3,14 +3,13 @@
 //! Controls where the generated CA keypair is stored, where TLS key-log
 //! data is written, and which port the `mitmdump` child process listens on.
 
-// Rust guideline compliant 2026-02-21
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 /// TLS interception settings for the MITM proxy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TlsConfig {
     /// Directory for the generated CA certificate and private key.
     #[serde(default = "default_ca_dir")]

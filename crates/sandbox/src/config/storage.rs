@@ -4,7 +4,6 @@
 //! All durations use `humantime-serde` for human-readable values like `5m`
 //! and sizes use `bytesize` for values like `2GB`.
 
-// Rust guideline compliant 2026-02-21
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Aggregate storage configuration.
 ///
 /// Groups S3, upload tuning, local buffer, and digest cache settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct StorageConfig {
     /// S3-compatible object store. `None` means local-only mode.
     pub s3: Option<S3Config>,
@@ -57,7 +56,7 @@ impl StorageConfig {
 }
 
 /// S3-compatible object store connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct S3Config {
     /// Bucket name.
     pub bucket: String,
@@ -74,7 +73,7 @@ pub struct S3Config {
 }
 
 /// Upload pool tuning knobs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UploadConfig {
     /// Maximum concurrent S3 uploads.
     #[serde(default = "default_max_concurrent")]
@@ -103,7 +102,7 @@ impl Default for UploadConfig {
 }
 
 /// Local buffer paths and eviction limits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalBufferConfig {
     /// Directory for content-addressable blobs.
     #[serde(default = "default_cas_dir")]
@@ -137,7 +136,7 @@ impl Default for LocalBufferConfig {
 }
 
 /// Digest cache persistence and TTL settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DigestCacheConfig {
     /// Path to the on-disk digest cache binary file.
     #[serde(default = "default_digest_cache_path")]

@@ -8,8 +8,6 @@
 //! [`SupervisorConfig::default`] for sensible defaults suitable for local
 //! development.
 
-// Rust guideline compliant 2026-02-21
-
 mod durability;
 mod pause_rules;
 mod storage;
@@ -31,7 +29,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Combines agent identity, storage, durability, networking, and
 /// pause-before-action rules into a single validated bundle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorConfig {
     /// Unique identifier for this agent instance.
     pub agent_id: String,
@@ -92,12 +90,16 @@ impl Default for SupervisorConfig {
 impl SupervisorConfig {
     /// Parse configuration from a YAML reader.
     ///
+    /// Compiles all glob patterns after deserialization so that
+    /// pattern errors surface at load time rather than at match time.
+    ///
     /// # Errors
     ///
     /// Returns an error if the YAML is malformed or deserialization fails.
     pub fn load(reader: impl Read) -> anyhow::Result<Self> {
-        let config: Self =
+        let mut config: Self =
             serde_yaml::from_reader(reader).context("failed to parse supervisor config YAML")?;
+        config.compile_patterns();
         Ok(config)
     }
 
@@ -122,6 +124,14 @@ impl SupervisorConfig {
         }
         self.storage.validate()?;
         Ok(())
+    }
+
+    /// Pre-compile all glob patterns in durability overrides and pause rules.
+    fn compile_patterns(&mut self) {
+        self.durability.validate_patterns();
+        for rule in &mut self.pause_before {
+            rule.validate_patterns();
+        }
     }
 }
 
@@ -234,9 +244,9 @@ tls:
   keylog_path: /custom/keylog.txt
   mitm_proxy_port: 9999
 pause_before:
-  - match_kind: unlink
+  - type: unlink
     paths: ["/workspace/**"]
-  - match_kind: exec
+  - type: exec
     binaries: ["rm", "curl"]
 "#;
         let cfg = SupervisorConfig::load(yaml.as_bytes()).unwrap();
@@ -259,9 +269,6 @@ pause_before:
         };
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         let parsed: SupervisorConfig = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(parsed.agent_id, cfg.agent_id);
-        assert_eq!(parsed.agent_command, cfg.agent_command);
-        assert_eq!(parsed.data_dir, cfg.data_dir);
-        assert_eq!(parsed.listen_addr, cfg.listen_addr);
+        assert_eq!(parsed, cfg);
     }
 }
