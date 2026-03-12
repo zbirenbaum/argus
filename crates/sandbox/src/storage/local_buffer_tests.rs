@@ -115,5 +115,3 @@ fn new_sets_max_bytes() {
     assert_eq!(buf.total_bytes(), 0);
     assert_eq!(buf.entry_count(), 0);
 }
-
-// Rust guideline compliant 2026-02-21

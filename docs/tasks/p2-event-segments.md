@@ -35,6 +35,7 @@
 ## What's missing
 - `DurabilityMode::Remote` does not block until S3 upload is confirmed (would require async or callback plumbing from the upload pool)
 - Time-based segment rotation (only size-based is implemented)
+- Segment retention floor: spec says "never evict most recent N event segments" but this is not enforced in `LocalBuffer::prune()`
 
 ## How to test
 ```bash

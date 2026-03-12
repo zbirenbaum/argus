@@ -210,5 +210,3 @@ fn current_segment_size_tracks_bytes() {
     let size_after_two = log.current_segment_size();
     assert!(size_after_two > size_after_one);
 }
-
-// Rust guideline compliant 2026-02-21

@@ -8,8 +8,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use anyhow::{Context, Result};
 use tracing::event;
 
@@ -31,7 +29,7 @@ pub struct EventLog {
     agent_id: String,
     event_dir: PathBuf,
     max_segment_bytes: u64,
-    segment_seq: AtomicU64,
+    segment_seq: u64,
     writer: Option<BufWriter<File>>,
     current_size: u64,
     current_path: PathBuf,
@@ -80,7 +78,7 @@ impl EventLog {
             agent_id,
             event_dir,
             max_segment_bytes,
-            segment_seq: AtomicU64::new(0),
+            segment_seq: 0,
             writer: None,
             current_size: 0,
             current_path: PathBuf::new(),
@@ -117,6 +115,8 @@ impl EventLog {
         writer.write_all(b"\n")?;
         self.current_size += line_bytes;
 
+        // Memory mode still writes to disk (via BufWriter) but skips fsync,
+        // matching spec: data is durable only in the OS page cache.
         if self.durability == DurabilityMode::Local {
             self.fsync_current()?;
         }
@@ -144,7 +144,7 @@ impl EventLog {
 
     /// Return the current segment sequence number.
     pub fn current_segment_seq(&self) -> u64 {
-        self.segment_seq.load(Ordering::Relaxed)
+        self.segment_seq
     }
 
     /// Finalize the current segment and submit it for upload.
@@ -166,7 +166,7 @@ impl EventLog {
     }
 
     fn open_segment(&mut self) -> Result<()> {
-        let seq = self.segment_seq.load(Ordering::Relaxed);
+        let seq = self.segment_seq;
         let path = self.event_dir.join(format!("{seq}.jsonl"));
 
         let file = OpenOptions::new()
@@ -190,13 +190,13 @@ impl EventLog {
         self.fsync_current()?;
         self.submit_segment(upload_pool)?;
 
-        self.segment_seq.fetch_add(1, Ordering::Relaxed);
+        self.segment_seq += 1;
         self.open_segment()?;
 
         event!(
             name: "event_log.segment.rotated",
             tracing::Level::INFO,
-            event_log.segment_seq = self.segment_seq.load(Ordering::Relaxed),
+            event_log.segment_seq = self.segment_seq,
             event_log.agent_id = %self.agent_id,
             "segment rotated to {{event_log.segment_seq}}"
         );
@@ -225,6 +225,8 @@ impl EventLog {
             return Ok(());
         }
 
+        // Known limitation: reads full segment into memory. For very large
+        // segments this could be replaced with streaming upload.
         let data = fs::read(&self.current_path).with_context(|| {
             format!(
                 "failed to read segment for upload: {}",
@@ -232,7 +234,7 @@ impl EventLog {
             )
         })?;
 
-        let seq = self.segment_seq.load(Ordering::Relaxed);
+        let seq = self.segment_seq;
         let job = UploadJob::EventSegment {
             agent_id: self.agent_id.clone(),
             seq,
@@ -248,5 +250,3 @@ impl EventLog {
 #[cfg(test)]
 #[path = "event_log_tests.rs"]
 mod tests;
-
-// Rust guideline compliant 2026-02-21

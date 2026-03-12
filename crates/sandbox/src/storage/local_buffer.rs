@@ -63,12 +63,18 @@ impl LocalBuffer {
     /// The `key_suffix` is matched against the file name component
     /// of each entry's path.
     pub fn confirm_upload(&mut self, key_suffix: &str) {
+        let suffix_filename = Path::new(key_suffix)
+            .file_name()
+            .and_then(|n| n.to_str());
+
         for entry in &mut self.entries {
             let matches = entry
                 .path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|name| key_suffix.ends_with(name));
+                .is_some_and(|name| {
+                    suffix_filename.is_some_and(|sf| sf == name)
+                });
             if matches {
                 entry.upload_confirmed = true;
             }
@@ -76,6 +82,9 @@ impl LocalBuffer {
     }
 
     /// Evict oldest confirmed entries until total size is under limit.
+    ///
+    /// Spec gap: the spec says "never evict most recent N event segments"
+    /// but segment retention floor is not yet implemented.
     ///
     /// Returns the number of files deleted.
     ///
@@ -145,5 +154,3 @@ fn delete_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "local_buffer_tests.rs"]
 mod tests;
-
-// Rust guideline compliant 2026-02-21
