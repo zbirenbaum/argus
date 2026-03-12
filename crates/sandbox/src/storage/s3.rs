@@ -71,7 +71,14 @@ impl S3Client {
     ///
     /// Returns an error if the AWS SDK configuration fails.
     pub async fn new(config: &S3Config) -> Result<Self> {
+        let http_client = aws_smithy_http_client::Builder::new()
+            .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
+                aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
+            ))
+            .build_https();
+
         let mut sdk_config = aws_config::from_env()
+            .http_client(http_client.clone())
             .region(aws_sdk_s3::config::Region::new(config.region.clone()));
 
         if let Some(endpoint) = &config.endpoint {
@@ -84,6 +91,7 @@ impl S3Client {
         // style does not work with most S3-compatible stores.
         let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
             .force_path_style(config.endpoint.is_some())
+            .http_client(http_client)
             .build();
 
         let inner = aws_sdk_s3::Client::from_conf(s3_config);
