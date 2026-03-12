@@ -237,7 +237,7 @@ mod tests {
     fn emit_sends_event_with_correct_agent_id() {
         let (tx, rx) = mpsc::channel();
         let tracer = TracerLoop::new("agent-42".into(), tx);
-        tracer.emit(EventPayload::Fork(ep::Fork {
+        tracer.emit(EventPayload::Fork(crate::events::process::Fork {
             parent_pid: 1,
             child_pid: 2,
         }));
@@ -250,12 +250,12 @@ mod tests {
     fn emit_increments_sequence() {
         let (tx, rx) = mpsc::channel();
         let tracer = TracerLoop::new("a".into(), tx);
-        tracer.emit(EventPayload::Exit(ep::Exit {
+        tracer.emit(EventPayload::Exit(crate::events::process::Exit {
             pid: 1,
             exit_code: 0,
             signal: None,
         }));
-        tracer.emit(EventPayload::Exit(ep::Exit {
+        tracer.emit(EventPayload::Exit(crate::events::process::Exit {
             pid: 2,
             exit_code: 0,
             signal: None,

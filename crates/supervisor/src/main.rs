@@ -23,7 +23,7 @@ use sandbox::events::{Event, EventPayload};
 use sandbox::net;
 use sandbox::tracer::TracerLoop;
 
-/// Argus sandbox supervisor — ptrace-based filesystem versioning.
+/// Argus sandbox supervisor -- ptrace-based filesystem versioning.
 #[derive(Debug, Parser)]
 #[command(name = "supervisor", version, about)]
 struct Cli {
@@ -59,8 +59,8 @@ fn main() -> Result<()> {
     let ca_paths = net::generate_ca(&config.tls.ca_dir)?;
     let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
-    // mitmdump is optional; log a warning if it fails to start but continue
-    // so the supervisor works in environments without mitmproxy installed.
+    // mitmdump is optional; log a warning if it fails to start but
+    // continue so the supervisor works without mitmproxy installed.
     let mut mitmdump = match net::start_mitmdump(&ca_paths, config.tls.mitm_proxy_port) {
         Ok(handle) => Some(handle),
         Err(e) => {
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
                 name: "supervisor.mitmdump.skip",
                 Level::WARN,
                 error.message = %e,
-                "mitmdump not available, continuing without TLS interception: {{error.message}}",
+                "mitmdump unavailable, no TLS interception: {{error.message}}",
             );
             None
         }
@@ -123,15 +123,16 @@ fn init_tracing() {
 /// Loads and merges config from the YAML file with CLI overrides.
 fn load_config(cli: &Cli) -> Result<SupervisorConfig> {
     let mut config = if cli.config.exists() {
-        let file = fs::File::open(&cli.config)
-            .with_context(|| format!("failed to open config file {}", cli.config.display()))?;
+        let file = fs::File::open(&cli.config).with_context(|| {
+            format!("failed to open config file {}", cli.config.display())
+        })?;
         SupervisorConfig::load(file)?
     } else {
         event!(
             name: "supervisor.config.default",
             Level::INFO,
             config.path = %cli.config.display(),
-            "config file not found at {{config.path}}, using defaults",
+            "config not found at {{config.path}}, using defaults",
         );
         SupervisorConfig::default()
     };
@@ -156,11 +157,8 @@ fn emit_agent_start(tx: &mpsc::Sender<Event>, config: &SupervisorConfig) {
         pod: std::env::var("POD_NAME").ok(),
     });
 
-    let evt = Event::new(
-        &sandbox::events::SequenceGenerator::default(),
-        config.agent_id.clone(),
-        payload,
-    );
+    let seq = sandbox::events::SequenceGenerator::default();
+    let evt = Event::new(&seq, config.agent_id.clone(), payload);
 
     if let Err(e) = tx.send(evt) {
         event!(
@@ -231,12 +229,9 @@ mod tests {
     fn load_config_reads_yaml_file() {
         init_tracing_for_test();
         let dir = tempfile::TempDir::new().unwrap();
+        let yaml = "data_dir: /custom/data\nworkspace_dir: /custom/ws\n";
         let config_path = dir.path().join("test.yaml");
-        fs::write(
-            &config_path,
-            "data_dir: /custom/data\nworkspace_dir: /custom/ws\n",
-        )
-        .unwrap();
+        fs::write(&config_path, yaml).unwrap();
 
         let cli = Cli {
             agent_id: "yaml-agent".into(),

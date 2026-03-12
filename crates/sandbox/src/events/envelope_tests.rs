@@ -266,7 +266,7 @@ fn all_variants_round_trip() {
         }),
         EventPayload::HttpRequest(network::HttpRequest {
             pid: 1, method: "GET".into(), url: "/".into(),
-            headers_hash: None, body_hash: None, status: None,
+            headers_hash: None, body_hash: None,
         }),
         EventPayload::HttpResponse(network::HttpResponse {
             pid: 1, status: 200, headers_hash: None, body_hash: None,
