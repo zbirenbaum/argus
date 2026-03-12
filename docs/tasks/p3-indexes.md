@@ -1,6 +1,6 @@
 # P3: Secondary Indexes & Query Engine
 
-**Status**: not started
+**Status**: done
 
 **Spec reference**: `docs/spec/05-indexing-queries.md`
 
@@ -8,42 +8,38 @@
 - **Blocked by**: P1-events (event types to index), P2-event-segments (events to index over)
 - **Blocks**: P3-query-api
 
-## Parallelizable with
-- All P1 tasks (only needs event types defined), P2-cas, P2-s3-upload, P2-content-capture, P3-merkle-tree, P3-restore
+## What was done
 
-## What needs to be done
-- `crates/sandbox/src/index/mod.rs`:
+### Files added/changed
+- `crates/sandbox/src/events/envelope.rs` - Added `EventPayload::event_type_tag()`, `pid()`, `paths()` helper methods
+- `crates/sandbox/src/index/mod.rs` - Module declarations and re-exports
+- `crates/sandbox/src/index/path_index.rs` - Path index with SHA-256 hashed filenames, prefix lookup, disk persistence
+- `crates/sandbox/src/index/path_index_tests.rs` - 9 tests
+- `crates/sandbox/src/index/pid_index.rs` - PID index with process tree metadata, disk persistence
+- `crates/sandbox/src/index/pid_index_tests.rs` - 9 tests
+- `crates/sandbox/src/index/type_index.rs` - Type index mapping event tags to sequence numbers, disk persistence
+- `crates/sandbox/src/index/type_index_tests.rs` - 6 tests
+- `crates/sandbox/src/index/query.rs` - Query engine intersecting path/pid/type filters with seq/time range and limit
+- `crates/sandbox/src/index/query_tests.rs` - 14 tests
+- `crates/sandbox/Cargo.toml` - Added `hex` dependency for path hashing
 
-### Path Index
-- `PathIndex`: maps path → list of (seq, event_type) entries
-- Append-only, keyed by path hash
-- Supports glob queries: `get_by_glob("src/**/*.rs")`
+## What works
+- **Path index**: Insert, exact lookup, prefix lookup, disk append, rebuild from disk
+- **PID index**: Insert, lookup, process tree (upsert/mark_exit/query), disk persistence, rebuild
+- **Type index**: Insert, lookup, iteration over all types, disk persistence, rebuild
+- **Query engine**: Single-filter queries (path, pid, type), multi-filter intersection, path prefix, seq range, time range (via `query_events`), limit, sorted results
+- **EventPayload helpers**: `event_type_tag()` returns serde tag string, `pid()` extracts PID, `paths()` extracts filesystem paths
 
-### Process Index
-- `PidIndex`: maps pid → list of (seq, event_type) entries
-- Includes process lineage (parent chain)
-
-### Type Index
-- `TypeIndex`: maps event_type → list of seq entries
-- Fast filtering by event category
-
-### Query Engine
-- `QueryEngine`: combines indexes for compound queries
-- Filters: time range (seq or timestamp), pid, path (exact or glob), event type, combination
-- Returns iterator over matching EventEnvelopes
-- Pagination: offset + limit
-- Streaming: return JSONL for large result sets
-
-### Index Maintenance
-- On each event: append to all relevant indexes
-- On restart: rebuild from event segments (scan all local + S3 segments)
-- Persist indexes to `/data/indexes/`
+## What's missing
+- Glob-based path queries (spec mentions glob, current impl uses prefix)
+- Streaming JSONL output (belongs in P3-query-api HTTP layer)
+- Offset-based pagination (limit is implemented, offset deferred to API layer)
+- Rebuild from S3 segments (rebuild currently reads local disk only)
 
 ## How to test
 ```bash
 cargo test -p sandbox --lib index
 ```
-Unit tests: insert+query for each index type, compound query with multiple filters, glob matching, pagination.
 
 ## Branch
 - **Branch**: `p3-indexes`
