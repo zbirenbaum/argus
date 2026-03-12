@@ -137,6 +137,27 @@ fn read_sockaddr(pid: Pid, addr_ptr: u64, addr_len: usize) -> Result<(String, u1
             );
             Ok((addr, port))
         }
-        _ => Ok(("unknown".to_owned(), 0)),
+        AF_UNIX => {
+            // sun_path starts at offset 2. Extract the path, stopping
+            // at the first null byte or end of buffer.
+            let path_bytes = &buf[2..];
+            let end = path_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(path_bytes.len());
+            let path = if end == 0 {
+                // Abstract socket (first byte is \0) or empty path.
+                "unix:@abstract".to_owned()
+            } else {
+                format!(
+                    "unix:{}",
+                    String::from_utf8_lossy(&path_bytes[..end]),
+                )
+            };
+            Ok((path, 0))
+        }
+        other => {
+            Ok((format!("af_{other}"), 0))
+        }
     }
 }

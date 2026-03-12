@@ -1943,6 +1943,7 @@ dependencies = [
  "chrono",
  "fastrand",
  "glob",
+ "hex",
  "http-body-util",
  "humantime-serde",
  "nix",

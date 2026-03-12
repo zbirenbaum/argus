@@ -17,17 +17,22 @@ use crate::net::CaPaths;
 /// Node.js, Python requests).
 pub fn agent_env_vars(config: &TlsConfig, ca: &CaPaths) -> HashMap<String, String> {
     let proxy = format!("http://127.0.0.1:{}", config.mitm_proxy_port);
-    let cert = ca.cert.display().to_string();
     let keylog = config.keylog_path.display().to_string();
+
+    // The agent must trust the mitmdump CA, not the argus sandbox CA.
+    // mitmdump generates its own CA at <confdir>/mitmproxy-ca-cert.pem
+    // when started with --set confdir=<dir>.
+    let mitm_cert = ca
+        .cert
+        .parent()
+        .map(|dir| dir.join("mitmproxy-ca-cert.pem"))
+        .unwrap_or_else(|| ca.cert.clone());
+    let cert = mitm_cert.display().to_string();
 
     let mut env = HashMap::with_capacity(6);
     env.insert("HTTPS_PROXY".into(), proxy.clone());
     env.insert("HTTP_PROXY".into(), proxy);
     env.insert("SSLKEYLOGFILE".into(), keylog);
-    // Spec suggests /etc/ssl/certs/sandbox-ca.pem but the supervisor may
-    // not have write access to /etc/ssl/certs in all environments. The
-    // agent only needs the env var to point at a valid cert file, so we
-    // use the ca_dir path directly.
     env.insert("SSL_CERT_FILE".into(), cert.clone());
     env.insert("REQUESTS_CA_BUNDLE".into(), cert.clone());
     env.insert("NODE_EXTRA_CA_CERTS".into(), cert);
@@ -85,9 +90,9 @@ mod tests {
     }
 
     #[test]
-    fn cert_paths_match_ca_paths() {
+    fn cert_paths_point_to_mitmproxy_ca() {
         let env = agent_env_vars(&test_config(), &test_ca_paths());
-        let expected = "/data/tls/ca-cert.pem";
+        let expected = "/data/tls/mitmproxy-ca-cert.pem";
 
         assert_eq!(env["SSL_CERT_FILE"], expected);
         assert_eq!(env["REQUESTS_CA_BUNDLE"], expected);
