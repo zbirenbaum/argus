@@ -12,8 +12,8 @@
 - P2-s3-upload, P2-pause-resume-api, P2-event-segments, P2-tls-content, P3-indexes
 
 ## What was done
-- `crates/sandbox/src/snapshot/mod.rs`: module declarations and re-exports
-- `crates/sandbox/src/snapshot/tree.rs`:
+- `crates/argus/src/snapshot/mod.rs`: module declarations and re-exports
+- `crates/argus/src/snapshot/tree.rs`:
   - `MerkleTree` — in-memory Merkle tree with flat `BTreeMap<PathBuf, ContentHash>` file map
   - `TreeObject` — serializable directory listing stored in CAS
   - `Commit` — root tree hash + timestamps + parent commit hash
@@ -22,12 +22,12 @@
   - `commit()` — stores tree objects and commit in CAS, returns commit hash
   - `files()`, `file_count()`, `contains()`, `get()` — query accessors
   - `build_dir_tree()`, `hash_dir_node()`, `DirNode` — exposed as `pub(crate)` for diff module
-- `crates/sandbox/src/snapshot/checkpoint.rs`:
+- `crates/argus/src/snapshot/checkpoint.rs`:
   - `serialize_checkpoint()` / `deserialize_checkpoint()` — versioned bincode round-trip for `MerkleTree`
   - Version byte prefix (v1) checked on deserialization
   - `checkpoint_s3_key()` — builds S3 path `checkpoints/{agent_id}/{seq}.bin`
   - `DEFAULT_CHECKPOINT_INTERVAL` constant (1000)
-- `crates/sandbox/src/snapshot/diff.rs`:
+- `crates/argus/src/snapshot/diff.rs`:
   - `diff_trees()` — recursive Merkle subtree-skipping diff using `DirNode` tree structure
   - `DiffEntry` (derives `Hash`) / `DiffKind` (derives `Copy`, `Hash`) — diff result types
   - Results sorted by path
@@ -52,7 +52,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib snapshot
+cargo test -p argus --lib snapshot
 ```
 
 ## Branch

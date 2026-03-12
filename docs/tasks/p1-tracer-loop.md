@@ -11,19 +11,19 @@
 ## What was done
 
 ### Files added
-- `crates/sandbox/src/tracer/trace_loop.rs` -- `TracerLoop` struct with main ptrace wait loop
-- `crates/sandbox/src/tracer/process_events.rs` -- fork, program-replace, exit event handlers
-- `crates/sandbox/src/tracer/handlers/mod.rs` -- seccomp stop dispatch by syscall number
-- `crates/sandbox/src/tracer/handlers/file_ops.rs` -- open/close/dup/fcntl handlers
-- `crates/sandbox/src/tracer/handlers/metadata_ops.rs` -- rename/unlink/mkdir/chmod/truncate/link/symlink handlers
-- `crates/sandbox/src/tracer/handlers/io_ops.rs` -- read/write/pipe/ioctl handlers with fd target classification
-- `crates/sandbox/src/tracer/handlers/net_ops.rs` -- socket/connect/accept handlers
-- `crates/sandbox/src/tracer/memory.rs` -- `read_c_string`, `read_bytes`, `read_path_at`, `read_proc_exe`, `read_proc_cmdline`
-- `crates/sandbox/src/tracer/regs.rs` -- architecture-abstracted register access (x86_64 + aarch64)
-- `crates/sandbox/src/tracer/syscall_nr.rs` -- x86_64 syscall number constants
+- `crates/argus/src/tracer/trace_loop.rs` -- `TracerLoop` struct with main ptrace wait loop
+- `crates/argus/src/tracer/process_events.rs` -- fork, program-replace, exit event handlers
+- `crates/argus/src/tracer/handlers/mod.rs` -- seccomp stop dispatch by syscall number
+- `crates/argus/src/tracer/handlers/file_ops.rs` -- open/close/dup/fcntl handlers
+- `crates/argus/src/tracer/handlers/metadata_ops.rs` -- rename/unlink/mkdir/chmod/truncate/link/symlink handlers
+- `crates/argus/src/tracer/handlers/io_ops.rs` -- read/write/pipe/ioctl handlers with fd target classification
+- `crates/argus/src/tracer/handlers/net_ops.rs` -- socket/connect/accept handlers
+- `crates/argus/src/tracer/memory.rs` -- `read_c_string`, `read_bytes`, `read_path_at`, `read_proc_exe`, `read_proc_cmdline`
+- `crates/argus/src/tracer/regs.rs` -- architecture-abstracted register access (x86_64 + aarch64)
+- `crates/argus/src/tracer/syscall_nr.rs` -- x86_64 syscall number constants
 
 ### Files modified
-- `crates/sandbox/src/tracer/mod.rs` -- added module declarations and re-exports
+- `crates/argus/src/tracer/mod.rs` -- added module declarations and re-exports
 
 ## What works
 - `TracerLoop::new()` / `TracerLoop::run()` -- full ptrace loop with `waitpid(-1, __WALL)`
@@ -51,10 +51,10 @@
 ## How to test
 ```bash
 # Unit tests (no ptrace required)
-cargo test -p sandbox --lib tracer
+cargo test -p argus --lib tracer
 
 # Integration tests (require Linux + SYS_PTRACE capability)
-cargo test -p sandbox --lib tracer -- --ignored
+cargo test -p argus --lib tracer -- --ignored
 ```
 
 ## Branch

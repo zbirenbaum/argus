@@ -12,12 +12,12 @@
 - P1-events, P1-state, P1-seccomp, P2-cas, P2-s3-upload, P2-digest-cache, P2-event-segments, P3-indexes
 
 ## What was done
-- `crates/sandbox/src/config/mod.rs` — `SupervisorConfig` (top-level), YAML load, validation, defaults
-- `crates/sandbox/src/config/storage.rs` — `StorageConfig`, `S3Config`, `UploadConfig`, `LocalBufferConfig`, `DigestCacheConfig`
-- `crates/sandbox/src/config/durability.rs` — `DurabilityConfig`, `DurabilityMode` enum, `DurabilityOverride`, glob-based path matching
-- `crates/sandbox/src/config/pause_rules.rs` — `PauseRule`, `PauseMatchKind` enum, `PauseAction` enum, glob/binary/destination matching
-- `crates/sandbox/src/config/tls.rs` — `TlsConfig` (ca_dir, keylog_path, mitm_proxy_port)
-- `crates/sandbox/Cargo.toml` — added `serde_yaml`, `glob`, `humantime-serde`, `bytesize` dependencies
+- `crates/argus/src/config/mod.rs` — `SupervisorConfig` (top-level), YAML load, validation, defaults
+- `crates/argus/src/config/storage.rs` — `StorageConfig`, `S3Config`, `UploadConfig`, `LocalBufferConfig`, `DigestCacheConfig`
+- `crates/argus/src/config/durability.rs` — `DurabilityConfig`, `DurabilityMode` enum, `DurabilityOverride`, glob-based path matching
+- `crates/argus/src/config/pause_rules.rs` — `PauseRule`, `PauseMatchKind` enum, `PauseAction` enum, glob/binary/destination matching
+- `crates/argus/src/config/tls.rs` — `TlsConfig` (ca_dir, keylog_path, mitm_proxy_port)
+- `crates/argus/Cargo.toml` — added `serde_yaml`, `glob`, `humantime-serde`, `bytesize` dependencies
 
 ## What works
 - All structs derive Serialize, Deserialize, Debug, Clone
@@ -36,7 +36,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib
+cargo test -p argus --lib
 ```
 
 ## Branch

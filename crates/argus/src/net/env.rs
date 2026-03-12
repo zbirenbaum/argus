@@ -2,7 +2,7 @@
 //!
 //! Builds the set of environment variables that make an agent process
 //! route HTTP/HTTPS traffic through the MITM proxy and trust the
-//! sandbox CA certificate. These variables are injected into the
+//! argus CA certificate. These variables are injected into the
 //! agent's process environment at spawn time.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub fn agent_env_vars(config: &TlsConfig, ca: &CaPaths) -> HashMap<String, Strin
     let proxy = format!("http://127.0.0.1:{}", config.mitm_proxy_port);
     let keylog = config.keylog_path.display().to_string();
 
-    // The agent must trust the mitmdump CA, not the argus sandbox CA.
+    // The agent must trust the mitmdump CA, not the argus CA.
     // mitmdump generates its own CA at <confdir>/mitmproxy-ca-cert.pem
     // when started with --set confdir=<dir>.
     let mitm_cert = ca

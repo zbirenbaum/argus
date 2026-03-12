@@ -12,7 +12,7 @@
 - P2-cas, P2-s3-upload, P2-digest-cache, P2-write-locking, P2-tls-content
 
 ## What needs to be done
-- `crates/sandbox/src/api/mod.rs` + submodules:
+- `crates/argus/src/api/mod.rs` + submodules:
   - Axum server on 127.0.0.1:9090
   - `POST /agent/pause` — set paused flag, all traced processes stop receiving PTRACE_CONT
   - `POST /agent/resume` — clear paused flag, resume all
@@ -31,7 +31,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib api
+cargo test -p argus --lib api
 ```
 Unit tests: pause/resume state machine, approval lifecycle.
 Integration test (ignored): start supervisor, POST /agent/pause, verify processes stop, POST /agent/resume, verify continue.

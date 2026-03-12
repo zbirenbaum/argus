@@ -8,7 +8,7 @@ name = "argus"
 path = "src/main.rs"
 
 [dependencies]
-sandbox = { path = "../sandbox" }
+argus = { path = "../argus" }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

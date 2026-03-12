@@ -18,12 +18,12 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: agent-sandbox
+  name: agent-argus
 spec:
   serviceAccountName: argus-sa
   containers:
     - name: agent
-      image: your-registry/agent-sandbox:latest
+      image: your-registry/agent-argus:latest
       securityContext:
         capabilities:
           add: ["SYS_PTRACE"]

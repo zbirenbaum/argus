@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
 use std::thread::{self, JoinHandle};
 
-use sandbox::events::Event;
+use argus::events::Event;
 use tracing::{Level, event};
 
 /// Spawns a thread that writes events as JSON lines to stdout.
@@ -77,8 +77,8 @@ fn write_loop(rx: Receiver<Event>) {
 mod tests {
     use std::sync::mpsc;
 
-    use sandbox::events::{EventPayload, SequenceGenerator};
-    use sandbox::events::process::Exit;
+    use argus::events::{EventPayload, SequenceGenerator};
+    use argus::events::process::Exit;
 
     use super::*;
 

@@ -9,15 +9,15 @@
 - **Blocks**: P2-content-capture (uses cache for read dedup)
 
 ## What was done
-- `crates/sandbox/src/storage/digest_cache.rs`: full implementation
+- `crates/argus/src/storage/digest_cache.rs`: full implementation
   - `DigestCache` struct with `HashMap<ContentHash, DigestEntry>` tracking remote-known hashes
   - `DigestEntry` with `size_bytes`, `uploaded_at` (SystemTime), `ttl` (Duration)
   - `DigestCacheStats` aggregate type
   - Methods: `new`, `contains`, `insert`, `insert_with_ttl`, `remove`, `prune_expired`, `len`, `is_empty`, `stats`, `save_to_disk`, `load_from_disk`
   - Atomic writes (write temp + rename) for crash safety
   - bincode serialization for compact disk format
-- `crates/sandbox/src/storage/mod.rs`: added module and re-exports
-- `crates/sandbox/Cargo.toml`: added `bincode = "1"` dependency
+- `crates/argus/src/storage/mod.rs`: added module and re-exports
+- `crates/argus/Cargo.toml`: added `bincode = "1"` dependency
 
 ## What works
 - Insert/lookup with TTL expiry
@@ -34,7 +34,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox -- digest_cache
+cargo test -p argus -- digest_cache
 ```
 
 ## Branch

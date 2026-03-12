@@ -12,11 +12,11 @@
 - ALL P1 tasks — can start immediately
 
 ## What was done
-- `crates/sandbox/src/cas/hash.rs` — `ContentHash` newtype (SHA-256, 64-char hex), Display, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, `from_data`, `as_str`, `prefix`, `suffix`
-- `crates/sandbox/src/cas/stats.rs` — `CasStats` (atomic counters), `CasStatsSnapshot` (serializable snapshot)
-- `crates/sandbox/src/cas/store.rs` — `CasStore` with `new`, `store`, `exists`, `read`, `delete`, `object_path`, `stats`; atomic writes via temp-file + fsync + rename
-- `crates/sandbox/src/cas/mod.rs` — module re-exports
-- `crates/sandbox/Cargo.toml` — added `tempfile` dev-dependency
+- `crates/argus/src/cas/hash.rs` — `ContentHash` newtype (SHA-256, 64-char hex), Display, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, `from_data`, `as_str`, `prefix`, `suffix`
+- `crates/argus/src/cas/stats.rs` — `CasStats` (atomic counters), `CasStatsSnapshot` (serializable snapshot)
+- `crates/argus/src/cas/store.rs` — `CasStore` with `new`, `store`, `exists`, `read`, `delete`, `object_path`, `stats`; atomic writes via temp-file + fsync + rename
+- `crates/argus/src/cas/mod.rs` — module re-exports
+- `crates/argus/Cargo.toml` — added `tempfile` dev-dependency
 
 ## What works
 - SHA-256 hashing with deterministic output
@@ -33,7 +33,7 @@
 
 ## How to test
 ```bash
-docker exec -w /workspaces/argus-run silly_snyder cargo test -p sandbox --lib cas
+docker exec -w /workspaces/argus-run silly_snyder cargo test -p argus --lib cas
 ```
 
 ## Branch

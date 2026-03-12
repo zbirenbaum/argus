@@ -12,10 +12,10 @@
 - P1-config, P1-events, P1-state, P1-net-env, P2-cas, P2-s3-upload, P2-digest-cache, P2-event-segments, P3-indexes
 
 ## What was done
-- `crates/sandbox/src/tracer/seccomp/mod.rs` — public API: `install_seccomp_filter()`, `trapped_syscalls()`, `is_trapped()`
-- `crates/sandbox/src/tracer/seccomp/syscalls.rs` — x86_64 syscall number constants and static lists (61 traced, 3 blocked)
-- `crates/sandbox/src/tracer/seccomp/bpf.rs` — raw BPF program builder (`SyscallAction` enum, `build_filter_program()`)
-- `crates/sandbox/src/tracer/mod.rs` — added `pub mod seccomp;`
+- `crates/argus/src/tracer/seccomp/mod.rs` — public API: `install_seccomp_filter()`, `trapped_syscalls()`, `is_trapped()`
+- `crates/argus/src/tracer/seccomp/syscalls.rs` — x86_64 syscall number constants and static lists (61 traced, 3 blocked)
+- `crates/argus/src/tracer/seccomp/bpf.rs` — raw BPF program builder (`SyscallAction` enum, `build_filter_program()`)
+- `crates/argus/src/tracer/mod.rs` — added `pub mod seccomp;`
 
 ## What works
 - BPF program validates x86_64 arch, kills on mismatch
@@ -35,10 +35,10 @@
 ## How to test
 ```bash
 # Unit tests (no special privileges needed)
-cargo test -p sandbox --lib tracer::seccomp
+cargo test -p argus --lib tracer::seccomp
 
 # Integration test (requires Linux with SYS_PTRACE, seccomp=unconfined)
-cargo test -p sandbox --lib tracer::seccomp -- --ignored
+cargo test -p argus --lib tracer::seccomp -- --ignored
 ```
 
 ## Branch

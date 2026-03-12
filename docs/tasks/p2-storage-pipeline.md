@@ -8,7 +8,7 @@
 
 ## What Was Done
 
-### StoragePipeline (`crates/sandbox/src/storage/pipeline.rs`)
+### StoragePipeline (`crates/argus/src/storage/pipeline.rs`)
 - Unified orchestration of CAS store, event log, upload pool, digest cache, local buffer
 - `store_content(data)` — local CAS write → digest cache check → S3 upload if new → local buffer tracking
 - `append_event(event)` — event log with auto-rotation and segment upload
@@ -22,7 +22,7 @@
 - `argus cat <hash>` — read CAS object by hash, write raw bytes to stdout
 - `argus stdio <pid>` — reconstruct stdio from events, fetch content from CAS, filter by --stream
 
-### S3 Client Fix (`crates/sandbox/src/storage/s3.rs`)
+### S3 Client Fix (`crates/argus/src/storage/s3.rs`)
 - Explicitly configure `aws-smithy-http-client::Builder` with rustls-ring TLS provider
 - Set HTTP client on both `aws_config` loader and S3 config builder (needed for credential resolution + S3 calls)
 
@@ -49,7 +49,7 @@
 
 ```bash
 # Unit tests (pipeline)
-docker exec argus-arm64 bash -c "cd /workspace && cargo test -p sandbox pipeline"
+docker exec argus-arm64 bash -c "cd /workspace && cargo test -p argus pipeline"
 
 # Full workspace
 docker exec argus-arm64 bash -c "cd /workspace && cargo test --workspace"
@@ -59,7 +59,7 @@ docker compose up -d minio minio-init
 docker network connect argus-run_default argus-arm64
 docker exec -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
   -e AWS_REGION=us-east-1 -e MINIO_ENDPOINT=http://argus-run-minio-1:9000 \
-  argus-arm64 bash -c "cd /workspace && cargo test -p sandbox pipeline_minio -- --ignored"
+  argus-arm64 bash -c "cd /workspace && cargo test -p argus pipeline_minio -- --ignored"
 ```
 
 ## Branch

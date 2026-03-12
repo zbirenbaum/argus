@@ -12,11 +12,11 @@
 - All P1 tasks, P2-pause-resume-api, P2-content-capture
 
 ## What was done
-- `crates/sandbox/Cargo.toml` — added `aws-sdk-s3` and `aws-config` dependencies
-- `crates/sandbox/src/storage/mod.rs` — module declarations and re-exports
-- `crates/sandbox/src/storage/s3.rs` — `ObjectStore` trait (RPITIT) and `S3Client` implementation
-- `crates/sandbox/src/storage/object_store_dyn.rs` — `DynObjectStore` type-erased wrapper for dynamic dispatch
-- `crates/sandbox/src/storage/upload_pool.rs` — `UploadPool`, `UploadJob`, `UploadStats`, `UploadConfirmation`
+- `crates/argus/Cargo.toml` — added `aws-sdk-s3` and `aws-config` dependencies
+- `crates/argus/src/storage/mod.rs` — module declarations and re-exports
+- `crates/argus/src/storage/s3.rs` — `ObjectStore` trait (RPITIT) and `S3Client` implementation
+- `crates/argus/src/storage/object_store_dyn.rs` — `DynObjectStore` type-erased wrapper for dynamic dispatch
+- `crates/argus/src/storage/upload_pool.rs` — `UploadPool`, `UploadJob`, `UploadStats`, `UploadConfirmation`
 
 ## What works
 - `ObjectStore` trait with `put`, `get`, `exists`, `list` methods
@@ -36,7 +36,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib storage
+cargo test -p argus --lib storage
 ```
 16 tests covering: key construction, job routing, submit+process, stats tracking, retry-then-succeed, exhaust-retries-marks-failed, shutdown drains queue, confirmation channel.
 

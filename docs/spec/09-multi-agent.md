@@ -23,7 +23,7 @@ The key insight: **as long as each agent is instrumented, the shared resource do
 ## Container Image
 
 ```dockerfile
-# --- sandbox-base (published to registry) ---
+# --- argus-base (published to registry) ---
 FROM rust:1.77-slim AS builder
 COPY . /src
 RUN cargo build --release --target x86_64-unknown-linux-musl
@@ -31,7 +31,7 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 FROM python:3.12-slim AS mitm
 RUN pip install mitmproxy
 
-FROM ubuntu:24.04 AS sandbox-base
+FROM ubuntu:24.04 AS argus-base
 COPY --from=builder /src/target/x86_64-unknown-linux-musl/release/supervisor /usr/local/bin/supervisor
 COPY --from=mitm /usr/local/bin/mitmdump /usr/local/bin/mitmdump
 COPY --from=mitm /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
@@ -39,12 +39,12 @@ COPY --from=mitm /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.
 
 ```dockerfile
 # --- Per-agent image ---
-FROM your-registry/sandbox-base:latest AS sandbox
+FROM your-registry/argus-base:latest AS argus
 
 FROM python:3.12-slim
-COPY --from=sandbox /usr/local/bin/supervisor /usr/local/bin/supervisor
-COPY --from=sandbox /usr/local/bin/mitmdump /usr/local/bin/mitmdump
-COPY --from=sandbox /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=argus /usr/local/bin/supervisor /usr/local/bin/supervisor
+COPY --from=argus /usr/local/bin/mitmdump /usr/local/bin/mitmdump
+COPY --from=argus /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 
 COPY . /app
 COPY supervisor.yaml /etc/supervisor.yaml
@@ -62,11 +62,11 @@ agents:
   - name: coder
     image: my-registry/coding-agent:latest
 storage:
-  bucket: my-sandbox-bucket
+  bucket: my-argus-bucket
   region: us-west-2
 serviceAccount:
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/sandbox-s3-writer
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/argus-s3-writer
 ```
 
 **Generates per agent:**

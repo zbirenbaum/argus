@@ -86,7 +86,7 @@ rm /workspace/test.txt
 - `write` event with `after_hash`
 - `read` event with `content_hash` matching the `after_hash`
 - `unlink` event with `content_hash`
-- `sandbox cat <hash>` returns `hello world\n`
+- `argus cat <hash>` returns `hello world\n`
 
 **Validates:** Phase 2 content capture, CAS storage, hash-based content retrieval.
 
@@ -167,7 +167,7 @@ for t in threads: t.join()
 
 **Expect:** Every write event has a valid `before_hash` and `after_hash`. No `before_hash` is stale: `before_hash` of event N+1 must equal `after_hash` of event N for the same file.
 
-**Verify:** `sandbox log --path /workspace/shared.txt --type write` and check the hash chain is unbroken.
+**Verify:** `argus log --path /workspace/shared.txt --type write` and check the hash chain is unbroken.
 
 **Validates:** Phase 2 per-path write locking, lock acquire on entry, release after exit with after_hash.
 
@@ -183,7 +183,7 @@ gcc -O0 -pthread -o /tmp/concurrent_write tests/concurrent_write.c
 ./supervisor --agent-id interleave-test --storage.backend local-only \
   -- /tmp/concurrent_write
 
-sandbox log --path /workspace/shared.txt --type write --format json \
+argus log --path /workspace/shared.txt --type write --format json \
   | python3 tests/validate_hash_chain.py
 ```
 
@@ -206,7 +206,7 @@ sandbox log --path /workspace/shared.txt --type write --format json \
 - `connect` event to httpbin.org:443
 - `tls_keys` event from the keylog
 - If mitmdump is running: `http_request`/`http_response` events with body hashes
-- `sandbox cat <body_hash>` shows the JSON response
+- `argus cat <body_hash>` shows the JSON response
 
 **Validates:** Phase 2 TLS content capture, SSLKEYLOGFILE env setup, mitmdump integration.
 
@@ -293,10 +293,10 @@ echo "version 3" > /workspace/file.txt
 From another terminal:
 ```bash
 # Find the timestamp between version 1 and version 2
-sandbox log --path /workspace/file.txt --type write
+argus log --path /workspace/file.txt --type write
 
 # Restore to after version 1 was written
-sandbox restore --timestamp <T> --target /tmp/snapshot/
+argus restore --timestamp <T> --target /tmp/snapshot/
 cat /tmp/snapshot/workspace/file.txt
 # Should output: "version 1"
 ```
@@ -318,8 +318,8 @@ echo "nested" > /workspace/subdir/nested.txt
 
 **Expect:**
 - `initial_state` event with `tree_hash`, `file_count >= 2`, `total_size > 0`
-- `sandbox snapshot --seq 0` shows `existing.txt` and `subdir/nested.txt` with correct hashes
-- `sandbox cat <hash>` for each file returns correct content
+- `argus snapshot --seq 0` shows `existing.txt` and `subdir/nested.txt` with correct hashes
+- `argus cat <hash>` for each file returns correct content
 
 **Validates:** Phase 1/2 startup sequence step 7, initial filesystem walk, commit zero, Merkle tree baseline.
 
@@ -340,26 +340,26 @@ Ask the agent to make changes to the Argus codebase. While it works:
 
 ```bash
 # Watch events in real-time
-sandbox log --follow --type write --path-prefix /workspace/argus/
+argus log --follow --type write --path-prefix /workspace/argus/
 
 # See what the agent's subprocess printed
-sandbox stdio <pid> --follow
+argus stdio <pid> --follow
 
 # After it says "done", check the full process tree
-sandbox process-tree --stdio
+argus process-tree --stdio
 
 # Diff what the workspace looked like before vs. after
-sandbox diff --from 0 --to latest
+argus diff --from 0 --to latest
 
 # Restore to before the agent touched anything
-sandbox restore --seq 0 --target /tmp/before-agent/
+argus restore --seq 0 --target /tmp/before-agent/
 diff -r /tmp/before-agent/workspace /workspace
 ```
 
 **Success criteria:**
-- `sandbox process-tree --stdio` shows every command the agent ran with its output
-- `sandbox diff` shows every file it changed
-- `sandbox restore --seq 0` gives back the exact pre-agent state
+- `argus process-tree --stdio` shows every command the agent ran with its output
+- `argus diff` shows every file it changed
+- `argus restore --seq 0` gives back the exact pre-agent state
 
 ---
 

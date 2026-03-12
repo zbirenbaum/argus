@@ -19,13 +19,13 @@ use clap::Parser;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
-use sandbox::cas::CasStore;
-use sandbox::config::SupervisorConfig;
-use sandbox::events::{Event, EventPayload, SequenceGenerator};
-use sandbox::net;
-use sandbox::tracer::TracerLoop;
+use argus::cas::CasStore;
+use argus::config::SupervisorConfig;
+use argus::events::{Event, EventPayload, SequenceGenerator};
+use argus::net;
+use argus::tracer::TracerLoop;
 
-/// Argus sandbox supervisor -- ptrace-based filesystem versioning.
+/// Argus supervisor -- ptrace-based filesystem versioning.
 #[derive(Debug, Parser)]
 #[command(name = "supervisor", version, about)]
 struct Cli {
@@ -165,9 +165,9 @@ fn emit_agent_start(
     config: &SupervisorConfig,
     seq_gen: &SequenceGenerator,
 ) {
-    let nspid = sandbox::config::read_nspid_pair();
+    let nspid = argus::config::read_nspid_pair();
 
-    let payload = EventPayload::AgentStart(sandbox::events::control::AgentStart {
+    let payload = EventPayload::AgentStart(argus::events::control::AgentStart {
         agent_id: config.agent_id.clone(),
         supervisor_pid_host: nspid.map(|(h, _)| h),
         supervisor_pid_ns: nspid.map(|(_, n)| n),

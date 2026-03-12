@@ -23,7 +23,7 @@ pub struct CaPaths {
 }
 
 /// CA certificate common name used for all generated certificates.
-const CA_COMMON_NAME: &str = "argus-sandbox-ca";
+const CA_COMMON_NAME: &str = "argus-ca";
 
 /// Validity period prevents re-generation during long-running sessions.
 const CA_VALIDITY_DAYS: u32 = 3650;

@@ -11,18 +11,18 @@
 ## What was done
 
 ### Files added/changed
-- `crates/sandbox/src/events/envelope.rs` - Added `EventPayload::event_type_tag()`, `pid()`, `paths()` helper methods
-- `crates/sandbox/src/index/mod.rs` - Module declarations, re-exports, and shared `IndexEntry` type
-- `crates/sandbox/src/index/path_index.rs` - Path index with SHA-256 hashed filenames, prefix lookup, disk persistence
-- `crates/sandbox/src/index/path_index_tests.rs` - 9 tests
-- `crates/sandbox/src/index/pid_index.rs` - PID index with process tree metadata, disk persistence
-- `crates/sandbox/src/index/pid_index_tests.rs` - 9 tests
-- `crates/sandbox/src/index/type_index.rs` - Type index mapping event tags to sequence numbers, disk persistence
-- `crates/sandbox/src/index/type_index_tests.rs` - 6 tests
-- `crates/sandbox/src/index/query.rs` - Query engine intersecting path/pid/type filters with seq/time range and limit
-- `crates/sandbox/src/index/query_tests.rs` - 12 index-only query tests
-- `crates/sandbox/src/index/query_event_tests.rs` - 5 time-range and combined filter tests
-- `crates/sandbox/Cargo.toml` - Added `hex` dependency for path hashing
+- `crates/argus/src/events/envelope.rs` - Added `EventPayload::event_type_tag()`, `pid()`, `paths()` helper methods
+- `crates/argus/src/index/mod.rs` - Module declarations, re-exports, and shared `IndexEntry` type
+- `crates/argus/src/index/path_index.rs` - Path index with SHA-256 hashed filenames, prefix lookup, disk persistence
+- `crates/argus/src/index/path_index_tests.rs` - 9 tests
+- `crates/argus/src/index/pid_index.rs` - PID index with process tree metadata, disk persistence
+- `crates/argus/src/index/pid_index_tests.rs` - 9 tests
+- `crates/argus/src/index/type_index.rs` - Type index mapping event tags to sequence numbers, disk persistence
+- `crates/argus/src/index/type_index_tests.rs` - 6 tests
+- `crates/argus/src/index/query.rs` - Query engine intersecting path/pid/type filters with seq/time range and limit
+- `crates/argus/src/index/query_tests.rs` - 12 index-only query tests
+- `crates/argus/src/index/query_event_tests.rs` - 5 time-range and combined filter tests
+- `crates/argus/Cargo.toml` - Added `hex` dependency for path hashing
 
 ### Code review fixes applied
 - **CRITICAL**: Time range comparison now parses RFC 3339 timestamps via `chrono::DateTime` instead of string ordering
@@ -47,7 +47,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib index
+cargo test -p argus --lib index
 ```
 
 ## Branch

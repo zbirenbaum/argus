@@ -83,13 +83,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "argus"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-smithy-http-client",
+ "aws-smithy-runtime",
+ "axum",
+ "base64",
+ "bincode",
+ "bytes",
+ "bytesize",
+ "chrono",
+ "fastrand",
+ "glob",
+ "hex",
+ "http-body-util",
+ "humantime-serde",
+ "nix",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "argus-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus",
  "clap",
  "reqwest",
- "sandbox",
  "serde",
  "serde_json",
  "tokio",
@@ -1927,43 +1964,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "sandbox"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aws-config",
- "aws-sdk-s3",
- "aws-smithy-http-client",
- "aws-smithy-runtime",
- "axum",
- "base64",
- "bincode",
- "bytes",
- "bytesize",
- "chrono",
- "fastrand",
- "glob",
- "hex",
- "http-body-util",
- "humantime-serde",
- "nix",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "thiserror",
- "time",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "schannel"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2194,9 +2194,9 @@ name = "supervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argus",
  "clap",
  "nix",
- "sandbox",
  "serde_json",
  "serde_yaml",
  "tempfile",

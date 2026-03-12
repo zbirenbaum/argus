@@ -44,9 +44,9 @@ Steps that can't be retrofitted are marked.
       SSLKEYLOGFILE=/data/tls/keylog.txt
       HTTPS_PROXY=http://127.0.0.1:8080
       HTTP_PROXY=http://127.0.0.1:8080
-      SSL_CERT_FILE=/etc/ssl/certs/sandbox-ca.pem
-      NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sandbox-ca.pem
-      REQUESTS_CA_BUNDLE=/etc/ssl/certs/sandbox-ca.pem
+      SSL_CERT_FILE=/etc/ssl/certs/argus-ca.pem
+      NODE_EXTRA_CA_CERTS=/etc/ssl/certs/argus-ca.pem
+      REQUESTS_CA_BUNDLE=/etc/ssl/certs/argus-ca.pem
 7.  Snapshot initial filesystem state:                      ← CAN'T RETROFIT
       Walk watched paths → hash every file into CAS → build Merkle tree
       This is commit zero. Emit initial_state event.

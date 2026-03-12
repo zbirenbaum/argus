@@ -47,7 +47,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib api
+cargo test -p argus --lib api
 cargo test -p argus-cli
 ```
 Integration tests: graceful shutdown flushes all data, health check returns correct status, CLI commands produce expected output.

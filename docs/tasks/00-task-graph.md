@@ -94,11 +94,11 @@ All five tasks can run as parallel worktrees.
 
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
-| P1: Config | `p1-config` | `main` | — | `sandbox::config` |
-| P1: Events | `p1-events` | `main` | — | `sandbox::events` |
-| P1: State | `p1-state` | `main` | — | `sandbox::state` |
-| P1: Seccomp | `p1-seccomp` | `main` | — | `sandbox::tracer::seccomp` |
-| P2: CAS | `p2-cas` | `main` | — | `sandbox::cas` |
+| P1: Config | `p1-config` | `main` | — | `argus::config` |
+| P1: Events | `p1-events` | `main` | — | `argus::events` |
+| P1: State | `p1-state` | `main` | — | `argus::state` |
+| P1: Seccomp | `p1-seccomp` | `main` | — | `argus::tracer::seccomp` |
+| P2: CAS | `p2-cas` | `main` | — | `argus::cas` |
 
 **Merge:** All five can merge to `main` in any order as soon as each passes review.
 
@@ -108,11 +108,11 @@ All five tasks can run as parallel worktrees.
 
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
-| P1: Net/TLS Env | `p1-net-env` | `main` | `p1-config` merged | `sandbox::net` |
-| P1: Tracer Loop | `p1-tracer-loop` | `main` | `p1-events`, `p1-state`, `p1-seccomp` merged | `sandbox::tracer` |
-| P2: S3 Upload | `p2-s3-upload` | `main` | `p2-cas` merged | `sandbox::storage::{s3,upload_pool}` |
-| P2: Digest Cache | `p2-digest-cache` | `main` | `p2-cas` merged | `sandbox::storage::digest_cache` |
-| P2: Event Segments | `p2-event-segments` | `main` | `p1-events`, `p2-s3-upload` merged | `sandbox::storage::{event_log,local_buffer}` |
+| P1: Net/TLS Env | `p1-net-env` | `main` | `p1-config` merged | `argus::net` |
+| P1: Tracer Loop | `p1-tracer-loop` | `main` | `p1-events`, `p1-state`, `p1-seccomp` merged | `argus::tracer` |
+| P2: S3 Upload | `p2-s3-upload` | `main` | `p2-cas` merged | `argus::storage::{s3,upload_pool}` |
+| P2: Digest Cache | `p2-digest-cache` | `main` | `p2-cas` merged | `argus::storage::digest_cache` |
+| P2: Event Segments | `p2-event-segments` | `main` | `p1-events`, `p2-s3-upload` merged | `argus::storage::{event_log,local_buffer}` |
 
 **Stacking opportunity:** `p1-tracer-loop` can branch from `p1-events` (target `p1-events`) while `p1-state` and `p1-seccomp` are still in review, then retarget to `main` once all three merge. Same for `p2-s3-upload` branching from `p2-cas`.
 
@@ -123,11 +123,11 @@ All five tasks can run as parallel worktrees.
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
 | P1: Supervisor Main | `p1-supervisor-main` | `main` | `p1-tracer-loop`, `p1-net-env`, `p1-config` merged | `supervisor::main` |
-| P2: Content Capture | `p2-content-capture` | `main` | `p1-tracer-loop`, `p2-cas`, `p2-digest-cache` merged | `sandbox::tracer::handlers` (extend) |
-| P2: Write Locking | `p2-write-locking` | `main` | `p1-tracer-loop`, `p2-cas` merged | `sandbox::state` (extend) |
-| P2: Pause/Resume API | `p2-pause-resume-api` | `main` | `p1-tracer-loop`, `p1-events`, `p1-config` merged | `sandbox::api` |
-| P2: TLS Content | `p2-tls-content` | `main` | `p1-net-env`, `p2-cas` merged | `sandbox::net` (extend) |
-| P3: Indexes | `p3-indexes` | `main` | `p1-events`, `p2-event-segments` merged | `sandbox::index` |
+| P2: Content Capture | `p2-content-capture` | `main` | `p1-tracer-loop`, `p2-cas`, `p2-digest-cache` merged | `argus::tracer::handlers` (extend) |
+| P2: Write Locking | `p2-write-locking` | `main` | `p1-tracer-loop`, `p2-cas` merged | `argus::state` (extend) |
+| P2: Pause/Resume API | `p2-pause-resume-api` | `main` | `p1-tracer-loop`, `p1-events`, `p1-config` merged | `argus::api` |
+| P2: TLS Content | `p2-tls-content` | `main` | `p1-net-env`, `p2-cas` merged | `argus::net` (extend) |
+| P3: Indexes | `p3-indexes` | `main` | `p1-events`, `p2-event-segments` merged | `argus::index` |
 
 **Note:** All six are independent of each other and can run in parallel once their deps merge.
 
@@ -137,8 +137,8 @@ All five tasks can run as parallel worktrees.
 
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
-| P3: Merkle Tree | `p3-merkle-tree` | `main` | `p2-content-capture`, `p2-write-locking`, `p2-cas` merged | `sandbox::snapshot::{merkle,checkpoint}` |
-| P3: Query API | `p3-query-api` | `main` | `p3-indexes`, `p3-merkle-tree`, `p2-pause-resume-api` merged | `sandbox::api` (extend) |
+| P3: Merkle Tree | `p3-merkle-tree` | `main` | `p2-content-capture`, `p2-write-locking`, `p2-cas` merged | `argus::snapshot::{merkle,checkpoint}` |
+| P3: Query API | `p3-query-api` | `main` | `p3-indexes`, `p3-merkle-tree`, `p2-pause-resume-api` merged | `argus::api` (extend) |
 
 **Note:** Merkle tree and query API are sequential — query API needs merkle tree for tree endpoints.
 
@@ -148,8 +148,8 @@ All five tasks can run as parallel worktrees.
 
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
-| P3: Restore | `p3-restore` | `main` | `p3-merkle-tree`, `p2-s3-upload` merged | `sandbox::snapshot::restore` |
-| P3: Realtime API | `p3-realtime-api` | `main` | `p3-query-api`, `p1-events` merged | `sandbox::api` (extend) |
+| P3: Restore | `p3-restore` | `main` | `p3-merkle-tree`, `p2-s3-upload` merged | `argus::snapshot::restore` |
+| P3: Realtime API | `p3-realtime-api` | `main` | `p3-query-api`, `p1-events` merged | `argus::api` (extend) |
 | P4: Container Image | `p4-container-image` | `main` | `p1-supervisor-main`, `p2-s3-upload` merged | `deploy/` |
 
 **Note:** All three are independent of each other.
@@ -160,7 +160,7 @@ All five tasks can run as parallel worktrees.
 
 | Task | Branch | Target | Depends on | Module |
 |-|-|-|-|-|
-| P4: Cross-Agent | `p4-cross-agent` | `main` | `p4-container-image`, `p3-query-api`, `p2-s3-upload` merged | `sandbox::api`, `cli` |
+| P4: Cross-Agent | `p4-cross-agent` | `main` | `p4-container-image`, `p3-query-api`, `p2-s3-upload` merged | `argus::api`, `cli` |
 | P5: Polish | `p5-polish` | `main` | `p3-realtime-api`, `p2-pause-resume-api` merged | all crates |
 
 ---
@@ -187,7 +187,7 @@ Before merging any branch to `main`:
 1. All dependency branches already merged to `main`
 2. Branch rebased onto current `main`
 3. `cargo check --workspace` passes
-4. `cargo test -p sandbox` passes (unit tests)
+4. `cargo test -p argus` passes (unit tests)
 5. Integration tests pass in dev container (if applicable)
 6. Code review completed
 7. Task doc updated with status: done

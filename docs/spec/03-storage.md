@@ -100,7 +100,7 @@ durability:
 ```yaml
 storage:
   backend: s3
-  bucket: my-agent-sandbox
+  bucket: my-agent-argus
   prefix: agents/{agent_id}/
   region: us-west-2
   upload:

@@ -12,7 +12,7 @@
 - P3-restore, P3-merkle-tree
 
 ## What needs to be done
-- Extend `crates/sandbox/src/api/`:
+- Extend `crates/argus/src/api/`:
 
 ### SSE
 - `GET /stdio/{pid}?follow=true` — Server-Sent Events stream of new stdio data
@@ -31,7 +31,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib api -- --ignored
+cargo test -p argus --lib api -- --ignored
 ```
 Integration tests: connect WebSocket, emit events, verify received in real time. SSE follow mode for stdio.
 

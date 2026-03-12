@@ -6,10 +6,10 @@
 
 ## What was done
 - Converted single-crate project to Cargo workspace with three crates:
-  - `crates/sandbox/` — library crate with all logic modules
+  - `crates/argus/` — library crate with all logic modules
   - `crates/supervisor/` — binary crate (PID 1 entrypoint)
   - `crates/cli/` — binary crate (HTTP client to supervisor API)
-- Created module stubs for all sandbox submodules: config, events, state, cas, storage, tracer, snapshot, index, net, api
+- Created module stubs for all argus submodules: config, events, state, cas, storage, tracer, snapshot, index, net, api
 - Set up workspace dependencies with correct versions
 - Removed old `src/main.rs`
 

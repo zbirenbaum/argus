@@ -12,14 +12,14 @@
 - P1-config, P1-state, P1-seccomp, P1-net-env, P2-cas, P2-s3-upload, P2-digest-cache
 
 ## What was done
-- `crates/sandbox/src/events/mod.rs` — module root with re-exports
-- `crates/sandbox/src/events/envelope.rs` — `Event` struct, `EventPayload` tagged enum (35 variants), `SequenceGenerator` (AtomicU64), `timestamp_pair()` fn
-- `crates/sandbox/src/events/process.rs` — `Exec`, `Fork`, `Exit`
-- `crates/sandbox/src/events/file.rs` — `Read`, `Write`, `Rename`, `Unlink`, `Mkdir`, `Rmdir`, `Chmod`, `Truncate`, `Link`, `Symlink`
-- `crates/sandbox/src/events/io.rs` — `Stdio`, `PipeCreate`, `PipeData`, `PipeClose`, `PtyCreate`, `PtyData`, `FdRedirect`, `FdTarget`, plus `StdioSubtype`, `PipeDirection`, `PtySubtype` enums
-- `crates/sandbox/src/events/network.rs` — `Socket`, `Connect`, `Accept`, `TlsKeys`, `HttpRequest`, `HttpResponse`
-- `crates/sandbox/src/events/control.rs` — `AgentStart`, `AgentPause`, `AgentResume`, `PendingApproval`, `ApprovalGranted`, `ApprovalDenied`
-- `crates/sandbox/src/events/snapshot.rs` — `InitialState`, `Checkpoint`, `MmapWarning`
+- `crates/argus/src/events/mod.rs` — module root with re-exports
+- `crates/argus/src/events/envelope.rs` — `Event` struct, `EventPayload` tagged enum (35 variants), `SequenceGenerator` (AtomicU64), `timestamp_pair()` fn
+- `crates/argus/src/events/process.rs` — `Exec`, `Fork`, `Exit`
+- `crates/argus/src/events/file.rs` — `Read`, `Write`, `Rename`, `Unlink`, `Mkdir`, `Rmdir`, `Chmod`, `Truncate`, `Link`, `Symlink`
+- `crates/argus/src/events/io.rs` — `Stdio`, `PipeCreate`, `PipeData`, `PipeClose`, `PtyCreate`, `PtyData`, `FdRedirect`, `FdTarget`, plus `StdioSubtype`, `PipeDirection`, `PtySubtype` enums
+- `crates/argus/src/events/network.rs` — `Socket`, `Connect`, `Accept`, `TlsKeys`, `HttpRequest`, `HttpResponse`
+- `crates/argus/src/events/control.rs` — `AgentStart`, `AgentPause`, `AgentResume`, `PendingApproval`, `ApprovalGranted`, `ApprovalDenied`
+- `crates/argus/src/events/snapshot.rs` — `InitialState`, `Checkpoint`, `MmapWarning`
 
 ## What works
 - All 35 event variants serialize/deserialize correctly with serde tagged enum (`"type": "variant_name"`)
@@ -39,7 +39,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib events
+cargo test -p argus --lib events
 ```
 
 ## Branch

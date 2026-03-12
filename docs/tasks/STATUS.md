@@ -130,7 +130,7 @@ No agents currently running.
 
 ## Build Status
 
-- Last full test run: 408 pass (391 sandbox + 17 supervisor), 0 fail, 5 ignored
+- Last full test run: 408 pass (391 argus + 17 supervisor), 0 fail, 5 ignored
 - All P1 + P2 + P3 (indexes, merkle) merged to main
 - Validation tests 1-7 pass on native aarch64
 - Seccomp-BPF works natively on ARM64 (no more Rosetta/QEMU issues)

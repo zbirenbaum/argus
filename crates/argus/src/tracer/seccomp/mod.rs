@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::tracer::seccomp::bpf::{SockFilter, SyscallAction, build_filter_program};
+use crate::tracer::seccomp::bpf::{SyscallAction, build_filter_program};
 
 mod bpf;
 mod syscalls;

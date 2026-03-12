@@ -127,7 +127,7 @@ fn child_setup(
     // Seccomp is unavailable under Rosetta/QEMU emulation; warn
     // and continue so the supervisor can still track process
     // lifecycle via ptrace fork/exec/exit events.
-    if let Err(e) = sandbox::tracer::seccomp::install_seccomp_filter() {
+    if let Err(e) = argus::tracer::seccomp::install_seccomp_filter() {
         let msg = format!("seccomp install failed (syscall tracing disabled): {e}\n");
         let _ = nix::unistd::write(std::io::stderr(), msg.as_bytes());
     }

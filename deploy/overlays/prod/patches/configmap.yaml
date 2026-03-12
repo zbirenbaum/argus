@@ -6,7 +6,7 @@ data:
   supervisor.yaml: |
     storage:
       backend: s3
-      bucket: argus-sandbox
+      bucket: argus
       prefix: agents/{agent_id}/
       region: us-west-2
       upload:

@@ -24,8 +24,8 @@
 - Different paths are completely unaffected — no contention
 
 ### Files changed
-- `crates/sandbox/src/tracer/trace_loop.rs` — active_writes, write_wait_queue, resume_next_queued_writer, cleanup_dead_writer
-- `crates/sandbox/src/tracer/handlers/mod.rs` — queue-aware try_start_write_capture, try_start_open_trunc_capture
+- `crates/argus/src/tracer/trace_loop.rs` — active_writes, write_wait_queue, resume_next_queued_writer, cleanup_dead_writer
+- `crates/argus/src/tracer/handlers/mod.rs` — queue-aware try_start_write_capture, try_start_open_trunc_capture
 - `tests/concurrent_write.c` — C test: 4 threads × 100 writes with O_TRUNC
 - `tests/validate_hash_chain.py` — hash chain validator script
 - `docs/spec/12-testing.md` — added Test 7b (hardened interleaving test)
@@ -41,7 +41,7 @@
 ## How to test
 ```bash
 # Unit tests
-docker exec argus-arm64 bash -c "cd /workspace && cargo test -p sandbox"
+docker exec argus-arm64 bash -c "cd /workspace && cargo test -p argus"
 
 # Validation test 7 (Python threads)
 docker exec argus-arm64 bash -c "cd /workspace && ./target/aarch64-unknown-linux-musl/debug/supervisor --agent-id test --storage.backend local-only -- python3 -c '

@@ -12,11 +12,11 @@
 - P1-events, P1-state, P1-seccomp, P2-cas, P2-s3-upload, P2-digest-cache
 
 ## What was done
-- `crates/sandbox/src/net/mod.rs` — module re-exports for `ca`, `env`, `mitmdump`
-- `crates/sandbox/src/net/ca.rs` — self-signed CA generation with `rcgen` (ECDSA P-256, 10-year validity, idempotent)
-- `crates/sandbox/src/net/env.rs` — builds 6 env vars (proxy, keylog, cert paths)
-- `crates/sandbox/src/net/mitmdump.rs` — spawns `mitmdump` in regular proxy mode, readiness probe, graceful SIGTERM→SIGKILL shutdown
-- `crates/sandbox/Cargo.toml` — added `rcgen = "0.13"`, `time = "0.3"`
+- `crates/argus/src/net/mod.rs` — module re-exports for `ca`, `env`, `mitmdump`
+- `crates/argus/src/net/ca.rs` — self-signed CA generation with `rcgen` (ECDSA P-256, 10-year validity, idempotent)
+- `crates/argus/src/net/env.rs` — builds 6 env vars (proxy, keylog, cert paths)
+- `crates/argus/src/net/mitmdump.rs` — spawns `mitmdump` in regular proxy mode, readiness probe, graceful SIGTERM→SIGKILL shutdown
+- `crates/argus/Cargo.toml` — added `rcgen = "0.13"`, `time = "0.3"`
 
 ## What works
 - CA generation creates valid PEM cert+key files
@@ -34,9 +34,9 @@
 ## How to test
 ```bash
 # In dev container:
-cargo test -p sandbox --lib net           # 9 unit tests
-cargo test -p sandbox --lib net -- --ignored  # 1 integration test (needs mitmdump)
-cargo clippy -p sandbox                   # clean
+cargo test -p argus --lib net           # 9 unit tests
+cargo test -p argus --lib net -- --ignored  # 1 integration test (needs mitmdump)
+cargo clippy -p argus                   # clean
 ```
 
 ## Branch

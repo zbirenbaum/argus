@@ -86,11 +86,11 @@
 **Read first:** `09-multi-agent.md`, `08-kubernetes.md`
 
 **Build:**
-- Publish sandbox-base container image
+- Publish argus-base container image
 - Helm chart: per-agent pods, shared bucket, service accounts, ConfigMaps
 - Agent auto-registration: agent_start event to S3
 - Cross-agent query layer: GET /timeline, GET /correlation
-- Cross-agent CLI: sandbox agents, sandbox timeline, sandbox correlate
+- Cross-agent CLI: argus agents, argus timeline, argus correlate
 - Documentation: image usage, Helm values, SA setup per provider
 
 **Deliverable:** Deploy N agents via Helm, all to same bucket. Cross-agent queries work. Image published.

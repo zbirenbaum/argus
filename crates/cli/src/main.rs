@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use sandbox::cas::ContentHash;
-use sandbox::events::envelope::{Event, EventPayload};
-use sandbox::events::io::StdioSubtype;
+use argus::cas::ContentHash;
+use argus::events::envelope::{Event, EventPayload};
+use argus::events::io::StdioSubtype;
 
 #[derive(Parser)]
-#[command(name = "argus", about = "Argus sandbox CLI")]
+#[command(name = "argus", about = "Argus CLI")]
 struct Cli {
     /// CAS directory (default: /data/cas)
     #[arg(long, default_value = "/data/cas", global = true)]

@@ -167,45 +167,45 @@ GET /correlation?write_agent=researcher&read_agent=coder&resource=*
 
 ```
 # Control
-sandbox status                                          → GET /agent/status
-sandbox pause                                           → POST /agent/pause
-sandbox resume                                          → POST /agent/resume
+argus status                                          → GET /agent/status
+argus pause                                           → POST /agent/pause
+argus resume                                          → POST /agent/resume
 
 # Events
-sandbox log [--since 5m] [--path P] [--pid N] [--type T] → GET /events
-sandbox history <path>                                    → GET /file_history
+argus log [--since 5m] [--path P] [--pid N] [--type T] → GET /events
+argus history <path>                                    → GET /file_history
 
 # Processes & stdio
-sandbox stdio <pid> [--stream stdout] [--follow]         → GET /stdio
-sandbox pipeline <shell_pid>                             → GET /pipeline
-sandbox process-tree [--stdio]                           → GET /process_tree
+argus stdio <pid> [--stream stdout] [--follow]         → GET /stdio
+argus pipeline <shell_pid>                             → GET /pipeline
+argus process-tree [--stdio]                           → GET /process_tree
 
 # Content
-sandbox cat <hash>                                       → GET /content/{hash}/text
-sandbox diff <before> <after>                            → GET /diff
-sandbox diff --from <seq> --to <seq>                     → GET /tree/diff
+argus cat <hash>                                       → GET /content/{hash}/text
+argus diff <before> <after>                            → GET /diff
+argus diff --from <seq> --to <seq>                     → GET /tree/diff
 
 # Snapshots & restore
-sandbox snapshot [--seq N] [--path P]                    → GET /tree
-sandbox restore --timestamp T --target <dir>             → POST /restore
-sandbox restore --timestamp T --in-place --force         → POST /restore
-sandbox restore --timestamp T --path P [--in-place]      → POST /restore
-sandbox undo --last N                                    → POST /restore/undo
+argus snapshot [--seq N] [--path P]                    → GET /tree
+argus restore --timestamp T --target <dir>             → POST /restore
+argus restore --timestamp T --in-place --force         → POST /restore
+argus restore --timestamp T --path P [--in-place]      → POST /restore
+argus undo --last N                                    → POST /restore/undo
 
 # Network & storage
-sandbox connections [--pid N] [--active]                 → GET /connections
-sandbox storage-status                                   → GET /storage/status
+argus connections [--pid N] [--active]                 → GET /connections
+argus storage-status                                   → GET /storage/status
 
 # Approvals
-sandbox approvals                                        → GET /approvals/pending
-sandbox approve <action_id>                              → POST /approvals/{id}/approve
-sandbox deny <action_id>                                 → POST /approvals/{id}/deny
+argus approvals                                        → GET /approvals/pending
+argus approve <action_id>                              → POST /approvals/{id}/approve
+argus deny <action_id>                                 → POST /approvals/{id}/deny
 
 # Debug
-sandbox dump-checkpoint --seq N --format json
+argus dump-checkpoint --seq N --format json
 
 # Cross-agent (reads S3, no running supervisor)
-sandbox agents --bucket <bucket>                         → GET /agents
-sandbox timeline --agents a,b --since 1h                 → GET /timeline
-sandbox correlate --write-agent a --read-agent b         → GET /correlation
+argus agents --bucket <bucket>                         → GET /agents
+argus timeline --agents a,b --since 1h                 → GET /timeline
+argus correlate --write-agent a --read-agent b         → GET /correlation
 ```

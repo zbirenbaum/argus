@@ -34,7 +34,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib api -- --ignored
+cargo test -p argus --lib api -- --ignored
 cargo test -p argus-cli -- --ignored
 ```
 Integration test (ignored, needs S3 + multiple agents): deploy two agents, both write to same bucket, query timeline across both.

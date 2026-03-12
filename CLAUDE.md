@@ -153,7 +153,7 @@ All deployment config is declarative and version-controlled (Kustomize manifests
 argus-run/
 ├── Cargo.toml
 └── crates/
-   ├── sandbox/              # library crate — all the logic
+   ├── argus/                # library crate — all the logic
    │   ├── Cargo.toml
    │   └── src/
    │       ├── lib.rs
@@ -169,10 +169,10 @@ argus-run/
    │       └── api/          # mod: axum server, routes, websocket
    │
    ├── supervisor/           # binary crate — PID 1 entrypoint
-   │   ├── Cargo.toml        # depends on sandbox
+   │   ├── Cargo.toml        # depends on argus
    │   └── src/main.rs
    │
    └── cli/                  # binary crate — HTTP client to supervisor API
-       ├── Cargo.toml        # depends on sandbox (for types only) + reqwest
+       ├── Cargo.toml        # depends on argus (for types only) + reqwest
        └── src/main.rs
 

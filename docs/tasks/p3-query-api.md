@@ -12,7 +12,7 @@
 - P3-restore
 
 ## What needs to be done
-- Extend `crates/sandbox/src/api/`:
+- Extend `crates/argus/src/api/`:
 
 ### Event Queries
 - `GET /events?path=&pid=&type=&after_seq=&before_seq=&after_ts=&before_ts=&limit=&offset=`
@@ -39,7 +39,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib api -- --ignored
+cargo test -p argus --lib api -- --ignored
 ```
 Integration tests: start server, ingest sample events, query by each filter type, verify stdio reconstruction output.
 

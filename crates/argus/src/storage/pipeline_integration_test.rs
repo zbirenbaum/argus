@@ -8,7 +8,7 @@
 //!   docker network connect argus-run_default argus-arm64
 //!   docker exec -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin \
 //!     -e AWS_REGION=us-east-1 -e MINIO_ENDPOINT=http://argus-run-minio-1:9000 \
-//!     argus-arm64 bash -c "cd /workspace && cargo test -p sandbox pipeline_minio"
+//!     argus-arm64 bash -c "cd /workspace && cargo test -p argus pipeline_minio"
 
 use std::time::Duration;
 

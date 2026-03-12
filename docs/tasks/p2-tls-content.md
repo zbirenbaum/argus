@@ -12,12 +12,12 @@
 - P1-config, P1-events, P1-state, P1-seccomp, P1-tracer-loop, P2-s3-upload, P2-pause-resume-api
 
 ## What was done
-- `crates/sandbox/src/net/keylog.rs` — `KeylogWatcher` reads SSLKEYLOGFILE incrementally, deduplicates by client_random, stores lines in CAS, emits `TlsKeys` events
-- `crates/sandbox/src/net/flow_parser.rs` — parses mitmdump addon JSON output (newline-delimited), extracts method/URL/status/headers/bodies, stores headers and base64-decoded bodies in CAS, produces `HttpRequest`/`HttpResponse` events
-- `crates/sandbox/src/net/dedup.rs` — `NetworkDedup` tracks `(fd, content_hash)` pairs with time-based expiry to suppress duplicates from ptrace + proxy
-- `crates/sandbox/src/events/network.rs` — `TlsKeys`, `HttpRequest`, `HttpResponse` event payload types
-- `crates/sandbox/src/net/mod.rs` — updated to re-export new modules
-- `crates/sandbox/Cargo.toml` — added `base64` dependency
+- `crates/argus/src/net/keylog.rs` — `KeylogWatcher` reads SSLKEYLOGFILE incrementally, deduplicates by client_random, stores lines in CAS, emits `TlsKeys` events
+- `crates/argus/src/net/flow_parser.rs` — parses mitmdump addon JSON output (newline-delimited), extracts method/URL/status/headers/bodies, stores headers and base64-decoded bodies in CAS, produces `HttpRequest`/`HttpResponse` events
+- `crates/argus/src/net/dedup.rs` — `NetworkDedup` tracks `(fd, content_hash)` pairs with time-based expiry to suppress duplicates from ptrace + proxy
+- `crates/argus/src/events/network.rs` — `TlsKeys`, `HttpRequest`, `HttpResponse` event payload types
+- `crates/argus/src/net/mod.rs` — updated to re-export new modules
+- `crates/argus/Cargo.toml` — added `base64` dependency
 
 ## What works
 - NSS Key Log Format line parsing and validation
@@ -39,7 +39,7 @@
 
 ## How to test
 ```bash
-cargo test -p sandbox --lib net
+cargo test -p argus --lib net
 ```
 
 ## Branch

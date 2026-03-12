@@ -19,9 +19,9 @@ In-container mitmdump on 127.0.0.1:8080. Custom CA cert injected into trust stor
 ```
 HTTPS_PROXY=http://127.0.0.1:8080
 HTTP_PROXY=http://127.0.0.1:8080
-SSL_CERT_FILE=/etc/ssl/certs/sandbox-ca.pem
-NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sandbox-ca.pem
-REQUESTS_CA_BUNDLE=/etc/ssl/certs/sandbox-ca.pem
+SSL_CERT_FILE=/etc/ssl/certs/argus-ca.pem
+NODE_EXTRA_CA_CERTS=/etc/ssl/certs/argus-ca.pem
+REQUESTS_CA_BUNDLE=/etc/ssl/certs/argus-ca.pem
 ```
 
 **Covers:** Python requests/urllib3, Node.js http/https, curl, wget, most HTTP libraries.
@@ -45,9 +45,9 @@ Both layers overlap. Layer 2 preferred for HTTP (structured). Layer 1 as fallbac
 
 ## Container Image Requirements
 
-The sandbox-base image (see `09-multi-agent.md`) must include:
+The argus-base image (see `09-multi-agent.md`) must include:
 - mitmdump binary
-- CA certificate at `/etc/ssl/certs/sandbox-ca.pem`
+- CA certificate at `/etc/ssl/certs/argus-ca.pem`
 - CA private key generated at first run, persisted to `/data/tls/ca-key.pem`
 
 ## Database Protocol Capture
@@ -71,7 +71,7 @@ tls:
   proxy:
     enabled: true
     listen: 127.0.0.1:8080
-    ca_cert: /etc/ssl/certs/sandbox-ca.pem
+    ca_cert: /etc/ssl/certs/argus-ca.pem
     ca_key: /data/tls/ca-key.pem
 
 network:
