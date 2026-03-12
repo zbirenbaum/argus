@@ -29,10 +29,12 @@
 //! Implementations that need async I/O (webhooks, LLM APIs) handle
 //! the blocking internally (e.g. `tokio::runtime::Handle::block_on`).
 
+mod parallel;
 mod policy;
 mod request;
 mod verdict;
 
+pub use parallel::{ParallelApprover, ParallelPolicy};
 pub use request::ApprovalRequest;
 pub use verdict::Verdict;
 

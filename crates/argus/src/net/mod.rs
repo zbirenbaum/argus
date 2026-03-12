@@ -12,6 +12,7 @@ mod ca;
 mod dedup;
 mod env;
 mod flow_parser;
+mod flow_watcher;
 mod keylog;
 mod mitmdump;
 
@@ -21,5 +22,6 @@ pub use env::agent_env_vars;
 pub use flow_parser::{
     MitmdumpFlow, ProcessedFlow, parse_flow_line, parse_flow_lines, process_flow,
 };
+pub use flow_watcher::{FlowEvents, FlowWatcher};
 pub use keylog::{KeylogLine, KeylogWatcher, parse_keylog_line};
-pub use mitmdump::{MitmdumpHandle, start_mitmdump};
+pub use mitmdump::{AddonConfig, MitmdumpHandle, start_mitmdump, start_mitmdump_with_flow_capture};

@@ -6,7 +6,8 @@
 //! running so the supervisor can react to unexpected exits.
 
 use std::net::TcpStream;
-use std::process::{Child, Command};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -30,6 +31,17 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(3);
 pub struct MitmdumpHandle {
     child: Child,
     port: u16,
+    /// Path to the flow output NDJSON file, if an addon is configured.
+    flow_output: Option<PathBuf>,
+}
+
+impl MitmdumpHandle {
+    /// Path to the NDJSON file where flows are written.
+    ///
+    /// Returns `None` if no addon script was configured.
+    pub fn flow_output_path(&self) -> Option<&PathBuf> {
+        self.flow_output.as_ref()
+    }
 }
 
 impl MitmdumpHandle {
@@ -97,6 +109,15 @@ impl Drop for MitmdumpHandle {
     }
 }
 
+/// Configuration for the mitmdump addon script.
+#[derive(Debug, Clone, Default)]
+pub struct AddonConfig {
+    /// Path to the Python addon script.
+    pub script: Option<PathBuf>,
+    /// Path where addon stdout is redirected (NDJSON flow output).
+    pub output_file: Option<PathBuf>,
+}
+
 /// Spawn `mitmdump` as a regular HTTP/HTTPS proxy.
 ///
 /// Traffic is routed here via `HTTP_PROXY`/`HTTPS_PROXY` env vars on the
@@ -109,33 +130,66 @@ impl Drop for MitmdumpHandle {
 /// Returns an error if `mitmdump` is not installed, fails to start,
 /// or does not become ready within the timeout.
 pub fn start_mitmdump(ca: &CaPaths, port: u16) -> Result<MitmdumpHandle> {
-    start_mitmdump_with_command("mitmdump", ca, port)
+    start_mitmdump_with_addon("mitmdump", ca, port, &AddonConfig::default())
 }
 
-/// Spawn a mitmdump-compatible binary at `cmd` as a regular proxy.
+/// Spawn `mitmdump` with an addon script for flow capture.
 ///
-/// Extracted so tests can substitute a nonexistent path without
-/// depending on the host having `mitmdump` installed.
-fn start_mitmdump_with_command(
+/// The addon script's stdout is redirected to `addon.output_file`.
+/// Use [`MitmdumpHandle::flow_output_path`] to get the path for
+/// a [`FlowWatcher`](super::FlowWatcher).
+///
+/// # Errors
+///
+/// Returns an error if `mitmdump` is not installed, fails to start,
+/// or does not become ready within the timeout.
+pub fn start_mitmdump_with_flow_capture(
+    ca: &CaPaths,
+    port: u16,
+    addon: &AddonConfig,
+) -> Result<MitmdumpHandle> {
+    start_mitmdump_with_addon("mitmdump", ca, port, addon)
+}
+
+/// Spawn a mitmdump-compatible binary with optional addon.
+fn start_mitmdump_with_addon(
     cmd: &str,
     ca: &CaPaths,
     port: u16,
+    addon: &AddonConfig,
 ) -> Result<MitmdumpHandle> {
     let ca_dir = ca
         .cert
         .parent()
         .context("CA cert path has no parent directory")?;
 
-    let child = Command::new(cmd)
-        .args([
-            "--listen-host",
-            "127.0.0.1",
-            "--listen-port",
-            &port.to_string(),
-            "--set",
-            &format!("confdir={}", ca_dir.display()),
-            "--quiet",
-        ])
+    let mut command = Command::new(cmd);
+    command.args([
+        "--listen-host",
+        "127.0.0.1",
+        "--listen-port",
+        &port.to_string(),
+        "--set",
+        &format!("confdir={}", ca_dir.display()),
+        "--quiet",
+    ]);
+
+    let flow_output = if let Some(script) = &addon.script {
+        command.args(["-s", &script.to_string_lossy()]);
+        command.arg("--set").arg("flow_detail=0");
+
+        if let Some(output) = &addon.output_file {
+            let file = std::fs::File::create(output)
+                .with_context(|| format!("create flow output: {}", output.display()))?;
+            command.stdout(Stdio::from(file));
+        }
+
+        addon.output_file.clone()
+    } else {
+        None
+    };
+
+    let child = command
         .spawn()
         .context(
             "failed to spawn mitmdump — is it installed? \
@@ -150,7 +204,11 @@ fn start_mitmdump_with_command(
         "spawned mitmdump on port {{mitmdump.port}} (pid {{mitmdump.pid}})",
     );
 
-    let mut handle = MitmdumpHandle { child, port };
+    let mut handle = MitmdumpHandle {
+        child,
+        port,
+        flow_output,
+    };
 
     wait_for_ready(port).inspect_err(|_| {
         let _ = handle.stop();
@@ -208,10 +266,11 @@ mod tests {
             key: PathBuf::from("/nonexistent/ca-key.pem"),
         };
 
-        let result = start_mitmdump_with_command(
+        let result = start_mitmdump_with_addon(
             "/nonexistent/mitmdump",
             &ca,
             18081,
+            &AddonConfig::default(),
         );
 
         let msg = result.unwrap_err().to_string();

@@ -60,9 +60,25 @@ fn main() -> Result<()> {
     let ca_paths = net::generate_ca(&config.tls.ca_dir)?;
     let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
+    let addon_script = config.data_dir.join("argus_addon.py");
+    let flow_output = config.data_dir.join("flows.jsonl");
+
+    let addon = net::AddonConfig {
+        script: if addon_script.exists() {
+            Some(addon_script)
+        } else {
+            None
+        },
+        output_file: Some(flow_output),
+    };
+
     // mitmdump is optional; log a warning if it fails to start but
     // continue so the supervisor works without mitmproxy installed.
-    let mut mitmdump = match net::start_mitmdump(&ca_paths, config.tls.mitm_proxy_port) {
+    let mut mitmdump = match net::start_mitmdump_with_flow_capture(
+        &ca_paths,
+        config.tls.mitm_proxy_port,
+        &addon,
+    ) {
         Ok(handle) => Some(handle),
         Err(e) => {
             event!(
