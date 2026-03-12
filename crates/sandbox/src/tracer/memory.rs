@@ -32,15 +32,24 @@ pub fn read_c_string(pid: Pid, addr: u64) -> Result<String> {
 
 /// Reads arbitrary bytes from tracee memory via `process_vm_readv`.
 ///
+/// Returns the actual bytes read, which may be fewer than `len` if the
+/// tracee's mapping ends before the requested range.
+///
 /// # Errors
 ///
 /// Returns an error if the syscall fails.
 pub fn read_bytes(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut buf = vec![0u8; len];
     let local_iov = libc::iovec {
         iov_base: buf.as_mut_ptr().cast(),
         iov_len: len,
     };
+    // `iov_base` is `*mut c_void` even for reads — the kernel API uses a
+    // single `iovec` type for both read and write directions.
     let remote_iov = libc::iovec {
         iov_base: addr as *mut libc::c_void,
         iov_len: len,
@@ -130,4 +139,29 @@ pub fn read_proc_cmdline(pid: Pid) -> Result<Vec<String>> {
         .map(|s| OsStr::from_bytes(s).to_string_lossy().into_owned())
         .collect();
     Ok(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_bytes_zero_length_returns_empty() {
+        let result = read_bytes(Pid::from_raw(1), 0x1000, 0);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_c_string_null_pointer_errors() {
+        let result = read_c_string(Pid::from_raw(1), 0);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("null pointer"));
+    }
+
+    #[test]
+    fn max_path_len_is_reasonable() {
+        assert_eq!(MAX_PATH_LEN, 4096);
+    }
 }

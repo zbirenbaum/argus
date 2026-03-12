@@ -1,6 +1,7 @@
 // Rust guideline compliant 2026-02-21
 //! Ptrace loop, seccomp BPF, and syscall handlers.
 
+pub mod content_capture;
 pub mod handlers;
 pub mod memory;
 pub mod process_events;

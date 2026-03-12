@@ -1,1 +1,111 @@
-// Axum server, routes, WebSocket
+// Rust guideline compliant 2026-02-21
+//! Axum-based REST API for the supervisor.
+//!
+//! Provides pause/resume control, approval management, and health
+//! endpoints. The server binds to `127.0.0.1:9090` by default and
+//! communicates with the tracer thread through [`state::SharedState`].
+
+pub mod errors;
+pub mod routes;
+pub mod state;
+pub mod types;
+
+use std::net::SocketAddr;
+
+use axum::Router;
+use axum::routing::{get, post};
+
+use crate::api::routes::{
+    approve_handler, deny_handler, health_handler, pause_handler, pending_approvals_handler,
+    resume_handler, status_handler,
+};
+use crate::api::state::SharedState;
+
+/// Builds the axum router with all supervisor API routes.
+pub fn build_router(state: SharedState) -> Router {
+    Router::new()
+        .route("/agent/pause", post(pause_handler))
+        .route("/agent/resume", post(resume_handler))
+        .route("/agent/status", get(status_handler))
+        .route("/approvals/pending", get(pending_approvals_handler))
+        .route("/approvals/{action_id}/approve", post(approve_handler))
+        .route("/approvals/{action_id}/deny", post(deny_handler))
+        .route("/health", get(health_handler))
+        .with_state(state)
+}
+
+/// Starts the API server on the given address.
+///
+/// Runs until the server is shut down. Should be spawned on the tokio
+/// runtime, not called from the tracer thread.
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind to `addr`.
+pub async fn serve(state: SharedState, addr: SocketAddr) -> anyhow::Result<()> {
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(
+        listen.addr = %addr,
+        "API server listening on {{listen.addr}}"
+    );
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::state::new_shared_state;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn router_serves_health() {
+        let state = new_shared_state("integration".into());
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn router_pause_resume_cycle() {
+        let state = new_shared_state("cycle".into());
+        let app = build_router(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agent/pause")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agent/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("paused"));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agent/resume")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+}

@@ -33,3 +33,5 @@ tempfile = "3"
 base64 = "0.22"
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

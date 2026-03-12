@@ -57,6 +57,16 @@ pub struct ApprovalDenied {
     pub approver: String,
 }
 
+/// Outcome of an approval request delivered to the tracer thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalDecision {
+    /// Allow the syscall to proceed.
+    Approve,
+    /// Inject `EPERM` and block the syscall.
+    Deny,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,6 +9,7 @@ pub mod fd_table;
 pub mod pipe_registry;
 pub mod process_tree;
 pub mod pty_registry;
+pub mod write_capture;
 pub mod write_locks;
 
 #[doc(inline)]
