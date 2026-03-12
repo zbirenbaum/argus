@@ -2,7 +2,7 @@
 //!
 //! Wraps a [`DynObjectStore`] (S3, GCS, Azure, MinIO, etc.) with CAS
 //! semantics: keys are derived from the content hash using the layout
-//! `cas/{hash[0:2]}/{hash[2:]}`.
+//! `cas/{algorithm}/{digest[0:2]}/{digest[2:]}`.
 
 use anyhow::{Context, Result};
 
@@ -30,7 +30,12 @@ impl RemoteCas {
 
     /// Build the object key for a content hash.
     fn object_key(hash: &ContentHash) -> String {
-        format!("cas/{}/{}", hash.prefix(), hash.suffix())
+        format!(
+            "cas/{}/{}/{}",
+            hash.algorithm_dir(),
+            hash.prefix(),
+            hash.suffix()
+        )
     }
 }
 

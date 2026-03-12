@@ -520,7 +520,7 @@ mod tests {
         );
         // Should not panic and should produce a valid hash.
         let h = t.root_hash();
-        assert_eq!(h.as_str().len(), 64);
+        assert_eq!(h.digest().len(), 64);
     }
 
     #[test]

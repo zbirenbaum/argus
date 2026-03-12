@@ -109,7 +109,12 @@ impl S3Client {
 
     /// Build the CAS key path for a content hash.
     pub fn cas_key(hash: &ContentHash) -> String {
-        format!("cas/{}/{}", hash.prefix(), hash.suffix())
+        format!(
+            "cas/{}/{}/{}",
+            hash.algorithm_dir(),
+            hash.prefix(),
+            hash.suffix()
+        )
     }
 
     /// Build the event segment key path.
@@ -255,7 +260,10 @@ mod tests {
     fn cas_key_uses_hash_prefix_suffix() {
         let hash = ContentHash::from_data(b"hello");
         let key = S3Client::cas_key(&hash);
-        assert_eq!(key, format!("cas/{}/{}", hash.prefix(), hash.suffix()));
+        assert_eq!(
+            key,
+            format!("cas/{}/{}/{}", hash.algorithm_dir(), hash.prefix(), hash.suffix())
+        );
     }
 
     #[test]

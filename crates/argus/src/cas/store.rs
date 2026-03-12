@@ -1,8 +1,8 @@
 //! Filesystem-backed content-addressable store.
 //!
-//! Objects are stored under `{root}/{hash[0:2]}/{hash[2:]}`. Writes
-//! are atomic (temp file, fsync, rename) so concurrent writers cannot
-//! corrupt data. Identical content is stored exactly once.
+//! Objects are stored under `{root}/{algorithm}/{digest[0:2]}/{digest[2:]}`.
+//! Writes are atomic (temp file, fsync, rename) so concurrent writers
+//! cannot corrupt data. Identical content is stored exactly once.
 
 use std::fs;
 use std::io::Write;
@@ -42,9 +42,12 @@ impl LocalCas {
         })
     }
 
-    /// Filesystem path for an object: `{root}/{prefix}/{suffix}`.
+    /// Filesystem path: `{root}/{algorithm}/{digest[0:2]}/{digest[2:]}`.
     pub fn object_path(&self, hash: &ContentHash) -> PathBuf {
-        self.root.join(hash.prefix()).join(hash.suffix())
+        self.root
+            .join(hash.algorithm_dir())
+            .join(hash.prefix())
+            .join(hash.suffix())
     }
 
     /// Take a detailed snapshot of current store statistics.
@@ -235,6 +238,7 @@ mod tests {
         let components: Vec<_> =
             path.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
         let len = components.len();
+        assert_eq!(components[len - 3], hash.algorithm_dir());
         assert_eq!(components[len - 2], hash.prefix());
         assert_eq!(components[len - 1], hash.suffix());
     }
