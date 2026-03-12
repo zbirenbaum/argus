@@ -347,9 +347,11 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<bool> {
         }
         SYS_READLINK | SYS_READLINKAT => {}
 
-        // Pipe/PTY
+        // Pipe/PTY — entry/exit pattern for fd capture.
         SYS_PIPE | SYS_PIPE2 => {
-            io_ops::handle_pipe(tracer, pid, &r)?;
+            if io_ops::handle_pipe(tracer, pid, &r)? {
+                return Ok(true);
+            }
         }
         SYS_IOCTL => {
             io_ops::handle_ioctl(tracer, pid, &r)?;

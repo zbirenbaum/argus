@@ -71,6 +71,14 @@ pub struct PendingRead {
     pub count: u64,
 }
 
+/// Saved state between pipe/pipe2 entry and exit for fd capture.
+#[derive(Debug)]
+pub struct PendingPipe {
+    pub pid: u32,
+    /// Address of the int[2] pipefd array in tracee memory.
+    pub pipefd_addr: u64,
+}
+
 /// Saved state between syscall entry and exit for content capture.
 #[derive(Debug)]
 pub struct PendingCapture {
@@ -144,6 +152,8 @@ pub struct TracerLoop {
     pub pending_opens: HashMap<u32, PendingOpen>,
     /// Reads awaiting syscall exit to capture buffer content.
     pub pending_reads: HashMap<u32, PendingRead>,
+    /// Pipes awaiting syscall exit to read the returned fd pair.
+    pub pending_pipes: HashMap<u32, PendingPipe>,
     pub alive_count: u32,
 }
 
@@ -175,6 +185,7 @@ impl TracerLoop {
             pending_eperm: HashSet::new(),
             pending_opens: HashMap::new(),
             pending_reads: HashMap::new(),
+            pending_pipes: HashMap::new(),
             alive_count: 0,
         }
     }
@@ -368,6 +379,14 @@ impl TracerLoop {
             return Ok(());
         }
 
+        // Complete pending pipe: read the fd pair from tracee memory,
+        // register in fd table and pipe registry, emit PipeCreate.
+        if let Some(pipe_info) = self.pending_pipes.remove(&pid_u32) {
+            self.complete_pending_pipe(pid, &pipe_info)?;
+            ptrace::cont(pid, None)?;
+            return Ok(());
+        }
+
         if let Some(cap) = self.pending_captures.remove(&pid_u32) {
             let after_hash = hash_file_content(&self.cas, &cap.path);
 
@@ -503,7 +522,7 @@ impl TracerLoop {
                 self.emit(EventPayload::Stdio(eio::Stdio {
                     pid: read_info.pid,
                     subtype: eio::StdioSubtype::Stdin,
-                    content_hash,
+                    content_hash: content_hash.clone(),
                     size: bytes_read,
                     pipe_inode: match &target {
                         FdTarget::Pipe { inode, .. } => Some(*inode),
@@ -512,6 +531,17 @@ impl TracerLoop {
                     dest_pid: None,
                     source_pid: None,
                 }));
+                // Also emit PipeData for pipe topology visibility.
+                if let FdTarget::Pipe { inode, .. } = &target {
+                    self.emit(EventPayload::PipeData(eio::PipeData {
+                        pid: read_info.pid,
+                        inode: *inode,
+                        direction: eio::PipeDirection::Read,
+                        content_hash,
+                        size: bytes_read,
+                        dest_pids: vec![],
+                    }));
+                }
                 return Ok(());
             }
         }
@@ -556,6 +586,76 @@ impl TracerLoop {
         Ok(())
     }
 
+    /// Reads the fd pair from a completed pipe/pipe2 syscall.
+    ///
+    /// Reads the two-element `int` array from tracee memory, looks up
+    /// the inode via `/proc`, registers both ends in the fd table and
+    /// pipe registry, and emits a `PipeCreate` event.
+    fn complete_pending_pipe(&mut self, pid: Pid, pipe_info: &PendingPipe) -> Result<()> {
+        use super::regs;
+        use crate::events::io as eio;
+
+        let r = regs::get_regs(pid)?;
+        let ret = regs::ret_val(&r) as i64;
+
+        // Negative return means pipe() failed.
+        if ret < 0 {
+            return Ok(());
+        }
+
+        // Read the int[2] pipefd array from tracee memory.
+        let bytes = memory::read_bytes(pid, pipe_info.pipefd_addr, 8)?;
+        if bytes.len() < 8 {
+            return Ok(());
+        }
+        let read_fd = i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let write_fd = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+
+        // Read the inode from /proc for the read end.
+        let pid_u32 = pipe_info.pid;
+        let link = format!("/proc/{pid_u32}/fd/{read_fd}");
+        let inode = std::fs::read_link(&link)
+            .ok()
+            .and_then(|p| {
+                let s = p.to_string_lossy();
+                s.strip_prefix("pipe:[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .and_then(|n| n.parse::<u64>().ok())
+            })
+            .unwrap_or(0);
+
+        // Register both ends in the process fd table.
+        if let Some(proc_state) = self.process_tree.get_process_mut(pid_u32) {
+            proc_state.fds.insert(
+                read_fd,
+                FdTarget::Pipe {
+                    inode,
+                    direction: crate::state::PipeEnd::Read,
+                },
+            );
+            proc_state.fds.insert(
+                write_fd,
+                FdTarget::Pipe {
+                    inode,
+                    direction: crate::state::PipeEnd::Write,
+                },
+            );
+        }
+
+        // Register in the pipe registry.
+        self.pipe_registry
+            .create_pipe(pid_u32, inode, read_fd, write_fd);
+
+        self.emit(EventPayload::PipeCreate(eio::PipeCreate {
+            pid: pid_u32,
+            inode,
+            read_fd,
+            write_fd,
+        }));
+
+        Ok(())
+    }
+
     /// Forwards non-ptrace signals to the tracee.
     ///
     /// If the pid has a pending capture or open, resumes with
@@ -571,6 +671,7 @@ impl TracerLoop {
         if self.pending_captures.contains_key(&pid_u32)
             || self.pending_opens.contains_key(&pid_u32)
             || self.pending_reads.contains_key(&pid_u32)
+            || self.pending_pipes.contains_key(&pid_u32)
         {
             ptrace::syscall(pid, forward)?;
         } else {

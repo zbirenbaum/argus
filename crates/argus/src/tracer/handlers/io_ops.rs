@@ -124,7 +124,7 @@ pub fn handle_write(
         tracer.emit(EventPayload::Stdio(eio::Stdio {
             pid: pid_u32,
             subtype,
-            content_hash,
+            content_hash: content_hash.clone(),
             size,
             pipe_inode: match &target {
                 FdTarget::Pipe { inode, .. } => Some(*inode),
@@ -133,6 +133,18 @@ pub fn handle_write(
             dest_pid: None,
             source_pid: None,
         }));
+        // Also emit PipeData so the pipe topology is visible
+        // independently of stdio classification.
+        if let FdTarget::Pipe { inode, .. } = &target {
+            tracer.emit(EventPayload::PipeData(eio::PipeData {
+                pid: pid_u32,
+                inode: *inode,
+                direction: eio::PipeDirection::Write,
+                content_hash,
+                size,
+                dest_pids: vec![],
+            }));
+        }
         return Ok(());
     }
 
@@ -175,25 +187,26 @@ pub fn handle_write(
     Ok(())
 }
 
-/// Handles pipe/pipe2.
+/// Handles pipe/pipe2 at syscall entry.
 ///
-/// On syscall entry the kernel has not yet filled the pipefd array,
-/// so we cannot read the fds. Phase 1: log only.
+/// Saves the pipefd array pointer and resumes with `ptrace::syscall`
+/// so the exit handler can read the kernel-filled fd pair. Returns
+/// `true` because the tracee was resumed for exit capture.
 pub fn handle_pipe(
-    _tracer: &mut TracerLoop,
+    tracer: &mut TracerLoop,
     pid: Pid,
-    _r: &UserRegs,
-) -> Result<()> {
+    r: &UserRegs,
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
+    let pipefd_addr = regs::arg1(r);
 
-    event!(
-        name: "tracer.pipe.create",
-        Level::DEBUG,
-        pid = pid_u32,
-        "pipe syscall detected for pid {{pid}}; post-syscall fd capture not yet implemented",
-    );
+    tracer.pending_pipes.insert(pid_u32, crate::tracer::trace_loop::PendingPipe {
+        pid: pid_u32,
+        pipefd_addr,
+    });
 
-    Ok(())
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
 /// Handles lseek.
