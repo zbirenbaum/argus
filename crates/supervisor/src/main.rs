@@ -27,9 +27,9 @@ use sandbox::tracer::TracerLoop;
 #[derive(Debug, Parser)]
 #[command(name = "supervisor", version, about)]
 struct Cli {
-    /// Unique agent identifier for this session.
+    /// Unique agent identifier for this session (auto-generated UUID v4 if omitted).
     #[arg(long)]
-    agent_id: String,
+    agent_id: Option<String>,
 
     /// Path to YAML configuration file.
     #[arg(long, default_value = "supervisor.yaml")]
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     init_tracing();
-    let config = load_config(&cli)?;
+    let mut config = load_config(&cli)?;
     config.validate()?;
 
     event!(
@@ -138,7 +138,9 @@ fn load_config(cli: &Cli) -> Result<SupervisorConfig> {
     };
 
     // CLI args take precedence over the config file.
-    config.agent_id = cli.agent_id.clone();
+    if let Some(ref id) = cli.agent_id {
+        config.agent_id = id.clone();
+    }
     config.agent_command = cli.command.clone();
 
     Ok(config)
@@ -182,7 +184,7 @@ mod tests {
             "--", "/bin/echo", "hello",
         ];
         let cli = Cli::try_parse_from(args).unwrap();
-        assert_eq!(cli.agent_id, "test-agent");
+        assert_eq!(cli.agent_id.as_deref(), Some("test-agent"));
         assert_eq!(cli.command, vec!["/bin/echo", "hello"]);
         assert_eq!(cli.config, PathBuf::from("supervisor.yaml"));
     }
@@ -200,9 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_requires_agent_id() {
+    fn cli_agent_id_is_optional() {
         let args = ["supervisor", "--", "bash"];
-        assert!(Cli::try_parse_from(args).is_err());
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(cli.agent_id.is_none());
     }
 
     #[test]
@@ -215,7 +218,7 @@ mod tests {
     fn load_config_uses_defaults_when_file_missing() {
         init_tracing_for_test();
         let cli = Cli {
-            agent_id: "test".into(),
+            agent_id: Some("test".into()),
             config: PathBuf::from("/nonexistent/config.yaml"),
             command: vec!["echo".into()],
         };
@@ -234,7 +237,7 @@ mod tests {
         fs::write(&config_path, yaml).unwrap();
 
         let cli = Cli {
-            agent_id: "yaml-agent".into(),
+            agent_id: Some("yaml-agent".into()),
             config: config_path,
             command: vec!["python".into(), "run.py".into()],
         };

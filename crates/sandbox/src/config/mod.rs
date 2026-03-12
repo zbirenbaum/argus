@@ -107,11 +107,11 @@ impl SupervisorConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when `agent_id` is empty, `agent_command` is empty,
-    /// or `data_dir` does not exist and cannot be created.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    /// Returns an error when `agent_command` is empty,
+    /// or `data_dir` / `workspace_dir` are empty strings.
+    pub fn validate(&mut self) -> anyhow::Result<()> {
         if self.agent_id.is_empty() {
-            bail!("agent_id must not be empty");
+            self.agent_id = uuid::Uuid::new_v4().to_string();
         }
         if self.agent_command.is_empty() {
             bail!("agent_command must not be empty");
@@ -168,18 +168,21 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_empty_agent_id() {
-        let cfg = SupervisorConfig {
+    fn validation_generates_agent_id_when_empty() {
+        let mut cfg = SupervisorConfig {
             agent_command: vec!["bash".into()],
             ..SupervisorConfig::default()
         };
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains("agent_id"));
+        assert!(cfg.agent_id.is_empty());
+        cfg.validate().unwrap();
+        assert!(!cfg.agent_id.is_empty());
+        // Verify it looks like a UUID v4 (36 chars with hyphens).
+        assert_eq!(cfg.agent_id.len(), 36);
     }
 
     #[test]
     fn validation_rejects_empty_command() {
-        let cfg = SupervisorConfig {
+        let mut cfg = SupervisorConfig {
             agent_id: "test-agent".into(),
             ..SupervisorConfig::default()
         };
@@ -189,7 +192,7 @@ mod tests {
 
     #[test]
     fn validation_passes_for_valid_config() {
-        let cfg = SupervisorConfig {
+        let mut cfg = SupervisorConfig {
             agent_id: "agent-1".into(),
             agent_command: vec!["python".into(), "main.py".into()],
             ..SupervisorConfig::default()
