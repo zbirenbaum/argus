@@ -27,6 +27,7 @@
 
 ## Deviations from spec
 - Spec says "~55 syscalls" but the enumerated list contains 61 traced syscalls. All 61 from the spec are included (including lseek, chown, fchown, fchownat).
+- 11 syscalls beyond the spec's enumerated list are intentional defensive additions to prevent bypass: `openat2`, `creat`, `preadv`, `pwritev`, `readlink`, `readlinkat`, `clone3`, `exit`, `exit_group`, `bind`, and `listen`. These cover alternative entry points for operations already in the spec (e.g., `openat2` is an alternative to `openat`, `creat` to `open`, `readlink` to `readlinkat`, `clone3` to `clone`) and ensure the supervisor observes all process lifecycle and network binding events.
 
 ## What's missing
 - Nothing

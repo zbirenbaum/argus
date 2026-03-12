@@ -92,7 +92,7 @@ pub fn build_filter_program(actions: &[SyscallAction]) -> Vec<libc::sock_filter>
         insns.push(bpf_jump(
             BPF_JMP | BPF_JEQ | BPF_K,
             nr,
-            num_actions as u8,
+            u8::try_from(num_actions).expect("seccomp filter supports at most 255 syscall actions"),
             0,
         ));
     }
