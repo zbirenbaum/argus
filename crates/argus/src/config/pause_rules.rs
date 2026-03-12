@@ -189,6 +189,25 @@ pub enum PauseAction {
 }
 
 impl Rule {
+    /// Creates a rule with compiled glob patterns.
+    pub fn new(
+        kind: MatchKind,
+        paths: Vec<String>,
+        binaries: Vec<String>,
+        destinations: Vec<String>,
+    ) -> Self {
+        let mut rule = Self {
+            match_kind: kind,
+            paths,
+            binaries,
+            destinations,
+            compiled_paths: Vec::new(),
+            compiled_destinations: Vec::new(),
+        };
+        rule.validate_patterns();
+        rule
+    }
+
     /// Compile glob patterns in `paths` and `destinations`.
     ///
     /// Must be called after deserialization before using `matches`.
@@ -296,16 +315,7 @@ mod tests {
         binaries: Vec<String>,
         destinations: Vec<String>,
     ) -> Rule {
-        let mut rule = Rule {
-            match_kind: kind,
-            paths,
-            binaries,
-            destinations,
-            compiled_paths: Vec::new(),
-            compiled_destinations: Vec::new(),
-        };
-        rule.validate_patterns();
-        rule
+        Rule::new(kind, paths, binaries, destinations)
     }
 
     fn unlink_rule() -> Rule {

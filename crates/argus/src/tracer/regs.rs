@@ -149,6 +149,88 @@ pub fn arg5(regs: &UserRegs) -> u64 {
     }
 }
 
+/// Cancels a syscall by invalidating the syscall number.
+///
+/// Sets `orig_rax` to -1 on x86_64 (or `x8` to -1 on aarch64)
+/// so the kernel skips execution and returns -ENOSYS. Caller must
+/// follow up at syscall exit to set the desired errno.
+pub fn cancel_syscall(regs: &mut UserRegs) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        regs.orig_rax = (-1_i64) as u64;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        regs.regs[8] = (-1_i64) as u64;
+    }
+}
+
+/// Reads the syscall return value from the register set.
+pub fn ret_val(regs: &UserRegs) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        regs.rax
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        regs.regs[0]
+    }
+}
+
+/// Sets the syscall return value in the register set.
+pub fn set_ret(regs: &mut UserRegs, val: u64) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        regs.rax = val;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        regs.regs[0] = val;
+    }
+}
+
+/// Writes the tracee's register set via ptrace.
+///
+/// Uses `PTRACE_SETREGS` on x86_64 and `PTRACE_SETREGSET` with
+/// `NT_PRSTATUS` on aarch64.
+///
+/// # Errors
+///
+/// Returns an error if the ptrace call fails.
+pub fn set_regs(pid: nix::unistd::Pid, regs: &UserRegs) -> anyhow::Result<()> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: UserRegs is #[repr(C)] with identical layout to
+        // libc::user_regs_struct — same fields in same order.
+        let raw: libc::user_regs_struct = unsafe { std::mem::transmute(*regs) };
+        nix::sys::ptrace::setregs(pid, raw)?;
+        Ok(())
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use anyhow::Context;
+        const NT_PRSTATUS: libc::c_int = 1;
+        let iov = libc::iovec {
+            iov_base: (regs as *const UserRegs).cast_mut().cast(),
+            iov_len: std::mem::size_of::<UserRegs>(),
+        };
+        // SAFETY: iov points to a valid UserRegs with correct size.
+        let ret = unsafe {
+            libc::ptrace(
+                libc::PTRACE_SETREGSET,
+                pid.as_raw() as libc::c_uint,
+                NT_PRSTATUS,
+                std::ptr::addr_of!(iov),
+            )
+        };
+        if ret == -1 {
+            return Err(std::io::Error::last_os_error())
+                .context("PTRACE_SETREGSET(NT_PRSTATUS) failed");
+        }
+        Ok(())
+    }
+}
+
 /// Reads the tracee's register set via ptrace.
 ///
 /// Uses `PTRACE_GETREGS` on x86_64 and `PTRACE_GETREGSET` with
@@ -168,17 +250,17 @@ pub fn get_regs(pid: nix::unistd::Pid) -> anyhow::Result<UserRegs> {
     #[cfg(target_arch = "aarch64")]
     {
         use anyhow::Context;
-        const NT_PRSTATUS: nix::libc::c_int = 1;
+        const NT_PRSTATUS: libc::c_int = 1;
         let mut regs = UserRegs::default();
-        let mut iov = nix::libc::iovec {
+        let mut iov = libc::iovec {
             iov_base: std::ptr::addr_of_mut!(regs).cast(),
             iov_len: std::mem::size_of::<UserRegs>(),
         };
         // SAFETY: iov points to a valid UserRegs with correct size.
         let ret = unsafe {
-            nix::libc::ptrace(
-                nix::libc::PTRACE_GETREGSET,
-                pid.as_raw() as nix::libc::c_uint,
+            libc::ptrace(
+                libc::PTRACE_GETREGSET,
+                pid.as_raw() as libc::c_uint,
                 NT_PRSTATUS,
                 std::ptr::addr_of_mut!(iov),
             )

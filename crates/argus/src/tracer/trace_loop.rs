@@ -6,12 +6,14 @@
 //! follows forks, program replacements, and exits. Emits structured
 //! events over a channel for downstream consumers.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
@@ -19,11 +21,13 @@ use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
 
+use crate::api::state::SharedState;
 use crate::cas::{Cas, LocalCas};
+use crate::config::RuleSet;
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::file as ef;
 use crate::snapshot::MerkleTree;
-use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
+use crate::state::{FdTable, FdTarget, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
 use crate::tracer::{handlers, memory, process_events};
 
 /// Ptrace options to set on every traced process.
@@ -50,6 +54,23 @@ pub enum CaptureKind {
     OpenTrunc,
 }
 
+/// Saved state between open entry and exit for fd table insertion.
+#[derive(Debug)]
+pub struct PendingOpen {
+    pub path: String,
+    pub flags: i32,
+}
+
+/// Saved state between read entry and exit for content capture.
+#[derive(Debug)]
+pub struct PendingRead {
+    pub pid: u32,
+    pub fd: i32,
+    pub path: String,
+    pub buf_addr: u64,
+    pub count: u64,
+}
+
 /// Saved state between syscall entry and exit for content capture.
 #[derive(Debug)]
 pub struct PendingCapture {
@@ -64,6 +85,24 @@ pub struct PendingCapture {
 pub fn hash_file_content(cas: &impl Cas, path: &str) -> Option<String> {
     let data = std::fs::read(path).ok()?;
     cas.put(&data).ok().map(|h| h.to_string())
+}
+
+/// Sets the syscall return value to -EPERM at syscall exit.
+///
+/// Called after a cancelled syscall reaches the exit stop. The kernel
+/// returned -ENOSYS (because orig_rax was set to -1 at entry); we
+/// overwrite rax with -EPERM so the process sees "Permission denied."
+///
+/// # Errors
+///
+/// Returns an error if register read/write fails.
+fn inject_eperm(pid: Pid) -> Result<()> {
+    use super::regs;
+    let mut r = regs::get_regs(pid)?;
+    // -EPERM = -1 as signed, which is 0xFFFFFFFFFFFFFFFF unsigned.
+    regs::set_ret(&mut r, (-(libc::EPERM as i64)) as u64);
+    regs::set_regs(pid, &r)?;
+    Ok(())
 }
 
 /// Orchestrates the ptrace event loop.
@@ -95,6 +134,16 @@ pub struct TracerLoop {
     agent_id: String,
     /// Workspace root for initial filesystem capture.
     workspace_dir: Option<PathBuf>,
+    /// Lock-free handle to the active rule set for pause/block evaluation.
+    pub rules: Option<Arc<ArcSwap<RuleSet>>>,
+    /// Shared state for submitting pending approvals to the API.
+    pub shared_state: Option<SharedState>,
+    /// Pids awaiting syscall exit for EPERM injection.
+    pub pending_eperm: HashSet<u32>,
+    /// Opens awaiting syscall exit to read the returned fd.
+    pub pending_opens: HashMap<u32, PendingOpen>,
+    /// Reads awaiting syscall exit to capture buffer content.
+    pub pending_reads: HashMap<u32, PendingRead>,
     pub alive_count: u32,
 }
 
@@ -121,6 +170,11 @@ impl TracerLoop {
             seq_gen,
             agent_id,
             workspace_dir: None,
+            rules: None,
+            shared_state: None,
+            pending_eperm: HashSet::new(),
+            pending_opens: HashMap::new(),
+            pending_reads: HashMap::new(),
             alive_count: 0,
         }
     }
@@ -128,6 +182,18 @@ impl TracerLoop {
     /// Set the workspace directory for initial state capture.
     pub fn with_workspace(mut self, path: PathBuf) -> Self {
         self.workspace_dir = Some(path);
+        self
+    }
+
+    /// Set the rule set handle for pause/block enforcement.
+    pub fn with_rules(mut self, rules: Arc<ArcSwap<RuleSet>>) -> Self {
+        self.rules = Some(rules);
+        self
+    }
+
+    /// Set the shared state for approval submission.
+    pub fn with_shared_state(mut self, state: SharedState) -> Self {
+        self.shared_state = Some(state);
         self
     }
 
@@ -279,6 +345,29 @@ impl TracerLoop {
     fn handle_syscall_exit(&mut self, pid: Pid) -> Result<()> {
         let pid_u32 = pid.as_raw() as u32;
 
+        // Inject EPERM for blocked/denied syscalls.
+        if self.pending_eperm.remove(&pid_u32) {
+            inject_eperm(pid)?;
+            ptrace::cont(pid, None)?;
+            return Ok(());
+        }
+
+        // Complete pending open: read the returned fd and insert
+        // the path into the process fd table.
+        if let Some(open) = self.pending_opens.remove(&pid_u32) {
+            self.complete_pending_open(pid, &open)?;
+            ptrace::cont(pid, None)?;
+            return Ok(());
+        }
+
+        // Complete pending read: read the buffer content from tracee
+        // memory, hash it, and emit event with content_hash.
+        if let Some(read_info) = self.pending_reads.remove(&pid_u32) {
+            self.complete_pending_read(pid, &read_info)?;
+            ptrace::cont(pid, None)?;
+            return Ok(());
+        }
+
         if let Some(cap) = self.pending_captures.remove(&pid_u32) {
             let after_hash = hash_file_content(&self.cas, &cap.path);
 
@@ -381,10 +470,97 @@ impl TracerLoop {
         Ok(())
     }
 
+    /// Completes a pending read by reading the buffer content from
+    /// tracee memory, hashing it, and emitting the event.
+    fn complete_pending_read(&mut self, pid: Pid, read_info: &PendingRead) -> Result<()> {
+        use super::regs;
+        use super::content_capture;
+        use crate::events::io as eio;
+
+        let r = regs::get_regs(pid)?;
+        let ret = regs::ret_val(&r) as i64;
+
+        // Negative or zero return means read failed or EOF.
+        if ret <= 0 {
+            return Ok(());
+        }
+        let bytes_read = ret as u64;
+
+        let content_hash = content_capture::try_capture_flat(
+            &self.cas,
+            pid,
+            read_info.buf_addr,
+            bytes_read,
+        );
+
+        // Classify: if fd is 0 and backed by pipe/pty, emit Stdio.
+        // Otherwise emit a file Read event.
+        if read_info.fd == 0 {
+            let target = crate::tracer::handlers::io_ops::resolve_fd_target(
+                self, read_info.pid, 0,
+            );
+            if matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. }) {
+                self.emit(EventPayload::Stdio(eio::Stdio {
+                    pid: read_info.pid,
+                    subtype: eio::StdioSubtype::Stdin,
+                    content_hash,
+                    size: bytes_read,
+                    pipe_inode: match &target {
+                        FdTarget::Pipe { inode, .. } => Some(*inode),
+                        _ => None,
+                    },
+                    dest_pid: None,
+                    source_pid: None,
+                }));
+                return Ok(());
+            }
+        }
+
+        self.emit(EventPayload::Read(ef::Read {
+            pid: read_info.pid,
+            path: read_info.path.clone(),
+            fd: read_info.fd,
+            offset: 0,
+            size: bytes_read,
+            content_hash,
+        }));
+
+        Ok(())
+    }
+
+    /// Reads the returned fd from a completed open syscall and inserts
+    /// the path into the process fd table.
+    fn complete_pending_open(&mut self, pid: Pid, open: &PendingOpen) -> Result<()> {
+        use super::regs;
+
+        let r = regs::get_regs(pid)?;
+        let ret = regs::ret_val(&r) as i64;
+
+        // Negative return means open failed — nothing to insert.
+        if ret < 0 {
+            return Ok(());
+        }
+        let fd = ret as i32;
+        let pid_u32 = pid.as_raw() as u32;
+
+        let target = FdTarget::File {
+            path: PathBuf::from(&open.path),
+        };
+        if let Some(proc_state) = self.process_tree.get_process_mut(pid_u32) {
+            if open.flags & libc::O_CLOEXEC != 0 {
+                proc_state.fds.insert_cloexec(fd, target);
+            } else {
+                proc_state.fds.insert(fd, target);
+            }
+        }
+        Ok(())
+    }
+
     /// Forwards non-ptrace signals to the tracee.
     ///
-    /// If the pid has a pending capture, resumes with `ptrace::syscall`
-    /// to preserve syscall-exit tracking across signal delivery.
+    /// If the pid has a pending capture or open, resumes with
+    /// `ptrace::syscall` to preserve syscall-exit tracking across
+    /// signal delivery.
     fn handle_signal_stop(&mut self, pid: Pid, sig: Signal) -> Result<()> {
         let forward = match sig {
             Signal::SIGSTOP | Signal::SIGTRAP => None,
@@ -392,7 +568,10 @@ impl TracerLoop {
         };
 
         let pid_u32 = pid.as_raw() as u32;
-        if self.pending_captures.contains_key(&pid_u32) {
+        if self.pending_captures.contains_key(&pid_u32)
+            || self.pending_opens.contains_key(&pid_u32)
+            || self.pending_reads.contains_key(&pid_u32)
+        {
             ptrace::syscall(pid, forward)?;
         } else {
             ptrace::cont(pid, forward)?;
@@ -435,15 +614,16 @@ impl TracerLoop {
     /// Registers the initial process in the tree.
     fn register_initial_process(&mut self, pid: Pid) -> Result<()> {
         let pid_u32 = pid.as_raw() as u32;
+        let ppid = nix::unistd::getpid().as_raw() as u32;
         let binary = memory::read_proc_exe(pid)
             .unwrap_or_else(|_| PathBuf::from("unknown"));
         let argv = memory::read_proc_cmdline(pid).unwrap_or_default();
         let cwd = std::fs::read_link(format!("/proc/{}/cwd", pid.as_raw()))
             .unwrap_or_else(|_| PathBuf::from("/"));
 
-        let fds = FdTable::new();
+        let fds = FdTable::from_proc(pid_u32);
         self.process_tree
-            .add_process(pid_u32, 0, binary, argv, cwd, fds);
+            .add_process(pid_u32, ppid, binary, argv, cwd, fds);
 
         Ok(())
     }

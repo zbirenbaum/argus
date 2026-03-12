@@ -111,6 +111,11 @@ impl SequenceGenerator {
     pub fn next_seq(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
+
+    /// Returns the current sequence value without incrementing.
+    pub fn current(&self) -> u64 {
+        self.next.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for SequenceGenerator {

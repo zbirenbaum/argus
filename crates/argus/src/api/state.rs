@@ -1,85 +1,92 @@
 // Rust guideline compliant 2026-02-21
-//! Shared state between the API server and the tracer thread.
+//! Lock-free bridge between the API server and the tracer thread.
 //!
 //! The tracer loop runs synchronously on a dedicated OS thread while the
 //! API server runs on the tokio runtime. This module provides the
-//! thread-safe bridge between them using `Arc<Mutex<_>>`.
+//! thread-safe bridge between them using only atomic and lock-free
+//! primitives — no `Mutex` anywhere.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-use tokio::sync::mpsc;
+use dashmap::DashMap;
+use tokio::sync::broadcast;
 
 use crate::api::types::PendingApprovalEntry;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
 
-/// Shared supervisor state for API and tracer threads.
+/// Broadcast channel capacity for API event subscribers.
 ///
-/// Wrap in `Arc<Mutex<_>>` for thread-safe sharing. The mutex is held
-/// only briefly during state reads and writes, so contention is minimal.
-#[derive(Debug)]
-pub struct SupervisorState {
-    paused: bool,
+/// 256 is large enough to buffer bursts without back-pressure on the
+/// trace loop. Lagging receivers silently skip missed events.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Lock-free bridge between the ptrace loop and the API server.
+///
+/// Every field is either immutable after construction or uses a lock-free
+/// primitive. The trace loop never blocks on anything the API controls.
+pub struct Bridge {
     agent_id: String,
     started_at: Instant,
-    seq_gen: SequenceGenerator,
-    pending_approvals: HashMap<String, PendingApprovalEntry>,
-    event_tx: Option<mpsc::UnboundedSender<Event>>,
+    paused: AtomicBool,
     rules: Arc<ArcSwap<RuleSet>>,
+    pending_approvals: DashMap<String, PendingApprovalEntry>,
+    seq_gen: SequenceGenerator,
+    event_tx: broadcast::Sender<Event>,
 }
 
-impl SupervisorState {
-    /// Creates state for a new supervisor session.
+impl std::fmt::Debug for Bridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bridge")
+            .field("agent_id", &self.agent_id)
+            .field("paused", &self.paused.load(Ordering::Relaxed))
+            .field("pending_approvals", &self.pending_approvals.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Bridge {
+    /// Creates a new bridge for a supervisor session.
     pub fn new(agent_id: String) -> Self {
+        let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
-            paused: false,
             agent_id,
             started_at: Instant::now(),
-            seq_gen: SequenceGenerator::default(),
-            pending_approvals: HashMap::new(),
-            event_tx: None,
+            paused: AtomicBool::new(false),
             rules: Arc::new(ArcSwap::from_pointee(RuleSet::default())),
+            pending_approvals: DashMap::new(),
+            seq_gen: SequenceGenerator::default(),
+            event_tx,
         }
     }
 
-    /// Creates state with an event sender for structured event emission.
-    pub fn with_event_tx(agent_id: String, event_tx: mpsc::UnboundedSender<Event>) -> Self {
-        Self {
-            paused: false,
-            agent_id,
-            started_at: Instant::now(),
-            seq_gen: SequenceGenerator::default(),
-            pending_approvals: HashMap::new(),
-            event_tx: Some(event_tx),
-            rules: Arc::new(ArcSwap::from_pointee(RuleSet::default())),
-        }
-    }
-
-    /// Emits an event through the event channel if configured.
+    /// Emits an event to all broadcast subscribers.
     ///
-    /// Best-effort: silently drops the event if the receiver is closed.
+    /// Zero-cost when no receivers are connected — `send` silently drops
+    /// the event with no allocation.
     pub fn emit(&self, payload: EventPayload) {
-        if let Some(tx) = &self.event_tx {
-            let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
-            let _ = tx.send(evt);
-        }
+        let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
+        let _ = self.event_tx.send(evt);
+    }
+
+    /// Subscribes to the event broadcast channel.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
+        self.event_tx.subscribe()
     }
 
     /// Whether the agent is currently paused.
     pub fn is_paused(&self) -> bool {
-        self.paused
+        self.paused.load(Ordering::Acquire)
     }
 
     /// Sets the paused flag. Returns `true` if the state changed.
-    pub fn set_paused(&mut self, paused: bool) -> bool {
-        if self.paused == paused {
-            return false;
-        }
-        self.paused = paused;
-        true
+    pub fn set_paused(&self, paused: bool) -> bool {
+        self.paused
+            .compare_exchange(!paused, paused, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     /// The configured agent identifier.
@@ -94,23 +101,35 @@ impl SupervisorState {
 
     /// Current event sequence number.
     pub fn event_seq(&self) -> u64 {
-        self.seq_gen.next_seq()
+        self.seq_gen.current()
     }
 
     /// Inserts a pending approval entry.
-    pub fn insert_pending(&mut self, entry: PendingApprovalEntry) {
+    pub fn insert_pending(&self, entry: PendingApprovalEntry) {
         self.pending_approvals
             .insert(entry.action_id.clone(), entry);
     }
 
     /// Removes and returns a pending approval by action ID.
-    pub fn remove_pending(&mut self, action_id: &str) -> Option<PendingApprovalEntry> {
-        self.pending_approvals.remove(action_id)
+    pub fn remove_pending(&self, action_id: &str) -> Option<PendingApprovalEntry> {
+        self.pending_approvals.remove(action_id).map(|(_, v)| v)
     }
 
     /// Snapshot of all pending approval entries.
-    pub fn pending_actions(&self) -> Vec<&PendingApprovalEntry> {
-        self.pending_approvals.values().collect()
+    pub fn pending_actions(&self) -> Vec<PendingApprovalEntry> {
+        self.pending_approvals
+            .iter()
+            .map(|entry| PendingApprovalEntry {
+                action_id: entry.action_id.clone(),
+                pid: entry.pid,
+                process: entry.process.clone(),
+                syscall: entry.syscall.clone(),
+                path: entry.path.clone(),
+                timestamp: entry.timestamp.clone(),
+                rule_matched: entry.rule_matched.clone(),
+                decision_tx: None,
+            })
+            .collect()
     }
 
     /// Number of pending approvals.
@@ -118,13 +137,12 @@ impl SupervisorState {
         self.pending_approvals.len()
     }
 
-    /// Returns a handle to the `ArcSwap<RuleSet>` for lock-free reads.
+    /// Returns a cloned handle to the `ArcSwap<RuleSet>` for lock-free reads.
     ///
-    /// The tracer thread calls `rules_handle().load()` on each syscall
-    /// stop. The API thread calls `rules_handle().store()` to swap
-    /// atomically.
-    pub fn rules_handle(&self) -> &Arc<ArcSwap<RuleSet>> {
-        &self.rules
+    /// The tracer thread calls `.load()` on each syscall stop.
+    /// The API thread calls `.store()` to swap atomically.
+    pub fn rules_handle(&self) -> Arc<ArcSwap<RuleSet>> {
+        Arc::clone(&self.rules)
     }
 
     /// Load the current rule set snapshot.
@@ -138,22 +156,12 @@ impl SupervisorState {
     }
 }
 
-/// Thread-safe handle to supervisor state.
-pub type SharedState = Arc<Mutex<SupervisorState>>;
+/// Thread-safe handle to the bridge.
+pub type SharedState = Arc<Bridge>;
 
-/// Creates a new shared state handle.
+/// Creates a new shared bridge handle.
 pub fn new_shared_state(agent_id: String) -> SharedState {
-    Arc::new(Mutex::new(SupervisorState::new(agent_id)))
-}
-
-/// Creates a new shared state handle with an event sender.
-pub fn new_shared_state_with_events(
-    agent_id: String,
-    event_tx: mpsc::UnboundedSender<Event>,
-) -> SharedState {
-    Arc::new(Mutex::new(SupervisorState::with_event_tx(
-        agent_id, event_tx,
-    )))
+    Arc::new(Bridge::new(agent_id))
 }
 
 /// Delivers an approval decision through the oneshot channel.
@@ -165,8 +173,7 @@ pub fn resolve_approval(
     action_id: &str,
     decision: ApprovalDecision,
 ) -> Option<PendingApprovalEntry> {
-    let mut guard = state.lock().expect("state lock poisoned");
-    let mut entry = guard.remove_pending(action_id)?;
+    let mut entry = state.remove_pending(action_id)?;
 
     if let Some(tx) = entry.decision_tx.take() {
         let _ = tx.send(decision);
@@ -181,23 +188,23 @@ mod tests {
 
     #[test]
     fn new_state_is_running() {
-        let state = SupervisorState::new("test".into());
-        assert!(!state.is_paused());
-        assert_eq!(state.agent_id(), "test");
+        let bridge = Bridge::new("test".into());
+        assert!(!bridge.is_paused());
+        assert_eq!(bridge.agent_id(), "test");
     }
 
     #[test]
     fn set_paused_returns_whether_changed() {
-        let mut state = SupervisorState::new("test".into());
-        assert!(state.set_paused(true));
-        assert!(!state.set_paused(true));
-        assert!(state.set_paused(false));
-        assert!(!state.set_paused(false));
+        let bridge = Bridge::new("test".into());
+        assert!(bridge.set_paused(true));
+        assert!(!bridge.set_paused(true));
+        assert!(bridge.set_paused(false));
+        assert!(!bridge.set_paused(false));
     }
 
     #[test]
     fn insert_and_remove_pending() {
-        let mut state = SupervisorState::new("test".into());
+        let bridge = Bridge::new("test".into());
         let entry = PendingApprovalEntry {
             action_id: "a1".into(),
             pid: 42,
@@ -208,19 +215,19 @@ mod tests {
             rule_matched: "unlink /workspace/**".into(),
             decision_tx: None,
         };
-        state.insert_pending(entry);
-        assert_eq!(state.pending_count(), 1);
-        assert_eq!(state.pending_actions().len(), 1);
+        bridge.insert_pending(entry);
+        assert_eq!(bridge.pending_count(), 1);
+        assert_eq!(bridge.pending_actions().len(), 1);
 
-        let removed = state.remove_pending("a1").unwrap();
+        let removed = bridge.remove_pending("a1").unwrap();
         assert_eq!(removed.pid, 42);
-        assert_eq!(state.pending_count(), 0);
+        assert_eq!(bridge.pending_count(), 0);
     }
 
     #[test]
     fn remove_nonexistent_returns_none() {
-        let mut state = SupervisorState::new("test".into());
-        assert!(state.remove_pending("nope").is_none());
+        let bridge = Bridge::new("test".into());
+        assert!(bridge.remove_pending("nope").is_none());
     }
 
     #[test]
@@ -228,19 +235,16 @@ mod tests {
         let shared = new_shared_state("test".into());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
 
-        {
-            let mut guard = shared.lock().unwrap();
-            guard.insert_pending(PendingApprovalEntry {
-                action_id: "a1".into(),
-                pid: 10,
-                process: "bash".into(),
-                syscall: "exec".into(),
-                path: None,
-                timestamp: "2026-01-01T00:00:00Z".into(),
-                rule_matched: "exec rule".into(),
-                decision_tx: Some(tx),
-            });
-        }
+        shared.insert_pending(PendingApprovalEntry {
+            action_id: "a1".into(),
+            pid: 10,
+            process: "bash".into(),
+            syscall: "exec".into(),
+            path: None,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            rule_matched: "exec rule".into(),
+            decision_tx: Some(tx),
+        });
 
         let entry = resolve_approval(&shared, "a1", ApprovalDecision::Approve).unwrap();
         assert_eq!(entry.pid, 10);
@@ -257,8 +261,8 @@ mod tests {
 
     #[test]
     fn uptime_is_positive() {
-        let state = SupervisorState::new("test".into());
-        assert!(state.uptime_seconds() >= 0.0);
+        let bridge = Bridge::new("test".into());
+        assert!(bridge.uptime_seconds() >= 0.0);
     }
 
     #[test]
@@ -267,12 +271,31 @@ mod tests {
         let handle = {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                let mut guard = shared.lock().unwrap();
-                guard.set_paused(true);
+                shared.set_paused(true);
             })
         };
         handle.join().unwrap();
-        let guard = shared.lock().unwrap();
-        assert!(guard.is_paused());
+        assert!(shared.is_paused());
+    }
+
+    #[test]
+    fn emit_with_no_subscribers_does_not_panic() {
+        let bridge = Bridge::new("test".into());
+        bridge.emit(EventPayload::AgentPause(crate::events::control::AgentPause {
+            reason: "test".into(),
+            stopped_pids: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn subscribe_receives_events() {
+        let bridge = Bridge::new("test".into());
+        let mut rx = bridge.subscribe_events();
+        bridge.emit(EventPayload::AgentPause(crate::events::control::AgentPause {
+            reason: "test".into(),
+            stopped_pids: Vec::new(),
+        }));
+        let evt = rx.try_recv().unwrap();
+        assert_eq!(evt.agent_id, "test");
     }
 }

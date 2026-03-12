@@ -28,7 +28,7 @@ pub use syscalls::{BLOCKED_SYSCALLS, TRACED_SYSCALLS};
 pub fn install_seccomp_filter() -> Result<()> {
     // SAFETY: prctl with PR_SET_NO_NEW_PRIVS is safe and idempotent.
     let ret = unsafe {
-        nix::libc::prctl(nix::libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
     };
     if ret != 0 {
         return Err(std::io::Error::last_os_error())
@@ -52,20 +52,20 @@ pub fn install_seccomp_filter() -> Result<()> {
 
     // Cast our SockFilter array to libc::sock_filter — identical
     // #[repr(C)] layout: {u16, u8, u8, u32}.
-    let filter_ptr = program.as_ptr().cast::<nix::libc::sock_filter>();
+    let filter_ptr = program.as_ptr().cast::<libc::sock_filter>();
 
-    let prog = nix::libc::sock_fprog {
+    let prog = libc::sock_fprog {
         len: program.len() as u16,
-        filter: filter_ptr as *mut nix::libc::sock_filter,
+        filter: filter_ptr as *mut libc::sock_filter,
     };
 
     // SAFETY: `prog` points to a valid BPF program that lives for the
     // duration of this call. prctl copies the program into the kernel.
     let ret = unsafe {
-        nix::libc::prctl(
-            nix::libc::PR_SET_SECCOMP,
-            nix::libc::SECCOMP_MODE_FILTER,
-            &prog as *const nix::libc::sock_fprog,
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const libc::sock_fprog,
         )
     };
     if ret != 0 {

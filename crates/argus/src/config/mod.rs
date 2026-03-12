@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SupervisorConfig {
     /// Unique identifier for this agent instance.
+    #[serde(default)]
     pub agent_id: String,
 
     /// Command and arguments to exec as the traced agent process.

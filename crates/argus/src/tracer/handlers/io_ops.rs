@@ -14,15 +14,19 @@ use crate::tracer::trace_loop::TracerLoop;
 
 /// Handles read/pread64/readv/preadv.
 ///
-/// Classifies the fd target and emits the appropriate event type:
-/// file reads, stdio (stdin on fd 0 when backed by pipe/PTY), pipe
-/// data, or PTY data.
+/// For file-backed fds, records a pending read and returns `true` so
+/// the caller resumes with `ptrace::syscall`. At exit, the buffer is
+/// read from tracee memory, hashed, and stored in CAS.
+///
+/// For pipes, PTYs, stdin: emits immediately (content capture deferred
+/// to a later phase) and returns `false`.
 pub fn handle_read(
     tracer: &mut TracerLoop,
     pid: Pid,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let fd = regs::arg1(r) as i32;
+    let buf_addr = regs::arg2(r);
     let size = regs::arg3(r);
     let pid_u32 = pid.as_raw() as u32;
 
@@ -31,31 +35,31 @@ pub fn handle_read(
     // Stdin is only classified as Stdio when fd 0 is backed by a
     // pipe or PTY, not when redirected to a regular file.
     if fd == 0 && matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. }) {
-        tracer.emit(EventPayload::Stdio(eio::Stdio {
+        use crate::tracer::trace_loop::PendingRead;
+        tracer.pending_reads.insert(pid_u32, PendingRead {
             pid: pid_u32,
-            subtype: eio::StdioSubtype::Stdin,
-            content_hash: None,
-            size,
-            pipe_inode: match &target {
-                FdTarget::Pipe { inode, .. } => Some(*inode),
-                _ => None,
-            },
-            dest_pid: None,
-            source_pid: None,
-        }));
-        return Ok(());
+            fd,
+            path: String::new(),
+            buf_addr,
+            count: size,
+        });
+        nix::sys::ptrace::syscall(pid, None)?;
+        return Ok(true);
     }
 
     match target {
         FdTarget::File { path } => {
-            tracer.emit(EventPayload::Read(ef::Read {
+            let path_str = path.to_string_lossy().into_owned();
+            use crate::tracer::trace_loop::PendingRead;
+            tracer.pending_reads.insert(pid_u32, PendingRead {
                 pid: pid_u32,
-                path: path.to_string_lossy().into_owned(),
                 fd,
-                offset: 0, // Phase 1: not tracked.
-                size,
-                content_hash: None,
-            }));
+                path: path_str,
+                buf_addr,
+                count: size,
+            });
+            nix::sys::ptrace::syscall(pid, None)?;
+            Ok(true)
         }
         FdTarget::Pipe { inode, .. } => {
             tracer.emit(EventPayload::PipeData(eio::PipeData {
@@ -66,6 +70,7 @@ pub fn handle_read(
                 size,
                 dest_pids: vec![],
             }));
+            Ok(false)
         }
         FdTarget::Pty { peer_path, .. } => {
             tracer.emit(EventPayload::PtyData(eio::PtyData {
@@ -75,27 +80,35 @@ pub fn handle_read(
                 size,
                 slave_path: peer_path.to_string_lossy().into_owned(),
             }));
+            Ok(false)
         }
-        FdTarget::DevNull | FdTarget::Socket { .. } | FdTarget::Unknown => {}
+        FdTarget::DevNull | FdTarget::Socket { .. } | FdTarget::Unknown => Ok(false),
     }
-
-    Ok(())
 }
 
-/// Handles write/pwrite64/writev/pwritev.
+/// Handles write/pwrite64/writev/pwritev for non-file targets.
 ///
-/// Classifies the fd target and emits the appropriate event type.
-/// Standard fds 1 and 2 emit `StdioEvent`.
+/// File writes are handled by `try_start_write_capture` which captures
+/// before/after hashes. This handles the fallthrough: stdio, pipes,
+/// PTYs. Captures content from tracee memory at the entry point
+/// (write buffers are valid at entry since the caller provides them).
 pub fn handle_write(
     tracer: &mut TracerLoop,
     pid: Pid,
     r: &UserRegs,
 ) -> Result<()> {
     let fd = regs::arg1(r) as i32;
+    let buf_addr = regs::arg2(r);
     let size = regs::arg3(r);
     let pid_u32 = pid.as_raw() as u32;
 
     let target = resolve_fd_target(tracer, pid_u32, fd);
+
+    // Capture write buffer content from tracee memory. For writes,
+    // the buffer is valid at entry (caller provides it).
+    let content_hash = super::super::content_capture::try_capture_flat(
+        &tracer.cas, pid, buf_addr, size,
+    );
 
     // Only classify fd 1/2 as Stdio when the underlying target is a
     // pipe or PTY. When stdout/stderr is redirected to a file, emit
@@ -111,7 +124,7 @@ pub fn handle_write(
         tracer.emit(EventPayload::Stdio(eio::Stdio {
             pid: pid_u32,
             subtype,
-            content_hash: None,
+            content_hash,
             size,
             pipe_inode: match &target {
                 FdTarget::Pipe { inode, .. } => Some(*inode),
@@ -142,7 +155,7 @@ pub fn handle_write(
                 pid: pid_u32,
                 inode,
                 direction: eio::PipeDirection::Write,
-                content_hash: None,
+                content_hash,
                 size,
                 dest_pids: vec![],
             }));
@@ -151,7 +164,7 @@ pub fn handle_write(
             tracer.emit(EventPayload::PtyData(eio::PtyData {
                 pid: pid_u32,
                 subtype: eio::PtySubtype::SlaveWrite,
-                content_hash: None,
+                content_hash,
                 size,
                 slave_path: peer_path.to_string_lossy().into_owned(),
             }));

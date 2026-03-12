@@ -10,6 +10,7 @@ mod signals;
 mod startup;
 
 use std::fs;
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -18,6 +19,8 @@ use clap::Parser;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
+use argus::api;
+use argus::api::state::new_shared_state;
 use argus::cas::LocalCas;
 use argus::config::SupervisorConfig;
 use argus::events::{Event, EventPayload, SequenceGenerator};
@@ -101,11 +104,51 @@ fn main() -> Result<()> {
 
     emit_agent_start(&event_tx, &config, &seq_gen);
 
-    let (child_pid, sync_pipe) = startup::spawn_agent(
+    // Build lock-free bridge for API server + tracer.
+    let shared = new_shared_state(config.agent_id.clone());
+    shared.store_rules(config.build_ruleset());
+    let rules_handle = shared.rules_handle();
+
+    // Spawn the API server on a background tokio runtime.
+    let listen_addr = config.listen_addr;
+    let api_shared = shared.clone();
+    let api_thread = std::thread::Builder::new()
+        .name("api-server".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime for API server");
+            rt.block_on(async {
+                if let Err(e) = api::serve(api_shared, listen_addr).await {
+                    event!(
+                        name: "supervisor.api.error",
+                        Level::ERROR,
+                        error.message = %e,
+                        "API server failed: {{error.message}}",
+                    );
+                }
+            });
+        })
+        .context("failed to spawn API server thread")?;
+
+    event!(
+        name: "supervisor.api.started",
+        Level::INFO,
+        listen.addr = %listen_addr,
+        "API server listening on {{listen.addr}}",
+    );
+
+    let spawn = startup::spawn_agent(
         &config.agent_command,
         &agent_env,
         &config.workspace_dir,
     )?;
+
+    // Drain agent stdout/stderr to supervisor's stderr so stdout
+    // stays clean JSONL. Ptrace already captures stdio content.
+    let stdout_drain = spawn_drain_thread("stdout", spawn.stdout_r);
+    let stderr_drain = spawn_drain_thread("stderr", spawn.stderr_r);
 
     signals::install_handler();
 
@@ -115,8 +158,10 @@ fn main() -> Result<()> {
         seq_gen,
         cas,
     )
-    .with_workspace(config.workspace_dir.clone());
-    tracer.run(child_pid, sync_pipe)?;
+    .with_workspace(config.workspace_dir.clone())
+    .with_rules(rules_handle)
+    .with_shared_state(shared);
+    tracer.run(spawn.child_pid, spawn.sync_pipe_w)?;
 
     event!(
         name: "supervisor.shutdown",
@@ -131,8 +176,40 @@ fn main() -> Result<()> {
     // Drop the sender so the writer thread sees channel close.
     drop(tracer);
     writer_handle.join().expect("event writer thread panicked");
+    let _ = stdout_drain.join();
+    let _ = stderr_drain.join();
+
+    // API server thread exits when the process exits; don't block on
+    // it since it runs until cancelled.
+    drop(api_thread);
 
     Ok(())
+}
+
+/// Forwards data from an agent pipe to supervisor stderr.
+///
+/// Agent stdout/stderr are piped so they don't mix with JSONL on
+/// stdout. This thread just drains the pipe to stderr.
+fn spawn_drain_thread(
+    name: &str,
+    pipe_fd: OwnedFd,
+) -> std::thread::JoinHandle<()> {
+    let label = name.to_string();
+    std::thread::Builder::new()
+        .name(format!("drain-{name}"))
+        .spawn(move || {
+            let mut pipe = std::fs::File::from(pipe_fd);
+            if let Err(e) = std::io::copy(&mut pipe, &mut std::io::stderr()) {
+                event!(
+                    name: "supervisor.drain.error",
+                    Level::WARN,
+                    stream = %label,
+                    error.message = %e,
+                    "drain thread for {{stream}} failed: {{error.message}}",
+                );
+            }
+        })
+        .expect("failed to spawn drain thread")
 }
 
 /// Initializes the tracing subscriber with JSON output to stderr.

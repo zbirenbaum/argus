@@ -2,8 +2,8 @@
 //! Axum route handlers for the supervisor REST API.
 //!
 //! Each handler takes shared state via axum's `State` extractor and
-//! returns JSON responses. Handlers are intentionally kept thin,
-//! delegating business logic to the state module.
+//! returns JSON responses. All state access is lock-free through the
+//! `Bridge` struct.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -27,12 +27,11 @@ use crate::events::control;
 pub async fn pause_handler(
     State(state): State<SharedState>,
 ) -> Result<Json<PauseResponse>, ApiError> {
-    let mut guard = state.lock().expect("state lock poisoned");
-    if !guard.set_paused(true) {
+    if !state.set_paused(true) {
         return Err(ApiError::AlreadyInState { state: "paused" });
     }
 
-    guard.emit(EventPayload::AgentPause(control::AgentPause {
+    state.emit(EventPayload::AgentPause(control::AgentPause {
         reason: "api_request".into(),
         stopped_pids: Vec::new(),
     }));
@@ -51,12 +50,11 @@ pub async fn pause_handler(
 pub async fn resume_handler(
     State(state): State<SharedState>,
 ) -> Result<Json<ResumeResponse>, ApiError> {
-    let mut guard = state.lock().expect("state lock poisoned");
-    if !guard.set_paused(false) {
+    if !state.set_paused(false) {
         return Err(ApiError::AlreadyInState { state: "running" });
     }
 
-    guard.emit(EventPayload::AgentResume(control::AgentResume {
+    state.emit(EventPayload::AgentResume(control::AgentResume {
         resumed_pids: Vec::new(),
     }));
 
@@ -68,14 +66,13 @@ pub async fn resume_handler(
 
 /// `GET /agent/status` — current supervisor status snapshot.
 pub async fn status_handler(State(state): State<SharedState>) -> Json<StatusResponse> {
-    let guard = state.lock().expect("state lock poisoned");
-    let status = if guard.is_paused() { "paused" } else { "running" };
+    let status = if state.is_paused() { "paused" } else { "running" };
 
     Json(StatusResponse {
         status: status.into(),
-        agent_id: guard.agent_id().to_owned(),
-        uptime_seconds: guard.uptime_seconds(),
-        event_count: guard.event_seq(),
+        agent_id: state.agent_id().to_owned(),
+        uptime_seconds: state.uptime_seconds(),
+        event_count: state.event_seq(),
         processes: Vec::new(),
     })
 }
@@ -84,18 +81,17 @@ pub async fn status_handler(State(state): State<SharedState>) -> Json<StatusResp
 pub async fn pending_approvals_handler(
     State(state): State<SharedState>,
 ) -> Json<PendingApprovalsResponse> {
-    let guard = state.lock().expect("state lock poisoned");
-    let pending = guard
+    let pending = state
         .pending_actions()
-        .iter()
+        .into_iter()
         .map(|e| PendingAction {
-            action_id: e.action_id.clone(),
+            action_id: e.action_id,
             pid: e.pid,
-            process: e.process.clone(),
-            syscall: e.syscall.clone(),
-            path: e.path.clone(),
-            timestamp: e.timestamp.clone(),
-            rule_matched: e.rule_matched.clone(),
+            process: e.process,
+            syscall: e.syscall,
+            path: e.path,
+            timestamp: e.timestamp,
+            rule_matched: e.rule_matched,
         })
         .collect();
 
@@ -117,8 +113,7 @@ pub async fn approve_handler(
         },
     )?;
 
-    let guard = state.lock().expect("state lock poisoned");
-    guard.emit(EventPayload::ApprovalGranted(control::ApprovalGranted {
+    state.emit(EventPayload::ApprovalGranted(control::ApprovalGranted {
         pid: entry.pid,
         rule_name: entry.rule_matched.clone(),
         approver: "api".into(),
@@ -146,8 +141,7 @@ pub async fn deny_handler(
         },
     )?;
 
-    let guard = state.lock().expect("state lock poisoned");
-    guard.emit(EventPayload::ApprovalDenied(control::ApprovalDenied {
+    state.emit(EventPayload::ApprovalDenied(control::ApprovalDenied {
         pid: entry.pid,
         rule_name: entry.rule_matched.clone(),
         approver: "api".into(),
@@ -163,18 +157,16 @@ pub async fn deny_handler(
 
 /// `GET /health` — basic liveness check.
 pub async fn health_handler(State(state): State<SharedState>) -> Json<HealthResponse> {
-    let guard = state.lock().expect("state lock poisoned");
     Json(HealthResponse {
         status: "ok".into(),
-        agent_id: guard.agent_id().to_owned(),
-        event_count: guard.event_seq(),
+        agent_id: state.agent_id().to_owned(),
+        event_count: state.event_seq(),
     })
 }
 
 /// `GET /rules` — current active rule set.
 pub async fn get_rules_handler(State(state): State<SharedState>) -> Json<RuleSet> {
-    let guard = state.lock().expect("state lock poisoned");
-    let rules = guard.load_rules();
+    let rules = state.load_rules();
     Json((**rules).clone())
 }
 
@@ -190,11 +182,11 @@ pub async fn set_rules_handler(
     new_rules.compile_patterns();
     let count = new_rules.rule_count();
 
-    let guard = state.lock().expect("state lock poisoned");
-    guard.store_rules(new_rules);
-    guard.emit(EventPayload::RulesUpdated(control::RulesUpdated {
-        block_count: guard.load_rules().block.len(),
-        pause_before_count: guard.load_rules().pause_before.len(),
+    state.store_rules(new_rules);
+    let loaded = state.load_rules();
+    state.emit(EventPayload::RulesUpdated(control::RulesUpdated {
+        block_count: loaded.block.len(),
+        pause_before_count: loaded.pause_before.len(),
         source: "api".into(),
     }));
 
@@ -216,8 +208,7 @@ pub async fn delete_rule_handler(
     State(state): State<SharedState>,
     Path(index): Path<usize>,
 ) -> Result<Json<RulesAppliedResponse>, ApiError> {
-    let guard = state.lock().expect("state lock poisoned");
-    let current = guard.load_rules();
+    let current = state.load_rules();
     let total = current.rule_count();
 
     if index >= total {
@@ -233,10 +224,11 @@ pub async fn delete_rule_handler(
     }
 
     let count = new_rules.rule_count();
-    guard.store_rules(new_rules);
-    guard.emit(EventPayload::RulesUpdated(control::RulesUpdated {
-        block_count: guard.load_rules().block.len(),
-        pause_before_count: guard.load_rules().pause_before.len(),
+    state.store_rules(new_rules);
+    let loaded = state.load_rules();
+    state.emit(EventPayload::RulesUpdated(control::RulesUpdated {
+        block_count: loaded.block.len(),
+        pause_before_count: loaded.pause_before.len(),
         source: "api".into(),
     }));
 
@@ -274,8 +266,7 @@ pub fn submit_pending_approval(
         decision_tx: Some(tx),
     };
 
-    let mut guard = state.lock().expect("state lock poisoned");
-    guard.insert_pending(entry);
+    state.insert_pending(entry);
 
     (action_id, rx)
 }

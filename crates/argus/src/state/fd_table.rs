@@ -67,6 +67,57 @@ impl FdTable {
         Self::default()
     }
 
+    /// Populates an fd table from `/proc/{pid}/fd/`.
+    ///
+    /// Best-effort: unreadable symlinks are silently skipped.
+    pub fn from_proc(pid: u32) -> Self {
+        let mut table = Self::new();
+        let dir = format!("/proc/{pid}/fd");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => return table,
+        };
+        for entry in entries.flatten() {
+            let fd: RawFd = match entry.file_name().to_string_lossy().parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            let target = match std::fs::read_link(entry.path()) {
+                Ok(p) => Self::classify_link(&p),
+                Err(_) => continue,
+            };
+            table.insert(fd, target);
+        }
+        table
+    }
+
+    /// Classifies a `/proc/pid/fd/N` symlink target.
+    fn classify_link(path: &std::path::Path) -> FdTarget {
+        let s = path.to_string_lossy();
+        if s.starts_with("pipe:[") {
+            let inode = s
+                .trim_start_matches("pipe:[")
+                .trim_end_matches(']')
+                .parse::<u64>()
+                .unwrap_or(0);
+            FdTarget::Pipe {
+                inode,
+                direction: PipeEnd::Write,
+            }
+        } else if s == "/dev/null" {
+            FdTarget::DevNull
+        } else if s.starts_with("socket:[") {
+            FdTarget::Socket {
+                domain: 0,
+                addr: None,
+            }
+        } else {
+            FdTarget::File {
+                path: path.to_path_buf(),
+            }
+        }
+    }
+
     /// Inserts or replaces a file descriptor mapping.
     pub fn insert(&mut self, fd: RawFd, target: FdTarget) {
         self.fds.insert(fd, target);

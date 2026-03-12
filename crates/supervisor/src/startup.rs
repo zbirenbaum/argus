@@ -13,6 +13,16 @@ use anyhow::{Context, Result, bail};
 use nix::unistd::{ForkResult, Pid, execvpe, pipe, read};
 use tracing::{Level, event};
 
+/// Handles returned from `spawn_agent` for stdio forwarding.
+pub struct SpawnResult {
+    pub child_pid: Pid,
+    pub sync_pipe_w: RawFd,
+    /// Read end of the pipe connected to the child's stdout.
+    pub stdout_r: OwnedFd,
+    /// Read end of the pipe connected to the child's stderr.
+    pub stderr_r: OwnedFd,
+}
+
 /// Subdirectories under `data_dir` required at startup.
 const DATA_SUBDIRS: &[&str] = &["cas", "checkpoints", "events", "indexes"];
 
@@ -51,7 +61,7 @@ pub fn spawn_agent(
     command: &[String],
     env_vars: &HashMap<String, String>,
     working_dir: &Path,
-) -> Result<(Pid, RawFd)> {
+) -> Result<SpawnResult> {
     if command.is_empty() {
         bail!("agent command must not be empty");
     }
@@ -73,12 +83,29 @@ pub fn spawn_agent(
     // Sync pipe: child blocks on read until parent completes PTRACE_SEIZE.
     let (pipe_r, pipe_w) = pipe().context("pipe() for sync failed")?;
 
+    // Pipes for capturing the child's stdout and stderr.
+    let (stdout_r, stdout_w) = pipe().context("pipe() for stdout failed")?;
+    let (stderr_r, stderr_w) = pipe().context("pipe() for stderr failed")?;
+
     // SAFETY: fork() is called once; child blocks on pipe then execs,
     // parent returns immediately. No shared mutable state between
     // fork and exec.
     match unsafe { nix::unistd::fork() }.context("fork() failed")? {
         ForkResult::Child => {
             drop(pipe_w);
+            drop(stdout_r);
+            drop(stderr_r);
+
+            // Redirect child stdout/stderr to pipes before exec.
+            // SAFETY: dup2 is async-signal-safe; called between
+            // fork and exec in the child process.
+            unsafe {
+                libc::dup2(stdout_w.as_raw_fd(), libc::STDOUT_FILENO);
+                libc::dup2(stderr_w.as_raw_fd(), libc::STDERR_FILENO);
+            }
+            drop(stdout_w);
+            drop(stderr_w);
+
             child_setup(&c_program, &c_argv, &c_env, working_dir, pipe_r);
         }
         ForkResult::Parent { child } => {
@@ -88,6 +115,9 @@ pub fn spawn_agent(
             // Leak ownership so the fd stays open for the tracer.
             std::mem::forget(pipe_w);
             drop(pipe_r);
+            // Close write ends — only the child writes to these.
+            drop(stdout_w);
+            drop(stderr_w);
 
             event!(
                 name: "supervisor.agent.spawned",
@@ -96,7 +126,12 @@ pub fn spawn_agent(
                 "spawned agent process with pid {{agent.pid}}",
             );
 
-            Ok((child, raw_w))
+            Ok(SpawnResult {
+                child_pid: child,
+                sync_pipe_w: raw_w,
+                stdout_r,
+                stderr_r,
+            })
         }
     }
 }
@@ -114,7 +149,7 @@ fn child_setup(
     if std::env::set_current_dir(working_dir).is_err() {
         // SAFETY: _exit is async-signal-safe and avoids running
         // destructors in the forked child.
-        unsafe { nix::libc::_exit(71) };
+        unsafe { libc::_exit(71) };
     }
 
     // Block until parent completes PTRACE_SEIZE on us.
@@ -137,7 +172,7 @@ fn child_setup(
     let argv_refs: Vec<&CString> = argv.iter().collect();
     let envp_refs: Vec<&CString> = envp.iter().collect();
     let _err = execvpe(program, &argv_refs, &envp_refs);
-    unsafe { nix::libc::_exit(73) }
+    unsafe { libc::_exit(73) }
 }
 
 /// Converts a string to a `CString`, adding context on failure.

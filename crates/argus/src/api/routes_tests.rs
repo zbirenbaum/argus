@@ -1,6 +1,6 @@
 use super::*;
 use crate::api::build_router;
-use crate::api::state::{new_shared_state, new_shared_state_with_events};
+use crate::api::state::new_shared_state;
 use crate::events::EventPayload;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -21,10 +21,10 @@ fn test_router_with_state() -> (Router, SharedState) {
 fn test_router_with_events() -> (
     Router,
     SharedState,
-    tokio::sync::mpsc::UnboundedReceiver<crate::events::Event>,
+    tokio::sync::broadcast::Receiver<crate::events::Event>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let state = new_shared_state_with_events("test-agent".into(), tx);
+    let state = new_shared_state("test-agent".into());
+    let rx = state.subscribe_events();
     let router = build_router(state.clone());
     (router, state, rx)
 }
