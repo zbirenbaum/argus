@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use super::*;
 use crate::cas::ContentHash;
-use crate::storage::s3::ObjectStore;
+use crate::storage::s3::{ObjectStore, S3Client};
 use crate::storage::upload_job::UploadJob;
 
 /// Mock object store that can be configured to fail N times.

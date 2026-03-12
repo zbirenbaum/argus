@@ -17,7 +17,6 @@ use tracing::event;
 use tracing::Level;
 
 use crate::events::{Event, EventPayload, SequenceGenerator};
-use crate::events::process as ep;
 use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
 use crate::tracer::{handlers, memory, process_events};
 
