@@ -275,8 +275,9 @@ fn query_events_with_until() {
         type_idx.insert(e.payload.event_type_tag(), e.seq).unwrap();
     }
 
-    let engine =
-        QueryEngine::new(&PathIndex::new(), &PidIndex::new(), &type_idx);
+    let path_idx = PathIndex::new();
+    let pid_idx = PidIndex::new();
+    let engine = QueryEngine::new(&path_idx, &pid_idx, &type_idx);
 
     let results = engine.query_events(
         &QueryFilter {
