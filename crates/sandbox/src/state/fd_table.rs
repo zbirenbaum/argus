@@ -4,14 +4,14 @@
 //! targets (files, pipes, sockets, PTYs, etc.). The table supports fork
 //! (clone all entries) and exec (drop `FD_CLOEXEC` entries).
 
-// Rust guideline compliant 2026-02-21
-
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use super::fd_serde;
 
 /// Direction of a pipe endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -40,8 +40,8 @@ pub enum FdTarget {
     Socket {
         domain: i32,
         #[serde(
-            serialize_with = "serialize_socket_addr",
-            deserialize_with = "deserialize_socket_addr"
+            serialize_with = "fd_serde::serialize_socket_addr",
+            deserialize_with = "fd_serde::deserialize_socket_addr"
         )]
         addr: Option<SocketAddr>,
     },
@@ -51,29 +51,6 @@ pub enum FdTarget {
     },
     DevNull,
     Unknown,
-}
-
-fn serialize_socket_addr<S: serde::Serializer>(
-    addr: &Option<SocketAddr>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    match addr {
-        Some(a) => s.serialize_some(&a.to_string()),
-        None => s.serialize_none(),
-    }
-}
-
-fn deserialize_socket_addr<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<SocketAddr>, D::Error> {
-    let opt: Option<String> = Option::deserialize(d)?;
-    match opt {
-        Some(s) => s
-            .parse()
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        None => Ok(None),
-    }
 }
 
 /// Per-process file descriptor table.

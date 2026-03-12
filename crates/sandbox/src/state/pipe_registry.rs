@@ -3,8 +3,6 @@
 //! Tracks readers and writers for each pipe inode so the supervisor knows when
 //! a pipe is fully closed and can attribute I/O to specific processes.
 
-// Rust guideline compliant 2026-02-21
-
 use std::collections::HashMap;
 use std::os::fd::RawFd;
 
@@ -90,7 +88,7 @@ impl PipeRegistry {
     }
 
     /// Registers a duplicated pipe fd.
-    pub fn on_dup(&mut self, pid: u32, old_fd: RawFd, new_fd: RawFd, fd_table: &FdTable) {
+    pub fn on_dup(&mut self, pid: u32, _old_fd: RawFd, new_fd: RawFd, fd_table: &FdTable) {
         let Some(target) = fd_table.get(new_fd) else {
             return;
         };
@@ -101,7 +99,6 @@ impl PipeRegistry {
             return;
         };
         let endpoint = (pid, new_fd);
-        let _old_fd = old_fd;
         match direction {
             PipeEnd::Read => {
                 if !info.readers.contains(&endpoint) {

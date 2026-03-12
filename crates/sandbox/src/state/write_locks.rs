@@ -4,8 +4,6 @@
 //! supervisor can capture consistent content snapshots. Phase 1 stub: provides
 //! the locking mechanism without hashing integration.
 
-// Rust guideline compliant 2026-02-21
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -37,6 +35,19 @@ impl WriteLocks {
             map.entry(path.to_path_buf())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    /// Evicts the lock entry for a path.
+    ///
+    /// Callers (the tracer loop) are responsible for calling this when files
+    /// are unlinked or renamed away, so stale entries do not accumulate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal registry mutex is poisoned.
+    pub fn remove(&self, path: &Path) {
+        let mut map = self.locks.lock().expect("write lock registry poisoned");
+        map.remove(path);
     }
 
     /// Returns the number of tracked path locks.

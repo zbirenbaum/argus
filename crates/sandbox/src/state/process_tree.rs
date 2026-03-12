@@ -3,8 +3,6 @@
 //! Maintains parent-child relationships, per-process metadata (binary, argv,
 //! cwd), and liveness state. Updated on fork, program replacement, and exit.
 
-// Rust guideline compliant 2026-02-21
-
 use std::collections::HashMap;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -21,6 +19,7 @@ pub struct ProcessState {
     pub binary: PathBuf,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
+    // Fd tables are rebuilt from /proc on checkpoint restore, not serialized
     #[serde(skip)]
     pub fds: FdTable,
     pub alive: bool,
@@ -80,10 +79,13 @@ impl ProcessTree {
     }
 
     /// Marks a process as no longer alive.
-    pub fn mark_exited(&mut self, pid: u32) {
-        if let Some(proc_state) = self.processes.get_mut(&pid) {
-            proc_state.alive = false;
-        }
+    ///
+    /// Returns the exited process's fd table so callers can clean up
+    /// pipe and PTY registries.
+    pub fn mark_exited(&mut self, pid: u32) -> Option<FdTable> {
+        let proc_state = self.processes.get_mut(&pid)?;
+        proc_state.alive = false;
+        Some(std::mem::take(&mut proc_state.fds))
     }
 
     /// Returns process state by PID.
@@ -213,9 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn mark_exited() {
+    fn mark_exited_returns_fd_table() {
         let mut tree = make_tree_with_parent();
-        tree.mark_exited(1);
+        let fds = tree.mark_exited(1);
+        assert!(fds.is_some());
 
         let proc_state = tree.get_process(1).unwrap();
         assert!(!proc_state.alive);
@@ -267,7 +270,7 @@ mod tests {
             PathBuf::from("/"),
             FdTable::new(),
         );
-        tree.mark_exited(2);
+        let _ = tree.mark_exited(2);
 
         let alive = tree.alive_pids();
         assert_eq!(alive, vec![1]);
@@ -282,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn mark_exited_nonexistent_is_noop() {
+    fn mark_exited_nonexistent_returns_none() {
         let mut tree = ProcessTree::new();
-        tree.mark_exited(99);
+        assert!(tree.mark_exited(99).is_none());
         assert!(tree.is_empty());
     }
 }

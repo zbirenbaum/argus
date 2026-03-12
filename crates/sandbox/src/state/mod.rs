@@ -4,8 +4,7 @@
 //! tree, and per-path write locks. Updated synchronously from the ptrace
 //! loop on every intercepted syscall.
 
-// Rust guideline compliant 2026-02-21
-
+mod fd_serde;
 pub mod fd_table;
 pub mod pipe_registry;
 pub mod process_tree;
