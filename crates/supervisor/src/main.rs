@@ -12,6 +12,7 @@ mod startup;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -19,7 +20,7 @@ use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
 use sandbox::config::SupervisorConfig;
-use sandbox::events::{Event, EventPayload};
+use sandbox::events::{Event, EventPayload, SequenceGenerator};
 use sandbox::net;
 use sandbox::tracer::TracerLoop;
 
@@ -75,10 +76,11 @@ fn main() -> Result<()> {
     };
 
     let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let seq_gen = Arc::new(SequenceGenerator::default());
 
     let writer_handle = event_writer::spawn(event_rx);
 
-    emit_agent_start(&event_tx, &config);
+    emit_agent_start(&event_tx, &config, &seq_gen);
 
     let child_pid = startup::spawn_agent(
         &config.agent_command,
@@ -88,7 +90,11 @@ fn main() -> Result<()> {
 
     signals::install_handler();
 
-    let mut tracer = TracerLoop::new(config.agent_id.clone(), event_tx);
+    let mut tracer = TracerLoop::new(
+        config.agent_id.clone(),
+        event_tx,
+        Arc::clone(&seq_gen),
+    );
     tracer.run(child_pid)?;
 
     event!(
@@ -147,7 +153,11 @@ fn load_config(cli: &Cli) -> Result<SupervisorConfig> {
 }
 
 /// Emits the `AgentStart` control event.
-fn emit_agent_start(tx: &mpsc::Sender<Event>, config: &SupervisorConfig) {
+fn emit_agent_start(
+    tx: &mpsc::Sender<Event>,
+    config: &SupervisorConfig,
+    seq_gen: &SequenceGenerator,
+) {
     let payload = EventPayload::AgentStart(sandbox::events::control::AgentStart {
         agent_id: config.agent_id.clone(),
         config_summary: format!(
@@ -159,8 +169,7 @@ fn emit_agent_start(tx: &mpsc::Sender<Event>, config: &SupervisorConfig) {
         pod: std::env::var("POD_NAME").ok(),
     });
 
-    let seq = sandbox::events::SequenceGenerator::default();
-    let evt = Event::new(&seq, config.agent_id.clone(), payload);
+    let evt = Event::new(seq_gen, config.agent_id.clone(), payload);
 
     if let Err(e) = tx.send(evt) {
         event!(
@@ -250,12 +259,13 @@ mod tests {
     #[test]
     fn emit_agent_start_sends_event() {
         let (tx, rx) = mpsc::channel();
+        let seq_gen = SequenceGenerator::default();
         let config = SupervisorConfig {
             agent_id: "start-test".into(),
             agent_command: vec!["echo".into()],
             ..SupervisorConfig::default()
         };
-        emit_agent_start(&tx, &config);
+        emit_agent_start(&tx, &config, &seq_gen);
         let evt = rx.recv().unwrap();
         assert_eq!(evt.agent_id, "start-test");
         match &evt.payload {

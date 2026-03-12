@@ -13,7 +13,7 @@ use nix::unistd::Pid;
 use tracing::{Level, event};
 
 /// Subdirectories under `data_dir` required at startup.
-const DATA_SUBDIRS: &[&str] = &["cas", "events", "indexes"];
+const DATA_SUBDIRS: &[&str] = &["cas", "checkpoints", "events", "indexes"];
 
 /// Creates the required data directory tree.
 ///
@@ -165,6 +165,17 @@ fn wait_for_child_stop(pid: Pid) -> Result<()> {
         return Err(std::io::Error::last_os_error())
             .context("waitpid for child SIGSTOP failed");
     }
+
+    // SAFETY: WIFSTOPPED is a pure macro over the status bits.
+    let stopped = unsafe { libc::WIFSTOPPED(status) };
+    if !stopped {
+        bail!(
+            "child {} did not stop as expected (wait status=0x{:x})",
+            pid,
+            status,
+        );
+    }
+
     Ok(())
 }
 

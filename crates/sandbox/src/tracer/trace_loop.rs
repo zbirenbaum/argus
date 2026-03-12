@@ -6,6 +6,7 @@
 //! events over a channel for downstream consumers.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result};
@@ -41,21 +42,25 @@ pub struct TracerLoop {
     pub pty_registry: PtyRegistry,
     pub write_locks: WriteLocks,
     event_tx: Sender<Event>,
-    seq_gen: SequenceGenerator,
+    seq_gen: Arc<SequenceGenerator>,
     agent_id: String,
     pub alive_count: u32,
 }
 
 impl TracerLoop {
-    /// Creates a new tracer loop.
-    pub fn new(agent_id: String, event_tx: Sender<Event>) -> Self {
+    /// Creates a new tracer loop with a shared sequence generator.
+    pub fn new(
+        agent_id: String,
+        event_tx: Sender<Event>,
+        seq_gen: Arc<SequenceGenerator>,
+    ) -> Self {
         Self {
             process_tree: ProcessTree::new(),
             pipe_registry: PipeRegistry::new(),
             pty_registry: PtyRegistry::new(),
             write_locks: WriteLocks::new(),
             event_tx,
-            seq_gen: SequenceGenerator::default(),
+            seq_gen,
             agent_id,
             alive_count: 0,
         }
@@ -225,7 +230,8 @@ mod tests {
     #[test]
     fn tracer_loop_new_initializes_empty_state() {
         let (tx, _rx) = mpsc::channel();
-        let tracer = TracerLoop::new("test-agent".into(), tx);
+        let seq = Arc::new(SequenceGenerator::default());
+        let tracer = TracerLoop::new("test-agent".into(), tx, seq);
         assert!(tracer.process_tree.is_empty());
         assert!(tracer.pipe_registry.is_empty());
         assert!(tracer.pty_registry.is_empty());
@@ -236,7 +242,8 @@ mod tests {
     #[test]
     fn emit_sends_event_with_correct_agent_id() {
         let (tx, rx) = mpsc::channel();
-        let tracer = TracerLoop::new("agent-42".into(), tx);
+        let seq = Arc::new(SequenceGenerator::default());
+        let tracer = TracerLoop::new("agent-42".into(), tx, seq);
         tracer.emit(EventPayload::Fork(crate::events::process::Fork {
             parent_pid: 1,
             child_pid: 2,
@@ -249,7 +256,8 @@ mod tests {
     #[test]
     fn emit_increments_sequence() {
         let (tx, rx) = mpsc::channel();
-        let tracer = TracerLoop::new("a".into(), tx);
+        let seq = Arc::new(SequenceGenerator::default());
+        let tracer = TracerLoop::new("a".into(), tx, seq);
         tracer.emit(EventPayload::Exit(crate::events::process::Exit {
             pid: 1,
             exit_code: 0,

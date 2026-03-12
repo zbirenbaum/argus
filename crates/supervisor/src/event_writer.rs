@@ -56,8 +56,14 @@ fn write_loop(rx: Receiver<Event>) {
         }
     }
 
-    // Flush remaining buffered output before the thread exits.
-    let _ = out.flush();
+    if let Err(e) = out.flush() {
+        event!(
+            name: "event_writer.flush_error",
+            Level::WARN,
+            error.message = %e,
+            "failed to flush event writer: {{error.message}}",
+        );
+    }
 
     event!(
         name: "event_writer.done",

@@ -1,6 +1,6 @@
 # P1: Supervisor Binary (Startup Sequence)
 
-**Status**: not started
+**Status**: in progress
 
 **Spec reference**: `docs/spec/01-supervisor.md` (startup sequence)
 

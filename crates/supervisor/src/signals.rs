@@ -13,6 +13,10 @@ use tracing::{Level, event};
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` if a shutdown signal has been received.
+///
+/// Currently unused: the tracer loop (in the sandbox crate) will poll
+/// this once it gains graceful shutdown support.
+#[expect(dead_code, reason = "will be polled by the tracer loop once graceful shutdown is implemented")]
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }
@@ -25,8 +29,22 @@ pub fn install_handler() {
     // SAFETY: the handler function only performs an atomic store,
     // which is async-signal-safe. We register for SIGTERM and SIGINT.
     unsafe {
-        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
+        let handler = signal_handler as *const () as libc::sighandler_t;
+
+        if libc::signal(libc::SIGTERM, handler) == libc::SIG_ERR {
+            event!(
+                name: "supervisor.signals.sigterm_error",
+                Level::WARN,
+                "failed to install SIGTERM handler",
+            );
+        }
+        if libc::signal(libc::SIGINT, handler) == libc::SIG_ERR {
+            event!(
+                name: "supervisor.signals.sigint_error",
+                Level::WARN,
+                "failed to install SIGINT handler",
+            );
+        }
     }
 
     event!(
