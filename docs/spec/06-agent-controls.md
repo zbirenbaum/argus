@@ -114,3 +114,55 @@ ws://127.0.0.1:9090/ws/approvals
   Server→Client: {"action_id":"a1b2","pid":42,"syscall":"unlink","path":"/workspace/important.txt"}
   Client→Server: {"action_id":"a1b2","decision":"approve"}
 ```
+
+## Approver Interface
+
+The approval mechanism is pluggable via the `Approver` trait. When a pause-before-action rule matches, the supervisor fans out to all configured approvers and combines their verdicts per the configured `ApprovalPolicy`.
+
+### Trait
+
+```rust
+pub trait Approver: Send + Sync {
+    fn judge(&self, request: &ApprovalRequest) -> anyhow::Result<Verdict>;
+    fn name(&self) -> &str;
+}
+```
+
+Sync by design — the ptrace loop holds a tracee frozen at syscall entry. Implementations that need async I/O (webhooks, LLM APIs) block internally.
+
+### Verdict
+
+```rust
+Verdict { decision: Allow | Deny, reason: Option<String>, approver: String }
+```
+
+### Approval Policies
+
+| Policy | Behavior |
+|-|-|
+| `first_response` | First approver to return a successful verdict wins. Errors skipped. |
+| `unanimous` | All must allow. Single deny or error → deny. |
+| `any_allow` | Any single allow is sufficient. All must deny to deny. |
+
+### Planned Approver Implementations
+
+1. **API Approver** — existing REST/WebSocket endpoint (`POST /approvals/{id}/approve|deny`). Human operator via CLI or dashboard.
+2. **LLM Judge** — HTTP call to an LLM API with the `ApprovalRequest` as context. Returns allow/deny with reasoning.
+3. **Webhook** — POST to a configured URL, wait for response. Supports push notifications, Slack bots, PagerDuty, etc.
+4. **Email/SMS** — Notification with approve/deny links. Polls for response or uses callback URL.
+
+### Configuration
+
+```yaml
+approvers:
+  policy: first_response
+  backends:
+    - type: api
+    - type: llm
+      endpoint: https://api.anthropic.com/v1/messages
+      model: claude-sonnet-4-20250514
+      timeout: 30s
+    - type: webhook
+      url: https://hooks.example.com/approvals
+      timeout: 60s
+```
