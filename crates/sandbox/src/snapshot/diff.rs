@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::cas::hash::ContentHash;
+use crate::cas::ContentHash;
 
 use super::tree::MerkleTree;
 
@@ -86,7 +86,7 @@ pub fn diff_trees(tree_a: &MerkleTree, tree_b: &MerkleTree) -> Vec<DiffEntry> {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::cas::hash::ContentHash;
+    use crate::cas::ContentHash;
 
     use super::*;
 

@@ -14,8 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cas::hash::ContentHash;
-use crate::cas::store::CasStore;
+use crate::cas::{CasStore, ContentHash};
 
 /// Entry in the Merkle tree representing a file or directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

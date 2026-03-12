@@ -47,7 +47,7 @@ pub fn checkpoint_s3_key(agent_id: &str, seq: u64) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::cas::hash::ContentHash;
+    use crate::cas::ContentHash;
 
     use super::*;
 
