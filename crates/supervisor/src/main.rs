@@ -77,15 +77,27 @@ fn main() -> Result<()> {
         output_file: Some(flow_output),
     };
 
-    // mitmdump is optional; log a warning if it fails to start but
-    // continue so the supervisor works without mitmproxy installed.
+    let proxy_mode = config.tls.proxy_mode;
+
+    // In off mode, skip mitmdump entirely — only SSLKEYLOGFILE captures keys.
     let upstream = config.tls.upstream_verify();
-    let mut mitmdump = match net::start_mitmdump_with_flow_capture(
-        &ca_paths,
-        config.tls.mitm_proxy_port,
-        &addon,
-        &upstream,
-    ) {
+    let mut mitmdump = if proxy_mode == argus::config::ProxyMode::Off {
+        event!(
+            name: "supervisor.mitmdump.off",
+            Level::INFO,
+            "proxy_mode=off, skipping mitmdump",
+        );
+        None
+    } else {
+        // mitmdump is optional; log a warning if it fails to start but
+        // continue so the supervisor works without mitmproxy installed.
+        match net::start_mitmdump_with_flow_capture(
+            &ca_paths,
+            config.tls.mitm_proxy_port,
+            &addon,
+            &upstream,
+            proxy_mode,
+        ) {
         Ok(handle) => Some(handle),
         Err(e) => {
             event!(
@@ -95,6 +107,7 @@ fn main() -> Result<()> {
                 "mitmdump unavailable, no TLS interception: {{error.message}}",
             );
             None
+        }
         }
     };
 
@@ -219,7 +232,8 @@ fn main() -> Result<()> {
     )
     .with_workspace(config.workspace_dir.clone())
     .with_rules(rules_handle)
-    .with_shared_state(shared);
+    .with_shared_state(shared)
+    .with_proxy(proxy_mode, config.tls.mitm_proxy_port);
     event!(Level::DEBUG, "main: entering tracer.run()");
     tracer.run(spawn.child_pid, spawn.sync_pipe_w)?;
     event!(Level::DEBUG, "main: tracer.run() returned");

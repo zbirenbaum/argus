@@ -102,9 +102,26 @@ A task is not complete until:
 
 ## Environment
 
-This project only builds on Linux (ptrace, seccomp, /proc). 
-All cargo commands must run inside the dev container.
+This project only builds on Linux (ptrace, seccomp, /proc).
 `cargo build` on macOS will fail — this is expected.
+
+**All commands MUST run inside the `argus-arm64` container.** Do NOT use `argus-x86` — it runs under Rosetta emulation and ptrace/seccomp do not work correctly (tests 2-7 will fail silently).
+
+```bash
+# Build (the ONLY working command)
+docker exec argus-arm64 cargo build --target aarch64-unknown-linux-musl -p supervisor
+
+# Unit tests
+docker exec argus-arm64 cargo test --target aarch64-unknown-linux-musl -p argus -p supervisor
+
+# Validation tests (all 13 must pass)
+docker exec argus-arm64 ./tests/validate.sh
+
+# Single validation test
+docker exec argus-arm64 ./tests/validate.sh 8
+```
+
+Never use `cargo build` without `--target aarch64-unknown-linux-musl`. The validation script expects the binary at `target/aarch64-unknown-linux-musl/debug/supervisor`.
 
 
 ## Specs
@@ -116,7 +133,7 @@ All cargo commands must run inside the dev container.
 
 ## Conventions
 
-- Target: `x86_64-unknown-linux-gnu`
+- Target: `aarch64-unknown-linux-musl` (build/test in `argus-arm64` container only)
 - Rust edition 2024
 - Errors: `anyhow` for app errors, `thiserror` for library types
 - Async: `tokio` for API + S3 uploads; ptrace loop is synchronous on a dedicated thread

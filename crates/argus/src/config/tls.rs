@@ -1,12 +1,33 @@
 //! TLS interception and MITM proxy configuration.
 //!
 //! Controls where the generated CA keypair is stored, where TLS key-log
-//! data is written, and which port the `mitmdump` child process listens on.
+//! data is written, which port the `mitmdump` child process listens on,
+//! and how traffic is routed to it.
 
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+/// How the supervisor routes agent traffic through the MITM proxy.
+///
+/// - `Env` — sets `HTTPS_PROXY`/`HTTP_PROXY` env vars on the agent.
+///   Covers most HTTP libraries but can be overridden by the agent.
+/// - `Transparent` — rewrites `connect()` sockaddr via ptrace to
+///   redirect TLS traffic through mitmdump. Works on statically
+///   linked binaries and programs that ignore proxy env vars.
+/// - `Off` — no proxy routing. `SSLKEYLOGFILE` still captures keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    /// Route via HTTPS_PROXY/HTTP_PROXY env vars (default).
+    #[default]
+    Env,
+    /// Rewrite connect() destinations at the syscall level.
+    Transparent,
+    /// Disable proxy routing entirely.
+    Off,
+}
 
 /// TLS interception settings for the MITM proxy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,6 +43,10 @@ pub struct TlsConfig {
     /// Local port for the `mitmdump` transparent proxy.
     #[serde(default = "default_mitm_proxy_port")]
     pub mitm_proxy_port: u16,
+
+    /// How agent traffic reaches the proxy.
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
 
     /// CA bundle mitmdump trusts for upstream (backend) connections.
     ///
@@ -57,6 +82,7 @@ impl Default for TlsConfig {
             ca_dir: default_ca_dir(),
             keylog_path: default_keylog_path(),
             mitm_proxy_port: default_mitm_proxy_port(),
+            proxy_mode: ProxyMode::default(),
             upstream_ca: None,
             upstream_insecure: false,
         }
@@ -114,6 +140,7 @@ mod tests {
         assert_eq!(cfg.ca_dir, PathBuf::from("/data/tls"));
         assert_eq!(cfg.keylog_path, PathBuf::from("/data/tls/keylog.txt"));
         assert_eq!(cfg.mitm_proxy_port, 8080);
+        assert_eq!(cfg.proxy_mode, ProxyMode::Env);
         assert_eq!(cfg.upstream_ca, None);
         assert!(!cfg.upstream_insecure);
     }
@@ -124,6 +151,7 @@ mod tests {
             ca_dir: PathBuf::from("/custom/ca"),
             keylog_path: PathBuf::from("/custom/keylog.txt"),
             mitm_proxy_port: 9999,
+            proxy_mode: ProxyMode::Transparent,
             upstream_ca: Some(PathBuf::from("/custom/internal-ca.pem")),
             upstream_insecure: false,
         };
@@ -132,6 +160,7 @@ mod tests {
         assert_eq!(parsed.ca_dir, cfg.ca_dir);
         assert_eq!(parsed.keylog_path, cfg.keylog_path);
         assert_eq!(parsed.mitm_proxy_port, cfg.mitm_proxy_port);
+        assert_eq!(parsed.proxy_mode, cfg.proxy_mode);
         assert_eq!(parsed.upstream_ca, cfg.upstream_ca);
         assert_eq!(parsed.upstream_insecure, cfg.upstream_insecure);
     }
@@ -142,8 +171,23 @@ mod tests {
         let cfg: TlsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.ca_dir, PathBuf::from("/my/ca"));
         assert_eq!(cfg.mitm_proxy_port, 8080);
+        assert_eq!(cfg.proxy_mode, ProxyMode::Env);
         assert_eq!(cfg.upstream_ca, None);
         assert!(!cfg.upstream_insecure);
+    }
+
+    #[test]
+    fn deserialize_proxy_mode_transparent() {
+        let yaml = "proxy_mode: transparent\n";
+        let cfg: TlsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.proxy_mode, ProxyMode::Transparent);
+    }
+
+    #[test]
+    fn deserialize_proxy_mode_off() {
+        let yaml = "proxy_mode: off\n";
+        let cfg: TlsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.proxy_mode, ProxyMode::Off);
     }
 
     #[test]

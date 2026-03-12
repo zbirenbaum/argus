@@ -15,7 +15,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tracing::{event, Level};
 
-use crate::config::UpstreamVerify;
+use crate::config::{ProxyMode, UpstreamVerify};
 use crate::net::CaPaths;
 
 /// Maximum time to wait for mitmdump to accept connections.
@@ -137,6 +137,7 @@ pub fn start_mitmdump(ca: &CaPaths, port: u16) -> Result<MitmdumpHandle> {
         port,
         &AddonConfig::default(),
         &UpstreamVerify::SystemStore,
+        ProxyMode::Env,
     )
 }
 
@@ -145,6 +146,10 @@ pub fn start_mitmdump(ca: &CaPaths, port: u16) -> Result<MitmdumpHandle> {
 /// The addon script's stdout is redirected to `addon.output_file`.
 /// Use [`MitmdumpHandle::flow_output_path`] to get the path for
 /// a [`FlowWatcher`](super::FlowWatcher).
+///
+/// When `proxy_mode` is `Transparent`, mitmdump runs in transparent
+/// mode and uses SNI from TLS ClientHello to determine upstream
+/// destinations (no `HTTPS_PROXY` env var needed on the agent).
 ///
 /// # Errors
 ///
@@ -155,8 +160,9 @@ pub fn start_mitmdump_with_flow_capture(
     port: u16,
     addon: &AddonConfig,
     upstream: &UpstreamVerify,
+    proxy_mode: ProxyMode,
 ) -> Result<MitmdumpHandle> {
-    start_mitmdump_inner("mitmdump", ca, port, addon, upstream)
+    start_mitmdump_inner("mitmdump", ca, port, addon, upstream, proxy_mode)
 }
 
 /// Spawn a mitmdump-compatible binary with optional addon.
@@ -166,12 +172,17 @@ pub fn start_mitmdump_with_flow_capture(
 /// - `CustomCa(path)` — mitmdump verifies against a specific CA bundle,
 ///   for internal services using private PKI.
 /// - `Insecure` — mitmdump skips all upstream verification. Dev/test only.
+///
+/// When `proxy_mode` is `Transparent`, passes `--mode transparent` so
+/// mitmdump reads the SNI from TLS ClientHello to determine the
+/// upstream destination instead of expecting HTTP CONNECT tunneling.
 fn start_mitmdump_inner(
     cmd: &str,
     ca: &CaPaths,
     port: u16,
     addon: &AddonConfig,
     upstream: &UpstreamVerify,
+    proxy_mode: ProxyMode,
 ) -> Result<MitmdumpHandle> {
     let ca_dir = ca
         .cert
@@ -188,6 +199,10 @@ fn start_mitmdump_inner(
         &format!("confdir={}", ca_dir.display()),
         "--quiet",
     ]);
+
+    if proxy_mode == ProxyMode::Transparent {
+        command.args(["--mode", "transparent"]);
+    }
 
     match upstream {
         UpstreamVerify::SystemStore => {}
@@ -306,6 +321,7 @@ mod tests {
             18081,
             &AddonConfig::default(),
             &UpstreamVerify::SystemStore,
+            ProxyMode::Env,
         );
 
         let msg = result.unwrap_err().to_string();

@@ -5,12 +5,12 @@
 //! falling back to `ptrace::read` for small reads when needed.
 
 use std::ffi::OsStr;
-use std::io::IoSliceMut;
+use std::io::{IoSlice, IoSliceMut};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use nix::sys::uio::{RemoteIoVec, process_vm_readv};
+use nix::sys::uio::{RemoteIoVec, process_vm_readv, process_vm_writev};
 use nix::unistd::Pid;
 
 /// Maximum path length we will read from a tracee.
@@ -66,6 +66,34 @@ pub fn read_bytes(pid: Pid, addr: u64, len: usize) -> Result<Vec<u8>> {
 
     buf.truncate(n);
     Ok(buf)
+}
+
+/// Writes bytes into tracee memory via `process_vm_writev`.
+///
+/// Used by transparent proxy mode to overwrite a `sockaddr` in the
+/// tracee's address space before the kernel processes `connect()`.
+///
+/// # Errors
+///
+/// Returns an error if the syscall fails (invalid address, dead process).
+pub fn write_bytes(pid: Pid, addr: u64, data: &[u8]) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let remote = RemoteIoVec {
+        base: addr as usize,
+        len: data.len(),
+    };
+
+    process_vm_writev(
+        pid,
+        &[IoSlice::new(data)],
+        &[remote],
+    )
+    .with_context(|| format!("process_vm_writev failed for pid {pid} at 0x{addr:x}"))?;
+
+    Ok(())
 }
 
 /// Resolves a path for `*at()` syscalls, handling `AT_FDCWD`.
@@ -141,6 +169,12 @@ mod tests {
         let result = read_bytes(Pid::from_raw(1), 0x1000, 0);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_bytes_zero_length_is_noop() {
+        let result = write_bytes(Pid::from_raw(1), 0x1000, &[]);
+        assert!(result.is_ok());
     }
 
     #[test]

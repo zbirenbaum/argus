@@ -8,10 +8,18 @@ Three things must all be true for HTTP flow capture:
 
 1. **mitmdump must be installed.** The supervisor logs a warning and continues without it. Check for `mitmdump unavailable` in stderr.
 
-2. **The agent's traffic must route through the proxy.** The supervisor sets `HTTPS_PROXY=http://127.0.0.1:8080` on the agent process, but some tools ignore it:
+2. **The agent's traffic must route through the proxy.** In `env` mode (default), the supervisor sets `HTTPS_PROXY=http://127.0.0.1:8080` on the agent process, but some tools ignore it:
    - curl respects `HTTPS_PROXY` but may skip it for hosts in `NO_PROXY` or `no_proxy`.
    - Some HTTP libraries have their own proxy settings or hardcoded bypasses.
    - If the agent overrides or clears `HTTPS_PROXY`, traffic goes direct.
+   - Statically linked binaries and Go programs may not honor proxy env vars.
+
+   If env mode isn't capturing traffic, try `proxy_mode: transparent` which rewrites `connect()` at the syscall level:
+   ```yaml
+   tls:
+     proxy_mode: transparent
+   ```
+   This works on any program that calls `connect()`, regardless of whether it honors proxy env vars. Limited to TLS ports (443, 8443).
 
 3. **mitmdump must be able to connect to the upstream server.** By default mitmdump verifies the upstream TLS cert against the system trust store. If the upstream uses a self-signed cert or private CA, mitmdump rejects it with a 502 and the addon never fires. Fix this with config:
 

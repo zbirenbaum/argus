@@ -18,7 +18,7 @@ pub use pause_rules::{
     MatchKind, PauseAction, PauseMatchKind, PauseRule, Rule, RuleDecision, RuleSet,
 };
 pub use storage::{DigestCacheConfig, LocalBufferConfig, S3Config, StorageConfig, UploadConfig};
-pub use tls::{TlsConfig, UpstreamVerify};
+pub use tls::{ProxyMode, TlsConfig, UpstreamVerify};
 
 use std::io::Read;
 use std::net::SocketAddr;

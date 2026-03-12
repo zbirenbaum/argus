@@ -2,39 +2,85 @@
 
 How argus captures HTTP traffic and TLS key material from traced agents.
 
-## Architecture
+## Proxy modes
+
+Three modes control how agent traffic reaches mitmdump:
+
+```yaml
+tls:
+  proxy_mode: env          # env (default) | transparent | off
+```
+
+| Mode | How traffic is routed | mitmdump mode | Env vars set |
+|-|-|-|-|
+| `env` | `HTTPS_PROXY`/`HTTP_PROXY` env vars | regular (HTTP CONNECT) | proxy + keylog + certs |
+| `transparent` | `connect()` sockaddr rewritten via ptrace | `--mode transparent` (SNI) | keylog + certs |
+| `off` | No routing (direct connections) | not started | keylog only |
+
+**`env`** (default) covers ~95% of agent traffic. Most HTTP libraries honor `HTTPS_PROXY`. Fails for statically linked binaries and programs that ignore proxy env vars.
+
+**`transparent`** rewrites the destination address in `connect()` at the syscall level before the kernel executes it. Works on statically linked binaries, Go programs, anything that calls `connect()`. Mitmdump reads the SNI from the TLS ClientHello to determine the upstream. Limited to TLS ports (443, 8443).
+
+**`off`** disables all proxy routing. `SSLKEYLOGFILE` still captures TLS key material for passive decryption. No HTTP flow events.
+
+## Architecture (env mode)
 
 ```
 Agent process (traced)
-  │
-  │  HTTPS_PROXY=http://127.0.0.1:8080
-  │  SSLKEYLOGFILE=/data/tls/keylog.txt
-  │  SSL_CERT_FILE=/data/tls/mitmproxy-ca-cert.pem
-  │
-  ▼
-mitmdump (port 8080)
-  │  ├─ TLS① Agent↔mitmdump (agent trusts argus CA)
-  │  ├─ TLS② mitmdump↔upstream (mitmdump verifies upstream cert)
-  │  └─ argus_addon.py writes NDJSON to flows.jsonl
-  │
-  ▼
+  |
+  |  HTTPS_PROXY=http://127.0.0.1:8080
+  |  SSLKEYLOGFILE=/data/tls/keylog.txt
+  |  SSL_CERT_FILE=/data/tls/mitmproxy-ca-cert.pem
+  |
+  v
+mitmdump (port 8080, regular mode)
+  |  - TLS1 Agent<->mitmdump (agent trusts argus CA)
+  |  - TLS2 mitmdump<->upstream (mitmdump verifies upstream cert)
+  |  - argus_addon.py writes NDJSON to flows.jsonl
+  |
+  v
 tls-watcher thread (polls every 200ms)
-  ├─ KeylogWatcher reads SSLKEYLOGFILE → TlsKeys events
-  └─ FlowWatcher reads flows.jsonl → HttpRequest/HttpResponse events
-       │
-       ▼
-  event channel (mpsc) → event writer → stdout JSONL
+  - KeylogWatcher reads SSLKEYLOGFILE -> TlsKeys events
+  - FlowWatcher reads flows.jsonl -> HttpRequest/HttpResponse events
+       |
+       v
+  event channel (mpsc) -> event writer -> stdout JSONL
 ```
+
+## Architecture (transparent mode)
+
+```
+Agent process (traced)
+  |
+  |  connect(fd, {1.2.3.4:443}) --[ptrace]--> connect(fd, {127.0.0.1:8080})
+  |  SSLKEYLOGFILE=/data/tls/keylog.txt
+  |  SSL_CERT_FILE=/data/tls/mitmproxy-ca-cert.pem
+  |
+  v
+mitmdump (port 8080, --mode transparent)
+  |  Reads SNI from TLS ClientHello to determine upstream
+  |  Same TLS1/TLS2 split as env mode
+  |
+  v
+tls-watcher thread (same as env mode)
+```
+
+The supervisor intercepts `connect()` via seccomp-ptrace. On entry:
+1. Reads the `sockaddr` from tracee memory
+2. If TCP port 443/8443 and not loopback, saves the original destination
+3. Writes `{127.0.0.1:8080}` into the tracee's `sockaddr` via `process_vm_writev`
+4. Resumes the syscall -- the kernel connects to mitmdump instead
+5. The event records the *original* destination (not the rewritten one)
 
 ## Two TLS sessions per request
 
 When the agent makes an HTTPS request through the proxy, two separate TLS sessions are established:
 
-**TLS①: Agent → mitmdump.** The agent connects to `127.0.0.1:8080` via HTTP CONNECT, then negotiates TLS inside the tunnel. The agent sees mitmdump's dynamically-generated cert (signed by the argus CA). The agent trusts this because we inject `SSL_CERT_FILE` pointing at `mitmproxy-ca-cert.pem`.
+**TLS1: Agent -> mitmdump.** In env mode, the agent connects via HTTP CONNECT, then negotiates TLS inside the tunnel. In transparent mode, the agent sends a raw TLS ClientHello directly. Either way, the agent sees mitmdump's dynamically-generated cert (signed by the argus CA). The agent trusts this because we inject `SSL_CERT_FILE` pointing at `mitmproxy-ca-cert.pem`.
 
-**TLS②: mitmdump → upstream.** mitmdump opens its own TLS connection to the real server. This is where upstream cert verification matters — mitmdump needs to trust whatever cert the upstream presents.
+**TLS2: mitmdump -> upstream.** mitmdump opens its own TLS connection to the real server. This is where upstream cert verification matters -- mitmdump needs to trust whatever cert the upstream presents.
 
-Both sessions write key material to `SSLKEYLOGFILE`. A single curl request produces ~10-15 `tls_keys` events (5 TLS 1.3 secrets per session × 2+ sessions).
+Both sessions write key material to `SSLKEYLOGFILE`. A single curl request produces ~10-15 `tls_keys` events (5 TLS 1.3 secrets per session x 2+ sessions).
 
 ## Upstream certificate verification
 
@@ -81,12 +127,14 @@ The watcher uses its own `SequenceGenerator` starting at 1,000,000 to avoid coll
 
 **Shutdown ordering:** The tls-watcher stops first (drains any remaining data), then mitmdump is killed. This ensures the final poll captures anything written between the last interval and shutdown.
 
-## CONNECT tunnel gotcha
+## CONNECT tunnel gotcha (env mode)
 
-mitmdump proxies HTTPS via HTTP CONNECT tunneling. The proxy first receives a `CONNECT host:port` request, establishes the tunnel, then the client negotiates TLS inside it. This means:
+In env mode, mitmdump proxies HTTPS via HTTP CONNECT tunneling. The proxy first receives a `CONNECT host:port` request, establishes the tunnel, then the client negotiates TLS inside it. This means:
 
 - An upstream server that calls `handle_request()` once will serve the CONNECT and exit before the actual GET arrives. Test servers must handle at least two requests.
-- The CONNECT itself does not appear in the addon output — only the decrypted HTTP flows inside the tunnel do.
+- The CONNECT itself does not appear in the addon output -- only the decrypted HTTP flows inside the tunnel do.
+
+In transparent mode, there is no CONNECT tunnel. The client sends a raw TLS ClientHello directly, so test servers only need to handle one request (the actual GET).
 
 ## Event examples
 

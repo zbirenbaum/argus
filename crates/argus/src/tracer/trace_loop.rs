@@ -23,7 +23,7 @@ use tracing::Level;
 
 use crate::api::state::SharedState;
 use crate::cas::{Cas, LocalCas};
-use crate::config::RuleSet;
+use crate::config::{ProxyMode, RuleSet};
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::file as ef;
 use crate::snapshot::MerkleTree;
@@ -109,6 +109,14 @@ pub struct TracerLoop {
     /// Tracees frozen by the pause mechanism. Each entry stores the
     /// pid and optional signal to forward when resumed.
     frozen: Vec<(Pid, Option<Signal>)>,
+    /// How agent traffic reaches the proxy (env vars vs connect rewrite).
+    pub proxy_mode: ProxyMode,
+    /// Port the MITM proxy listens on, used by transparent mode to
+    /// rewrite connect() destinations.
+    pub proxy_port: u16,
+    /// Original destinations saved before connect() rewrite so events
+    /// record where the tracee intended to connect. Keyed by (pid, fd).
+    pub connect_originals: HashMap<(u32, i32), (String, u16)>,
 }
 
 impl TracerLoop {
@@ -138,6 +146,9 @@ impl TracerLoop {
             shared_state: None,
             alive_count: 0,
             frozen: Vec::new(),
+            proxy_mode: ProxyMode::default(),
+            proxy_port: 0,
+            connect_originals: HashMap::new(),
         }
     }
 
@@ -156,6 +167,13 @@ impl TracerLoop {
     /// Set the shared state for approval submission.
     pub fn with_shared_state(mut self, state: SharedState) -> Self {
         self.shared_state = Some(state);
+        self
+    }
+
+    /// Configure proxy routing mode and port for connect() rewriting.
+    pub fn with_proxy(mut self, mode: ProxyMode, port: u16) -> Self {
+        self.proxy_mode = mode;
+        self.proxy_port = port;
         self
     }
 
