@@ -31,13 +31,8 @@ When resuming this conversation, starting a new one, or after context compaction
 | P2: CAS | `p2-cas` | 23 pass | done | 2c4a343 |
 | P2: Digest Cache | `p2-digest-cache` | 9 pass | done | 630db19 |
 | P1: Net/TLS Env | `p1-net-env` | 9 pass | done | e22fda7 |
-| P2: S3 Upload | `p2-s3-upload` | 68 pass | done | 9dc9729 (merged a4f9d77) |
-
-## Branches Pending Merge (review/fix cycle)
-
-| Task | Branch | Tests | Review | Fixes | Merge blocked on |
-|-|-|-|-|-|-|
-| P1: Tracer Loop | `p1-tracer-loop` | 146 pass | done | fix agent running | fixes completing |
+| P2: S3 Upload | `p2-s3-upload` | 68 pass | done | 9dc9729 |
+| P1: Tracer Loop | `p1-tracer-loop` | 146 pass | done | 6d973bc |
 
 ## Implementation In Progress
 
@@ -45,27 +40,22 @@ When resuming this conversation, starting a new one, or after context compaction
 |-|-|-|-|
 | P2: TLS Content | `p2-tls-content` | agent running | net-env (merged), cas (merged) |
 | P2: Event Segments | `p2-event-segments` | agent running | events (merged), s3-upload (merged) |
-
-## Ready to Dispatch (after tracer loop merges)
-
-| Task | Branch | Depends on |
-|-|-|-|
-| P1: Supervisor Main | `p1-supervisor-main` | tracer-loop, net-env, config |
-| P2: Content Capture | `p2-content-capture` | tracer-loop, cas, digest-cache |
-| P2: Write Locking | `p2-write-locking` | tracer-loop, cas |
-| P2: Pause/Resume API | `p2-pause-resume-api` | tracer-loop, events, config |
+| P1: Supervisor Main | `p1-supervisor-main` | agent dispatching | tracer-loop (merged), net-env (merged), config (merged) |
+| P2: Content Capture | `p2-content-capture` | agent dispatching | tracer-loop (merged), cas (merged), digest-cache (merged) |
+| P2: Write Locking | `p2-write-locking` | agent dispatching | tracer-loop (merged), cas (merged) |
+| P2: Pause/Resume API | `p2-pause-resume-api` | agent dispatching | tracer-loop (merged), events (merged), config (merged) |
 
 ## Blocked (waiting on dependencies)
 
 | Task | Branch | Depends on |
 |-|-|-|
-| P3: Indexes | `p3-indexes` | events, event-segments |
-| P3: Merkle Tree | `p3-merkle-tree` | content-capture, write-locking, cas |
+| P3: Indexes | `p3-indexes` | events (merged), event-segments (in progress) |
+| P3: Merkle Tree | `p3-merkle-tree` | content-capture (dispatching), write-locking (dispatching), cas (merged) |
 | P3: Query API | `p3-query-api` | indexes, merkle-tree, pause-resume-api |
-| P3: Restore | `p3-restore` | merkle-tree, s3-upload |
-| P3: Realtime API | `p3-realtime-api` | query-api, events |
-| P4: Container Image | `p4-container-image` | supervisor-main, s3-upload |
-| P4: Cross-Agent | `p4-cross-agent` | container-image, query-api, s3-upload |
+| P3: Restore | `p3-restore` | merkle-tree, s3-upload (merged) |
+| P3: Realtime API | `p3-realtime-api` | query-api, events (merged) |
+| P4: Container Image | `p4-container-image` | supervisor-main (dispatching), s3-upload (merged) |
+| P4: Cross-Agent | `p4-cross-agent` | container-image, query-api, s3-upload (merged) |
 | P5: Polish | `p5-polish` | realtime-api, pause-resume-api |
 
 ## Running Agents Tracker
@@ -74,6 +64,9 @@ Check these before dispatching new work:
 
 | Agent | Task | Type | Status |
 |-|-|-|-|
-| a3d9966e1978f5429 | P1 Tracer Loop fixes | fix | running |
 | a5bc4ff9599348725 | P2 TLS Content | implementation | running |
 | afaf96b9a57292537 | P2 Event Segments | implementation | running |
+| (pending) | P1 Supervisor Main | implementation | dispatching now |
+| (pending) | P2 Content Capture | implementation | dispatching now |
+| (pending) | P2 Write Locking | implementation | dispatching now |
+| (pending) | P2 Pause/Resume API | implementation | dispatching now |
