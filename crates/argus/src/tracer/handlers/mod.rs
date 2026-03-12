@@ -23,7 +23,8 @@ use crate::state::FdTarget;
 use super::memory;
 use super::regs;
 use super::syscall_nr::*;
-use super::trace_loop::{CaptureKind, PendingCapture, TracerLoop, hash_file_content};
+use super::trace_loop::{TracerLoop, hash_file_content};
+use crate::tracer::pending::{CaptureKind, PendingSyscall};
 
 /// Maps a syscall number to a rule `MatchKind` for evaluation.
 ///
@@ -138,7 +139,7 @@ fn syscall_name(nr: u64) -> &'static str {
 ///
 /// Modifies orig_rax to -1 (kernel skips the syscall), then resumes
 /// with `ptrace::syscall` so the exit stop fires. The exit handler
-/// checks `pending_eperm` and overwrites rax with -EPERM.
+/// checks the pending map for `Eperm` and overwrites rax with -EPERM.
 fn cancel_syscall_with_eperm(
     tracer: &mut TracerLoop,
     pid: Pid,
@@ -147,7 +148,7 @@ fn cancel_syscall_with_eperm(
     let mut modified = *r;
     regs::cancel_syscall(&mut modified);
     regs::set_regs(pid, &modified)?;
-    tracer.pending_eperm.insert(pid.as_raw() as u32);
+    tracer.pending.insert(pid.as_raw() as u32, PendingSyscall::Eperm);
     ptrace::syscall(pid, None)?;
     Ok(())
 }
@@ -317,33 +318,49 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<bool> {
             io_ops::handle_write(tracer, pid, &r)?;
         }
 
-        // File metadata
+        // File metadata — entry/exit pattern for return-value validation.
         SYS_RENAME | SYS_RENAMEAT | SYS_RENAMEAT2 => {
-            metadata_ops::handle_rename(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_rename(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_UNLINK | SYS_UNLINKAT => {
-            metadata_ops::handle_unlink(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_unlink(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_MKDIR | SYS_MKDIRAT => {
-            metadata_ops::handle_mkdir(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_mkdir(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_RMDIR => {
-            metadata_ops::handle_rmdir(tracer, pid, &r)?;
+            if metadata_ops::handle_rmdir(tracer, pid, &r)? {
+                return Ok(true);
+            }
         }
         SYS_CHMOD | SYS_FCHMOD | SYS_FCHMODAT => {
-            metadata_ops::handle_chmod(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_chmod(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_CHOWN | SYS_FCHOWN | SYS_FCHOWNAT => {
             metadata_ops::handle_chown(tracer, pid, nr, &r)?;
         }
         SYS_TRUNCATE | SYS_FTRUNCATE => {
-            metadata_ops::handle_truncate(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_truncate(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_LINK | SYS_LINKAT => {
-            metadata_ops::handle_link(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_link(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_SYMLINK | SYS_SYMLINKAT => {
-            metadata_ops::handle_symlink(tracer, pid, nr, &r)?;
+            if metadata_ops::handle_symlink(tracer, pid, nr, &r)? {
+                return Ok(true);
+            }
         }
         SYS_READLINK | SYS_READLINKAT => {}
 
@@ -416,7 +433,7 @@ fn try_start_write_capture(
             .write_wait_queue
             .entry(path.clone())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path,
                 pid: pid_u32,
@@ -428,7 +445,7 @@ fn try_start_write_capture(
     let before_hash = hash_file_content(&tracer.cas, &path);
 
     tracer.active_writes.insert(path.clone(), pid_u32);
-    tracer.pending_captures.insert(pid_u32, PendingCapture {
+    tracer.pending.insert(pid_u32, PendingSyscall::WriteCapture {
         before_hash,
         path,
         pid: pid_u32,
@@ -479,7 +496,7 @@ fn try_start_open_trunc_capture(
             .write_wait_queue
             .entry(path.clone())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path,
                 pid: pid_u32,
@@ -496,7 +513,7 @@ fn try_start_open_trunc_capture(
     }
 
     tracer.active_writes.insert(path.clone(), pid_u32);
-    tracer.pending_captures.insert(pid_u32, PendingCapture {
+    tracer.pending.insert(pid_u32, PendingSyscall::WriteCapture {
         before_hash,
         path,
         pid: pid_u32,
@@ -612,13 +629,14 @@ mod tests {
         assert_eq!(syscall_name(9999), "unknown");
     }
 
-    // --- pending_eperm tracking ---
+    // --- pending map tracking ---
 
     #[test]
     fn pending_eperm_insert_and_remove() {
         use std::sync::mpsc;
         use crate::cas::LocalCas;
         use crate::events::SequenceGenerator;
+        use crate::tracer::pending::PendingSyscall;
 
         let (tx, _rx) = mpsc::channel();
         let seq = SequenceGenerator::default();
@@ -626,11 +644,11 @@ mod tests {
         let cas = LocalCas::new(dir.path().join("cas")).expect("LocalCas");
         let mut tracer = TracerLoop::new("test".into(), tx, seq, cas);
 
-        assert!(!tracer.pending_eperm.contains(&42));
-        tracer.pending_eperm.insert(42);
-        assert!(tracer.pending_eperm.contains(&42));
-        assert!(tracer.pending_eperm.remove(&42));
-        assert!(!tracer.pending_eperm.contains(&42));
+        assert!(!tracer.pending.contains_key(&42));
+        tracer.pending.insert(42, PendingSyscall::Eperm);
+        assert!(tracer.pending.contains_key(&42));
+        tracer.pending.remove(&42);
+        assert!(!tracer.pending.contains_key(&42));
     }
 
     // --- evaluate_rules with no rules configured ---

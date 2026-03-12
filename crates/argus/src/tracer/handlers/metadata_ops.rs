@@ -1,24 +1,32 @@
+// Rust guideline compliant 2026-02-21
 //! File metadata syscall handlers (rename, unlink, mkdir, chmod, etc.).
+//!
+//! Each handler parses syscall arguments at entry, stores them in the
+//! unified pending map, and resumes with `ptrace::syscall` for exit
+//! capture. Events are only emitted at exit if the kernel returned
+//! success (non-negative return value).
 
 use anyhow::Result;
 use nix::unistd::Pid;
 use tracing::event;
 use tracing::Level;
 
-use crate::events::EventPayload;
-use crate::events::file as ef;
 use crate::tracer::memory;
+use crate::tracer::pending::PendingSyscall;
 use crate::tracer::regs::{self, UserRegs};
 use crate::tracer::syscall_nr::*;
 use crate::tracer::trace_loop::TracerLoop;
 
-/// Handles rename/renameat/renameat2.
+/// Handles rename/renameat/renameat2 at syscall entry.
+///
+/// Parses path arguments, stores them as `PendingSyscall::Rename`,
+/// and resumes with `ptrace::syscall` for exit capture.
 pub fn handle_rename(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let (old_path, new_path) = match nr {
         SYS_RENAME => (
@@ -35,26 +43,25 @@ pub fn handle_rename(
                 new.to_string_lossy().into_owned(),
             )
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    let tree_hash = tracer.tree_rename(&old_path, &new_path);
-    tracer.emit(EventPayload::Rename(ef::Rename {
+    tracer.pending.insert(pid_u32, PendingSyscall::Rename {
         pid: pid_u32,
         old_path,
         new_path,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles unlink/unlinkat.
+/// Handles unlink/unlinkat at syscall entry.
 pub fn handle_unlink(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let path = match nr {
         SYS_UNLINK => memory::read_c_string(pid, regs::arg1(r))?,
@@ -64,26 +71,24 @@ pub fn handle_unlink(
                 .to_string_lossy()
                 .into_owned()
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    let tree_hash = tracer.tree_remove(&path);
-    tracer.emit(EventPayload::Unlink(ef::Unlink {
+    tracer.pending.insert(pid_u32, PendingSyscall::Unlink {
         pid: pid_u32,
         path,
-        content_hash: None,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles mkdir/mkdirat.
+/// Handles mkdir/mkdirat at syscall entry.
 pub fn handle_mkdir(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let path = match nr {
         SYS_MKDIR => memory::read_c_string(pid, regs::arg1(r))?,
@@ -93,43 +98,41 @@ pub fn handle_mkdir(
                 .to_string_lossy()
                 .into_owned()
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    let tree_hash = tracer.tree_root();
-    tracer.emit(EventPayload::Mkdir(ef::Mkdir {
+    tracer.pending.insert(pid_u32, PendingSyscall::Mkdir {
         pid: pid_u32,
         path,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles rmdir.
+/// Handles rmdir at syscall entry.
 pub fn handle_rmdir(
     tracer: &mut TracerLoop,
     pid: Pid,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let path = memory::read_c_string(pid, regs::arg1(r))?;
 
-    let tree_hash = tracer.tree_root();
-    tracer.emit(EventPayload::Rmdir(ef::Rmdir {
+    tracer.pending.insert(pid_u32, PendingSyscall::Rmdir {
         pid: pid_u32,
         path,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles chmod/fchmod/fchmodat.
+/// Handles chmod/fchmod/fchmodat at syscall entry.
 pub fn handle_chmod(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let (path, new_mode) = match nr {
         SYS_CHMOD => (
@@ -147,25 +150,25 @@ pub fn handle_chmod(
             let p = std::fs::read_link(&link).unwrap_or_default();
             (p.to_string_lossy().into_owned(), regs::arg2(r) as u32)
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    tracer.emit(EventPayload::Chmod(ef::Chmod {
+    tracer.pending.insert(pid_u32, PendingSyscall::Chmod {
         pid: pid_u32,
         path,
-        old_mode: 0, // Phase 1: not captured pre-call.
         new_mode,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles truncate/ftruncate.
+/// Handles truncate/ftruncate at syscall entry.
 pub fn handle_truncate(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let (path, new_size) = match nr {
         SYS_TRUNCATE => (memory::read_c_string(pid, regs::arg1(r))?, regs::arg2(r)),
@@ -175,29 +178,25 @@ pub fn handle_truncate(
             let p = std::fs::read_link(&link).unwrap_or_default();
             (p.to_string_lossy().into_owned(), regs::arg2(r))
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    let tree_hash = tracer.tree_root();
-    tracer.emit(EventPayload::Truncate(ef::Truncate {
+    tracer.pending.insert(pid_u32, PendingSyscall::Truncate {
         pid: pid_u32,
         path,
-        old_size: 0,
         new_size,
-        before_hash: None,
-        after_hash: None,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
-/// Handles link/linkat.
+/// Handles link/linkat at syscall entry.
 pub fn handle_link(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let (target, link_path) = match nr {
         SYS_LINK => (
@@ -214,30 +213,22 @@ pub fn handle_link(
                 l.to_string_lossy().into_owned(),
             )
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    // Hard link: link_path gets the same content hash as target.
-    let tree_hash = if let Some(h) = tracer.tree.get(std::path::Path::new(&target)) {
-        let h = h.clone();
-        tracer.tree.update(std::path::PathBuf::from(&link_path), h);
-        Some(tracer.tree.root_hash().to_string())
-    } else {
-        tracer.tree_root()
-    };
-    tracer.emit(EventPayload::Link(ef::Link {
+    tracer.pending.insert(pid_u32, PendingSyscall::Link {
         pid: pid_u32,
         target,
         link_path,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }
 
 /// Handles chown/fchown/fchownat.
 ///
-/// Phase 1: logs the ownership change but does not emit an event
-/// (no Chown event type defined yet).
+/// Log-only — no event type exists for chown. Does not use
+/// entry/exit pattern since there is no event to validate.
 pub fn handle_chown(
     _tracer: &mut TracerLoop,
     pid: Pid,
@@ -275,13 +266,13 @@ pub fn handle_chown(
     Ok(())
 }
 
-/// Handles symlink/symlinkat.
+/// Handles symlink/symlinkat at syscall entry.
 pub fn handle_symlink(
     tracer: &mut TracerLoop,
     pid: Pid,
     nr: u64,
     r: &UserRegs,
-) -> Result<()> {
+) -> Result<bool> {
     let pid_u32 = pid.as_raw() as u32;
     let (target, link_path) = match nr {
         SYS_SYMLINK => (
@@ -294,15 +285,14 @@ pub fn handle_symlink(
             let l = memory::read_path_at(pid, dirfd, regs::arg3(r))?;
             (t, l.to_string_lossy().into_owned())
         }
-        _ => return Ok(()),
+        _ => return Ok(false),
     };
 
-    let tree_hash = tracer.tree_root();
-    tracer.emit(EventPayload::Symlink(ef::Symlink {
+    tracer.pending.insert(pid_u32, PendingSyscall::Symlink {
         pid: pid_u32,
         target,
         link_path,
-        tree_hash,
-    }));
-    Ok(())
+    });
+    nix::sys::ptrace::syscall(pid, None)?;
+    Ok(true)
 }

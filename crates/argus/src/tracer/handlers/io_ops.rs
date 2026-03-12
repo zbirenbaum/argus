@@ -35,8 +35,8 @@ pub fn handle_read(
     // Stdin is only classified as Stdio when fd 0 is backed by a
     // pipe or PTY, not when redirected to a regular file.
     if fd == 0 && matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. }) {
-        use crate::tracer::trace_loop::PendingRead;
-        tracer.pending_reads.insert(pid_u32, PendingRead {
+        use crate::tracer::pending::PendingSyscall;
+        tracer.pending.insert(pid_u32, PendingSyscall::Read {
             pid: pid_u32,
             fd,
             path: String::new(),
@@ -50,8 +50,8 @@ pub fn handle_read(
     match target {
         FdTarget::File { path } => {
             let path_str = path.to_string_lossy().into_owned();
-            use crate::tracer::trace_loop::PendingRead;
-            tracer.pending_reads.insert(pid_u32, PendingRead {
+            use crate::tracer::pending::PendingSyscall;
+            tracer.pending.insert(pid_u32, PendingSyscall::Read {
                 pid: pid_u32,
                 fd,
                 path: path_str,
@@ -200,7 +200,7 @@ pub fn handle_pipe(
     let pid_u32 = pid.as_raw() as u32;
     let pipefd_addr = regs::arg1(r);
 
-    tracer.pending_pipes.insert(pid_u32, crate::tracer::trace_loop::PendingPipe {
+    tracer.pending.insert(pid_u32, crate::tracer::pending::PendingSyscall::Pipe {
         pid: pid_u32,
         pipefd_addr,
     });

@@ -55,8 +55,8 @@ pub fn handle_open(
 
     let pid_u32 = pid.as_raw() as u32;
 
-    use crate::tracer::trace_loop::PendingOpen;
-    tracer.pending_opens.insert(pid_u32, PendingOpen { path, flags });
+    use crate::tracer::pending::PendingSyscall;
+    tracer.pending.insert(pid_u32, PendingSyscall::Open { path, flags });
 
     nix::sys::ptrace::syscall(pid, None)?;
     Ok(true)

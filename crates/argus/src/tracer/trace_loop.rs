@@ -6,7 +6,7 @@
 //! follows forks, program replacements, and exits. Emits structured
 //! events over a channel for downstream consumers.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -28,7 +28,8 @@ use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::file as ef;
 use crate::snapshot::MerkleTree;
 use crate::state::{FdTable, FdTarget, PipeRegistry, ProcessTree, PtyRegistry, WriteLocks};
-use crate::tracer::{handlers, memory, process_events};
+use crate::tracer::{handlers, memory, pending, process_events};
+use pending::{CaptureKind, PendingSyscall};
 
 /// Ptrace options to set on every traced process.
 ///
@@ -44,50 +45,6 @@ pub const PTRACE_OPTS: ptrace::Options = ptrace::Options::from_bits_truncate(
         | ptrace::Options::PTRACE_O_TRACESECCOMP.bits()
         | ptrace::Options::PTRACE_O_TRACESYSGOOD.bits(),
 );
-
-/// What kind of file mutation triggered the capture.
-#[derive(Debug)]
-pub enum CaptureKind {
-    /// A write/pwrite/writev/pwritev syscall.
-    Write { fd: i32, size: u64 },
-    /// An open with O_TRUNC that truncates existing content.
-    OpenTrunc,
-}
-
-/// Saved state between open entry and exit for fd table insertion.
-#[derive(Debug)]
-pub struct PendingOpen {
-    pub path: String,
-    pub flags: i32,
-}
-
-/// Saved state between read entry and exit for content capture.
-#[derive(Debug)]
-pub struct PendingRead {
-    pub pid: u32,
-    pub fd: i32,
-    pub path: String,
-    pub buf_addr: u64,
-    pub count: u64,
-}
-
-/// Saved state between pipe/pipe2 entry and exit for fd capture.
-#[derive(Debug)]
-pub struct PendingPipe {
-    pub pid: u32,
-    /// Address of the int[2] pipefd array in tracee memory.
-    pub pipefd_addr: u64,
-}
-
-/// Saved state between syscall entry and exit for content capture.
-#[derive(Debug)]
-pub struct PendingCapture {
-    /// SHA-256 of the file before the syscall executed.
-    pub before_hash: Option<String>,
-    pub path: String,
-    pub pid: u32,
-    pub kind: CaptureKind,
-}
 
 /// Hashes a file's content via CAS, returning `None` on any error.
 pub fn hash_file_content(cas: &impl Cas, path: &str) -> Option<String> {
@@ -125,8 +82,10 @@ pub struct TracerLoop {
     pub write_locks: WriteLocks,
     pub cas: LocalCas,
     pub tree: MerkleTree,
-    /// Captures awaiting syscall-exit to hash the post-mutation content.
-    pub pending_captures: HashMap<u32, PendingCapture>,
+    /// Unified pending syscall map — one entry per pid awaiting
+    /// syscall exit. Covers EPERM injection, open, read, pipe,
+    /// write capture, and all metadata ops.
+    pub pending: HashMap<u32, PendingSyscall>,
     /// Last known content hash per path, used as before_hash for the
     /// next mutation. Guarantees an unbroken hash chain across events.
     pub path_hashes: HashMap<String, String>,
@@ -136,7 +95,7 @@ pub struct TracerLoop {
     pub active_writes: HashMap<String, u32>,
     /// Tracees held at syscall entry waiting for the active writer on
     /// the same path to finish. Drained FIFO on write completion.
-    pub write_wait_queue: HashMap<String, VecDeque<PendingCapture>>,
+    pub write_wait_queue: HashMap<String, VecDeque<PendingSyscall>>,
     event_tx: Sender<Event>,
     seq_gen: SequenceGenerator,
     agent_id: String,
@@ -146,14 +105,6 @@ pub struct TracerLoop {
     pub rules: Option<Arc<ArcSwap<RuleSet>>>,
     /// Shared state for submitting pending approvals to the API.
     pub shared_state: Option<SharedState>,
-    /// Pids awaiting syscall exit for EPERM injection.
-    pub pending_eperm: HashSet<u32>,
-    /// Opens awaiting syscall exit to read the returned fd.
-    pub pending_opens: HashMap<u32, PendingOpen>,
-    /// Reads awaiting syscall exit to capture buffer content.
-    pub pending_reads: HashMap<u32, PendingRead>,
-    /// Pipes awaiting syscall exit to read the returned fd pair.
-    pub pending_pipes: HashMap<u32, PendingPipe>,
     pub alive_count: u32,
 }
 
@@ -172,7 +123,7 @@ impl TracerLoop {
             write_locks: WriteLocks::new(),
             cas,
             tree: MerkleTree::new(),
-            pending_captures: HashMap::new(),
+            pending: HashMap::new(),
             path_hashes: HashMap::new(),
             active_writes: HashMap::new(),
             write_wait_queue: HashMap::new(),
@@ -182,10 +133,6 @@ impl TracerLoop {
             workspace_dir: None,
             rules: None,
             shared_state: None,
-            pending_eperm: HashSet::new(),
-            pending_opens: HashMap::new(),
-            pending_reads: HashMap::new(),
-            pending_pipes: HashMap::new(),
             alive_count: 0,
         }
     }
@@ -291,13 +238,13 @@ impl TracerLoop {
             }
             WaitStatus::Exited(pid, code) => {
                 let pid_u32 = pid.as_raw() as u32;
-                self.pending_captures.remove(&pid_u32);
+                self.pending.remove(&pid_u32);
                 self.cleanup_dead_writer(pid_u32)?;
                 process_events::handle_process_exit(self, pid, code, None);
             }
             WaitStatus::Signaled(pid, sig, _core) => {
                 let pid_u32 = pid.as_raw() as u32;
-                self.pending_captures.remove(&pid_u32);
+                self.pending.remove(&pid_u32);
                 self.cleanup_dead_writer(pid_u32)?;
                 process_events::handle_process_exit(
                     self,
@@ -347,102 +294,129 @@ impl TracerLoop {
         Ok(false)
     }
 
-    /// Completes a pending content capture at syscall exit.
+    /// Dispatches a single syscall-exit stop to the matching handler.
     ///
-    /// Uses the per-path `path_hashes` cache for before_hash and
-    /// updates it with the new after_hash, ensuring an unbroken chain.
-    /// If other tracees are queued for the same path, dequeues the next
-    /// one and resumes it with `ptrace::syscall`.
+    /// Removes the pending entry for this pid and checks the kernel
+    /// return value. Failed syscalls (negative return) are silently
+    /// dropped — no event emitted, no state updated. Successful
+    /// syscalls emit events and update the Merkle tree.
     fn handle_syscall_exit(&mut self, pid: Pid) -> Result<()> {
         let pid_u32 = pid.as_raw() as u32;
 
-        // Inject EPERM for blocked/denied syscalls.
-        if self.pending_eperm.remove(&pid_u32) {
-            inject_eperm(pid)?;
+        let Some(entry) = self.pending.remove(&pid_u32) else {
             ptrace::cont(pid, None)?;
             return Ok(());
-        }
+        };
 
-        // Complete pending open: read the returned fd and insert
-        // the path into the process fd table.
-        if let Some(open) = self.pending_opens.remove(&pid_u32) {
-            self.complete_pending_open(pid, &open)?;
-            ptrace::cont(pid, None)?;
-            return Ok(());
-        }
-
-        // Complete pending read: read the buffer content from tracee
-        // memory, hash it, and emit event with content_hash.
-        if let Some(read_info) = self.pending_reads.remove(&pid_u32) {
-            self.complete_pending_read(pid, &read_info)?;
-            ptrace::cont(pid, None)?;
-            return Ok(());
-        }
-
-        // Complete pending pipe: read the fd pair from tracee memory,
-        // register in fd table and pipe registry, emit PipeCreate.
-        if let Some(pipe_info) = self.pending_pipes.remove(&pid_u32) {
-            self.complete_pending_pipe(pid, &pipe_info)?;
-            ptrace::cont(pid, None)?;
-            return Ok(());
-        }
-
-        if let Some(cap) = self.pending_captures.remove(&pid_u32) {
-            let after_hash = hash_file_content(&self.cas, &cap.path);
-
-            // Use cached hash as before_hash; fall back to the one
-            // computed at entry (for the first event on this path).
-            let before_hash = self
-                .path_hashes
-                .get(&cap.path)
-                .cloned()
-                .or(cap.before_hash);
-
-            // Update cache so the next event's before_hash chains.
-            if let Some(ref h) = after_hash {
-                self.path_hashes.insert(cap.path.clone(), h.clone());
+        match entry {
+            PendingSyscall::Eperm => {
+                inject_eperm(pid)?;
+                ptrace::cont(pid, None)?;
             }
-
-            let path_for_queue = cap.path.clone();
-
-            let tree_hash = if let Some(ref h) = after_hash {
-                self.tree_update(&cap.path, h)
-            } else {
-                self.tree_root()
-            };
-
-            match cap.kind {
-                CaptureKind::Write { fd, size } => {
-                    self.emit(EventPayload::Write(ef::Write {
-                        pid: cap.pid,
-                        path: cap.path,
-                        fd,
-                        offset: 0,
-                        size,
-                        before_hash,
-                        after_hash: after_hash.clone(),
-                        tree_hash,
+            PendingSyscall::Open { path, flags } => {
+                self.complete_open(pid, &path, flags)?;
+                ptrace::cont(pid, None)?;
+            }
+            PendingSyscall::Read { pid: p, fd, path, buf_addr, .. } => {
+                self.complete_read(pid, p, fd, &path, buf_addr)?;
+                ptrace::cont(pid, None)?;
+            }
+            PendingSyscall::Pipe { pid: p, pipefd_addr } => {
+                self.complete_pipe(pid, p, pipefd_addr)?;
+                ptrace::cont(pid, None)?;
+            }
+            PendingSyscall::WriteCapture { before_hash, path, pid: p, kind } => {
+                self.complete_write_capture(pid, p, path, before_hash, kind)?;
+                // ptrace::cont called inside (handles write queue).
+            }
+            PendingSyscall::Rename { pid: p, old_path, new_path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_rename(&old_path, &new_path);
+                    tracer.emit(EventPayload::Rename(ef::Rename {
+                        pid: p, old_path, new_path, tree_hash,
                     }));
-                }
-                CaptureKind::OpenTrunc => {
-                    if before_hash != after_hash {
-                        self.emit(EventPayload::Write(ef::Write {
-                            pid: cap.pid,
-                            path: cap.path,
-                            fd: -1,
-                            offset: 0,
-                            size: 0,
-                            before_hash,
-                            after_hash: after_hash.clone(),
-                            tree_hash,
-                        }));
-                    }
-                }
+                })?;
             }
-
-            self.resume_next_queued_writer(&path_for_queue, after_hash)?;
+            PendingSyscall::Unlink { pid: p, path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_remove(&path);
+                    tracer.emit(EventPayload::Unlink(ef::Unlink {
+                        pid: p, path, content_hash: None, tree_hash,
+                    }));
+                })?;
+            }
+            PendingSyscall::Mkdir { pid: p, path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_root();
+                    tracer.emit(EventPayload::Mkdir(ef::Mkdir {
+                        pid: p, path, tree_hash,
+                    }));
+                })?;
+            }
+            PendingSyscall::Rmdir { pid: p, path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_root();
+                    tracer.emit(EventPayload::Rmdir(ef::Rmdir {
+                        pid: p, path, tree_hash,
+                    }));
+                })?;
+            }
+            PendingSyscall::Chmod { pid: p, path, new_mode } => {
+                self.complete_if_ok(pid, |tracer| {
+                    tracer.emit(EventPayload::Chmod(ef::Chmod {
+                        pid: p, path, old_mode: 0, new_mode,
+                    }));
+                })?;
+            }
+            PendingSyscall::Truncate { pid: p, path, new_size } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_root();
+                    tracer.emit(EventPayload::Truncate(ef::Truncate {
+                        pid: p, path, old_size: 0, new_size,
+                        before_hash: None, after_hash: None, tree_hash,
+                    }));
+                })?;
+            }
+            PendingSyscall::Link { pid: p, target, link_path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash =
+                        if let Some(h) = tracer.tree.get(std::path::Path::new(&target)) {
+                            let h = h.clone();
+                            tracer.tree.update(PathBuf::from(&link_path), h);
+                            Some(tracer.tree.root_hash().to_string())
+                        } else {
+                            tracer.tree_root()
+                        };
+                    tracer.emit(EventPayload::Link(ef::Link {
+                        pid: p, target, link_path, tree_hash,
+                    }));
+                })?;
+            }
+            PendingSyscall::Symlink { pid: p, target, link_path } => {
+                self.complete_if_ok(pid, |tracer| {
+                    let tree_hash = tracer.tree_root();
+                    tracer.emit(EventPayload::Symlink(ef::Symlink {
+                        pid: p, target, link_path, tree_hash,
+                    }));
+                })?;
+            }
         }
+        Ok(())
+    }
 
+    /// Checks the syscall return value, runs `action` only on success,
+    /// then resumes with `ptrace::cont`.
+    fn complete_if_ok(
+        &mut self,
+        pid: Pid,
+        action: impl FnOnce(&mut Self),
+    ) -> Result<()> {
+        use super::regs;
+        let r = regs::get_regs(pid)?;
+        let ret = regs::ret_val(&r) as i64;
+        if ret >= 0 {
+            action(self);
+        }
         ptrace::cont(pid, None)?;
         Ok(())
     }
@@ -475,14 +449,21 @@ impl TracerLoop {
         }
 
         if let Some(mut queued) = next {
-            // The next writer's before_hash is this write's after_hash.
-            queued.before_hash = after_hash;
-            let next_pid = Pid::from_raw(queued.pid as i32);
-
-            self.active_writes
-                .insert(queued.path.clone(), queued.pid);
-            self.pending_captures.insert(queued.pid, queued);
-
+            let q_pid = match &queued {
+                PendingSyscall::WriteCapture { pid, .. } => *pid,
+                _ => unreachable!("only WriteCapture in write_wait_queue"),
+            };
+            if let PendingSyscall::WriteCapture {
+                ref mut before_hash,
+                ref path,
+                ..
+            } = queued
+            {
+                *before_hash = after_hash;
+                self.active_writes.insert(path.clone(), q_pid);
+            }
+            let next_pid = Pid::from_raw(q_pid as i32);
+            self.pending.insert(q_pid, queued);
             ptrace::syscall(next_pid, None)?;
         }
 
@@ -491,7 +472,14 @@ impl TracerLoop {
 
     /// Completes a pending read by reading the buffer content from
     /// tracee memory, hashing it, and emitting the event.
-    fn complete_pending_read(&mut self, pid: Pid, read_info: &PendingRead) -> Result<()> {
+    fn complete_read(
+        &mut self,
+        pid: Pid,
+        orig_pid: u32,
+        fd: i32,
+        path: &str,
+        buf_addr: u64,
+    ) -> Result<()> {
         use super::regs;
         use super::content_capture;
         use crate::events::io as eio;
@@ -508,19 +496,19 @@ impl TracerLoop {
         let content_hash = content_capture::try_capture_flat(
             &self.cas,
             pid,
-            read_info.buf_addr,
+            buf_addr,
             bytes_read,
         );
 
         // Classify: if fd is 0 and backed by pipe/pty, emit Stdio.
         // Otherwise emit a file Read event.
-        if read_info.fd == 0 {
+        if fd == 0 {
             let target = crate::tracer::handlers::io_ops::resolve_fd_target(
-                self, read_info.pid, 0,
+                self, orig_pid, 0,
             );
             if matches!(target, FdTarget::Pipe { .. } | FdTarget::Pty { .. }) {
                 self.emit(EventPayload::Stdio(eio::Stdio {
-                    pid: read_info.pid,
+                    pid: orig_pid,
                     subtype: eio::StdioSubtype::Stdin,
                     content_hash: content_hash.clone(),
                     size: bytes_read,
@@ -534,7 +522,7 @@ impl TracerLoop {
                 // Also emit PipeData for pipe topology visibility.
                 if let FdTarget::Pipe { inode, .. } = &target {
                     self.emit(EventPayload::PipeData(eio::PipeData {
-                        pid: read_info.pid,
+                        pid: orig_pid,
                         inode: *inode,
                         direction: eio::PipeDirection::Read,
                         content_hash,
@@ -547,9 +535,9 @@ impl TracerLoop {
         }
 
         self.emit(EventPayload::Read(ef::Read {
-            pid: read_info.pid,
-            path: read_info.path.clone(),
-            fd: read_info.fd,
+            pid: orig_pid,
+            path: path.to_owned(),
+            fd,
             offset: 0,
             size: bytes_read,
             content_hash,
@@ -560,7 +548,7 @@ impl TracerLoop {
 
     /// Reads the returned fd from a completed open syscall and inserts
     /// the path into the process fd table.
-    fn complete_pending_open(&mut self, pid: Pid, open: &PendingOpen) -> Result<()> {
+    fn complete_open(&mut self, pid: Pid, path: &str, flags: i32) -> Result<()> {
         use super::regs;
 
         let r = regs::get_regs(pid)?;
@@ -574,10 +562,10 @@ impl TracerLoop {
         let pid_u32 = pid.as_raw() as u32;
 
         let target = FdTarget::File {
-            path: PathBuf::from(&open.path),
+            path: PathBuf::from(path),
         };
         if let Some(proc_state) = self.process_tree.get_process_mut(pid_u32) {
-            if open.flags & libc::O_CLOEXEC != 0 {
+            if flags & libc::O_CLOEXEC != 0 {
                 proc_state.fds.insert_cloexec(fd, target);
             } else {
                 proc_state.fds.insert(fd, target);
@@ -591,7 +579,12 @@ impl TracerLoop {
     /// Reads the two-element `int` array from tracee memory, looks up
     /// the inode via `/proc`, registers both ends in the fd table and
     /// pipe registry, and emits a `PipeCreate` event.
-    fn complete_pending_pipe(&mut self, pid: Pid, pipe_info: &PendingPipe) -> Result<()> {
+    fn complete_pipe(
+        &mut self,
+        pid: Pid,
+        orig_pid: u32,
+        pipefd_addr: u64,
+    ) -> Result<()> {
         use super::regs;
         use crate::events::io as eio;
 
@@ -604,7 +597,7 @@ impl TracerLoop {
         }
 
         // Read the int[2] pipefd array from tracee memory.
-        let bytes = memory::read_bytes(pid, pipe_info.pipefd_addr, 8)?;
+        let bytes = memory::read_bytes(pid, pipefd_addr, 8)?;
         if bytes.len() < 8 {
             return Ok(());
         }
@@ -612,8 +605,7 @@ impl TracerLoop {
         let write_fd = i32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
 
         // Read the inode from /proc for the read end.
-        let pid_u32 = pipe_info.pid;
-        let link = format!("/proc/{pid_u32}/fd/{read_fd}");
+        let link = format!("/proc/{orig_pid}/fd/{read_fd}");
         let inode = std::fs::read_link(&link)
             .ok()
             .and_then(|p| {
@@ -625,7 +617,7 @@ impl TracerLoop {
             .unwrap_or(0);
 
         // Register both ends in the process fd table.
-        if let Some(proc_state) = self.process_tree.get_process_mut(pid_u32) {
+        if let Some(proc_state) = self.process_tree.get_process_mut(orig_pid) {
             proc_state.fds.insert(
                 read_fd,
                 FdTarget::Pipe {
@@ -644,15 +636,79 @@ impl TracerLoop {
 
         // Register in the pipe registry.
         self.pipe_registry
-            .create_pipe(pid_u32, inode, read_fd, write_fd);
+            .create_pipe(orig_pid, inode, read_fd, write_fd);
 
         self.emit(EventPayload::PipeCreate(eio::PipeCreate {
-            pid: pid_u32,
+            pid: orig_pid,
             inode,
             read_fd,
             write_fd,
         }));
 
+        Ok(())
+    }
+
+    /// Completes a write capture by hashing the file after the write,
+    /// emitting the event, and resuming the next queued writer.
+    fn complete_write_capture(
+        &mut self,
+        pid: Pid,
+        orig_pid: u32,
+        path: String,
+        before_hash: Option<String>,
+        kind: CaptureKind,
+    ) -> Result<()> {
+        use super::regs;
+
+        let r = regs::get_regs(pid)?;
+        let ret = regs::ret_val(&r) as i64;
+
+        if ret < 0 {
+            // Write failed — release lock and resume next queued.
+            self.resume_next_queued_writer(&path, before_hash)?;
+            ptrace::cont(pid, None)?;
+            return Ok(());
+        }
+
+        let after_hash = hash_file_content(&self.cas, &path);
+        if let Some(ref h) = after_hash {
+            self.path_hashes.insert(path.clone(), h.clone());
+        }
+
+        let tree_hash = match &after_hash {
+            Some(h) => self.tree_update(&path, h),
+            None => self.tree_root(),
+        };
+
+        match kind {
+            CaptureKind::Write { fd, size: _ } => {
+                self.emit(EventPayload::Write(ef::Write {
+                    pid: orig_pid,
+                    path: path.clone(),
+                    fd,
+                    offset: 0,
+                    size: ret as u64,
+                    before_hash,
+                    after_hash: after_hash.clone(),
+                    tree_hash,
+                }));
+            }
+            CaptureKind::OpenTrunc => {
+                self.emit(EventPayload::Write(ef::Write {
+                    pid: orig_pid,
+                    path: path.clone(),
+                    fd: -1,
+                    offset: 0,
+                    size: 0,
+                    before_hash,
+                    after_hash: after_hash.clone(),
+                    tree_hash,
+                }));
+            }
+        }
+
+        self.resume_next_queued_writer(&path, after_hash)?;
+        ptrace::cont(pid, None)?;
         Ok(())
     }
 
@@ -668,11 +724,7 @@ impl TracerLoop {
         };
 
         let pid_u32 = pid.as_raw() as u32;
-        if self.pending_captures.contains_key(&pid_u32)
-            || self.pending_opens.contains_key(&pid_u32)
-            || self.pending_reads.contains_key(&pid_u32)
-            || self.pending_pipes.contains_key(&pid_u32)
-        {
+        if self.pending.contains_key(&pid_u32) {
             ptrace::syscall(pid, forward)?;
         } else {
             ptrace::cont(pid, forward)?;
@@ -705,7 +757,9 @@ impl TracerLoop {
 
         // Remove this pid from any wait queues.
         self.write_wait_queue.retain(|_, queue| {
-            queue.retain(|cap| cap.pid != pid_u32);
+            queue.retain(|entry| {
+                !matches!(entry, PendingSyscall::WriteCapture { pid, .. } if *pid == pid_u32)
+            });
             !queue.is_empty()
         });
 
@@ -929,7 +983,7 @@ mod tests {
         assert!(tracer.pipe_registry.is_empty());
         assert!(tracer.pty_registry.is_empty());
         assert!(tracer.write_locks.is_empty());
-        assert!(tracer.pending_captures.is_empty());
+        assert!(tracer.pending.is_empty());
         assert!(tracer.active_writes.is_empty());
         assert!(tracer.write_wait_queue.is_empty());
         assert_eq!(tracer.alive_count, 0);
@@ -987,7 +1041,7 @@ mod tests {
             .write_wait_queue
             .entry("/workspace/f.txt".into())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path: "/workspace/f.txt".into(),
                 pid: 20,
@@ -1009,7 +1063,7 @@ mod tests {
             .write_wait_queue
             .entry(path.clone())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path: path.clone(),
                 pid: 20,
@@ -1022,12 +1076,14 @@ mod tests {
         // updates happen before the ptrace call.
         let _ = tracer.resume_next_queued_writer(&path, Some("abc123".into()));
 
-        // The queued entry should have been moved to pending_captures
+        // The queued entry should have been moved to pending
         // with the correct before_hash, regardless of whether ptrace
         // succeeded.
-        if let Some(cap) = tracer.pending_captures.get(&20) {
-            assert_eq!(cap.before_hash.as_deref(), Some("abc123"));
-            assert_eq!(cap.path, path);
+        if let Some(PendingSyscall::WriteCapture { before_hash, path: p, .. }) =
+            tracer.pending.get(&20)
+        {
+            assert_eq!(before_hash.as_deref(), Some("abc123"));
+            assert_eq!(p, &path);
         }
         // Queue should be empty and cleaned up.
         assert!(!tracer.write_wait_queue.contains_key(&path));
@@ -1061,7 +1117,7 @@ mod tests {
             .write_wait_queue
             .entry(path.clone())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path: path.clone(),
                 pid: 10,
@@ -1071,7 +1127,7 @@ mod tests {
             .write_wait_queue
             .entry(path.clone())
             .or_default()
-            .push_back(PendingCapture {
+            .push_back(PendingSyscall::WriteCapture {
                 before_hash: None,
                 path: path.clone(),
                 pid: 20,
@@ -1083,7 +1139,7 @@ mod tests {
         // Pid 10 should be removed, pid 20 should remain.
         let queue = &tracer.write_wait_queue[&path];
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].pid, 20);
+        assert!(matches!(&queue[0], PendingSyscall::WriteCapture { pid: 20, .. }));
     }
 
     #[test]

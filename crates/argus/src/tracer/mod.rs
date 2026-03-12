@@ -4,6 +4,7 @@
 pub mod content_capture;
 pub mod handlers;
 pub mod memory;
+pub mod pending;
 pub mod process_events;
 pub mod regs;
 pub mod seccomp;
