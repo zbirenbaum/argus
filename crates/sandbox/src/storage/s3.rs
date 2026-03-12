@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! S3-compatible object store client and trait.
 //!
 //! Provides [`ObjectStore`] as a trait for testability, and [`S3Client`]

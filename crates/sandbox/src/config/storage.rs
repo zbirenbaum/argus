@@ -4,8 +4,6 @@
 //! All durations use `humantime-serde` for human-readable values like `5m`
 //! and sizes use `bytesize` for values like `2GB`.
 
-// Rust guideline compliant 2026-02-21
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -80,9 +78,9 @@ pub struct UploadConfig {
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
 
-    /// Maximum retry attempts per upload.
-    #[serde(default = "default_retry_max")]
-    pub retry_max: u32,
+    /// Total number of attempts per upload (1 initial + N-1 retries).
+    #[serde(default = "default_max_attempts", alias = "retry_max")]
+    pub max_attempts: u32,
 
     /// Base delay for exponential backoff between retries.
     #[serde(
@@ -96,7 +94,7 @@ impl Default for UploadConfig {
     fn default() -> Self {
         Self {
             max_concurrent: default_max_concurrent(),
-            retry_max: default_retry_max(),
+            max_attempts: default_max_attempts(),
             retry_backoff_base: default_retry_backoff_base(),
         }
     }
@@ -177,7 +175,7 @@ fn default_max_concurrent() -> u32 {
     4
 }
 
-fn default_retry_max() -> u32 {
+fn default_max_attempts() -> u32 {
     5
 }
 
@@ -231,7 +229,7 @@ mod tests {
         let cfg = StorageConfig::default();
         assert!(cfg.s3.is_none());
         assert_eq!(cfg.upload.max_concurrent, 4);
-        assert_eq!(cfg.upload.retry_max, 5);
+        assert_eq!(cfg.upload.max_attempts, 5);
         assert_eq!(cfg.local_buffer.cas_dir, PathBuf::from("/data/cas"));
         assert!(cfg.digest_cache.rebuild_on_start);
     }

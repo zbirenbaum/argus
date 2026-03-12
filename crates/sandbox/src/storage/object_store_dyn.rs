@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Dynamic dispatch wrapper for [`ObjectStore`].
 //!
 //! Since [`ObjectStore`] uses return-position `impl Trait` (RPITIT),

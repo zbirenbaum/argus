@@ -1,5 +1,3 @@
-// Rust guideline compliant 2026-02-21
-
 //! Remote storage, upload pool, and type-erased object store.
 //!
 //! The [`s3`] module provides the [`ObjectStore`](s3::ObjectStore)
@@ -9,6 +7,7 @@
 
 pub mod object_store_dyn;
 pub mod s3;
+pub mod upload_job;
 pub mod upload_pool;
 
 #[doc(inline)]
@@ -16,6 +15,8 @@ pub use object_store_dyn::DynObjectStore;
 #[doc(inline)]
 pub use s3::{ObjectStore, S3Client};
 #[doc(inline)]
+pub use upload_job::UploadJob;
+#[doc(inline)]
 pub use upload_pool::{
-    UploadConfirmation, UploadJob, UploadPool, UploadStats, UploadStatsSnapshot,
+    UploadConfirmation, UploadPool, UploadStats, UploadStatsSnapshot,
 };

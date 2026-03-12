@@ -8,8 +8,6 @@
 //! [`SupervisorConfig::default`] for sensible defaults suitable for local
 //! development.
 
-// Rust guideline compliant 2026-02-21
-
 mod durability;
 mod pause_rules;
 mod storage;
