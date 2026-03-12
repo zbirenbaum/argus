@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tracing::event;
 use tracing::Level;
 
-use crate::cas::{Cas, LocalCas, ContentHash};
+use crate::cas::{Cas, ContentHash};
 
 use super::write_locks::WriteLocks;
 
@@ -243,6 +243,7 @@ impl RenameCaptureGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cas::LocalCas;
 
     fn setup() -> (tempfile::TempDir, WriteLocks, LocalCas) {
         let dir = tempfile::tempdir().expect("tempdir");

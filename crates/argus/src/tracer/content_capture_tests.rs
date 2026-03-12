@@ -5,7 +5,7 @@ fn test_cas() -> LocalCas {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cas");
     // Prevent cleanup so the CAS directory outlives the test helper.
-    let _persisted = dir.into_path();
+    dir.keep();
     LocalCas::new(path).expect("LocalCas::new")
 }
 

@@ -5,7 +5,7 @@
 //! derived from its sorted children. Updating a single file rehashes
 //! only the ancestors of that file, keeping updates O(depth).
 //!
-//! Tree and commit objects can be persisted into a [`CasStore`] for
+//! Tree and commit objects can be persisted into any [`Cas`] backend for
 //! durable point-in-time snapshots.
 
 use std::cell::RefCell;
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::cas::{CasStore, ContentHash};
+use crate::cas::{Cas, ContentHash};
 
 /// Serializable directory listing stored as a CAS object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,14 +40,14 @@ pub struct Commit {
 
 impl Commit {
     /// Load a commit object from CAS by its hash.
-    pub fn load(hash: &ContentHash, cas: &CasStore) -> Result<Self> {
-        let data = cas.read(hash)?;
+    pub fn load(hash: &ContentHash, cas: &dyn Cas) -> Result<Self> {
+        let data = cas.get(hash)?;
         serde_json::from_slice(&data)
             .with_context(|| format!("parse commit {hash}"))
     }
 
     /// Load the tree referenced by this commit from CAS.
-    pub fn tree(&self, cas: &CasStore) -> Result<MerkleTree> {
+    pub fn tree(&self, cas: &dyn Cas) -> Result<MerkleTree> {
         MerkleTree::load(&self.tree_hash, cas)
     }
 }
@@ -75,7 +75,7 @@ impl Default for MerkleTree {
 
 impl MerkleTree {
     /// Load a tree from CAS by walking its TreeObject hierarchy.
-    pub fn load(root_hash: &ContentHash, cas: &CasStore) -> Result<Self> {
+    pub fn load(root_hash: &ContentHash, cas: &dyn Cas) -> Result<Self> {
         let mut files = BTreeMap::new();
         walk_tree_object(cas, root_hash, &PathBuf::new(), &mut files)?;
         Ok(Self {
@@ -139,7 +139,7 @@ impl MerkleTree {
     /// Returns an error if any CAS write fails.
     pub fn commit(
         &mut self,
-        cas: &CasStore,
+        cas: &dyn Cas,
         ts_monotonic: u64,
         ts_wall: String,
         parent: Option<ContentHash>,
@@ -155,7 +155,7 @@ impl MerkleTree {
         let commit_bytes =
             serde_json::to_vec(&commit).context("serialize commit")?;
         let commit_hash = cas
-            .store(&commit_bytes)
+            .put(&commit_bytes)
             .context("store commit in CAS")?;
         Ok(commit_hash)
     }
@@ -184,7 +184,7 @@ impl MerkleTree {
     ///
     /// Unlike [`commit`](MerkleTree::commit), this does not create a
     /// commit object — it only persists the directory structure.
-    pub fn store(&self, cas: &CasStore) -> Result<ContentHash> {
+    pub fn store(&self, cas: &dyn Cas) -> Result<ContentHash> {
         store_tree_objects(cas, &self.files)
     }
 
@@ -277,7 +277,7 @@ pub(crate) fn hash_dir_node(children: &BTreeMap<String, DirNode>) -> ContentHash
 /// Each unique directory becomes a `TreeObject` stored by its content
 /// Returns the CAS hash of the root tree object.
 fn store_tree_objects(
-    cas: &CasStore,
+    cas: &dyn Cas,
     files: &BTreeMap<PathBuf, ContentHash>,
 ) -> Result<ContentHash> {
     let dir_tree = build_dir_tree(files);
@@ -286,7 +286,7 @@ fn store_tree_objects(
 
 /// Recursively store a directory node and its children.
 fn store_dir_node(
-    cas: &CasStore,
+    cas: &dyn Cas,
     children: &BTreeMap<String, DirNode>,
 ) -> Result<ContentHash> {
     let mut entries = BTreeMap::new();
@@ -300,23 +300,23 @@ fn store_dir_node(
     let tree_obj = TreeObject { entries };
     let bytes =
         serde_json::to_vec(&tree_obj).context("serialize tree object")?;
-    cas.store(&bytes).context("store tree object in CAS")
+    cas.put(&bytes).context("store tree object in CAS")
 }
 
 /// Walk a CAS tree object recursively, collecting files.
 fn walk_tree_object(
-    cas: &CasStore,
+    cas: &dyn Cas,
     hash: &ContentHash,
     prefix: &Path,
     files: &mut BTreeMap<PathBuf, ContentHash>,
 ) -> Result<()> {
-    let data = cas.read(hash)?;
+    let data = cas.get(hash)?;
     let tree: TreeObject = serde_json::from_slice(&data)
         .with_context(|| format!("parse tree object {hash}"))?;
 
     for (name, child_hash) in &tree.entries {
         let child_path = prefix.join(name);
-        match cas.read(child_hash) {
+        match cas.get(child_hash) {
             Ok(child_data) => {
                 if serde_json::from_slice::<TreeObject>(&child_data).is_ok() {
                     walk_tree_object(cas, child_hash, &child_path, files)?;
@@ -335,6 +335,7 @@ fn walk_tree_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cas::{LocalCas, MemoryCas};
 
     fn hash(s: &str) -> ContentHash {
         ContentHash::from_data(s.as_bytes())
@@ -342,7 +343,7 @@ mod tests {
 
     #[test]
     fn empty_tree_has_deterministic_root() {
-        let mut t = MerkleTree::new();
+        let t = MerkleTree::new();
         let h1 = t.root_hash();
         let h2 = t.root_hash();
         assert_eq!(h1, h2);
@@ -455,7 +456,7 @@ mod tests {
     #[test]
     fn commit_stores_to_cas() {
         let dir = tempfile::tempdir().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let mut t = MerkleTree::new();
         t.update(PathBuf::from("file.txt"), hash("hello"));
@@ -465,7 +466,7 @@ mod tests {
             .unwrap();
 
         // Commit object should be readable from CAS.
-        let data = cas.read(&commit_hash).unwrap();
+        let data = cas.get(&commit_hash).unwrap();
         let commit: Commit = serde_json::from_slice(&data).unwrap();
         assert_eq!(commit.ts_monotonic, 1000);
         assert!(commit.parent.is_none());
@@ -474,7 +475,7 @@ mod tests {
     #[test]
     fn commit_with_parent() {
         let dir = tempfile::tempdir().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let mut t = MerkleTree::new();
         t.update(PathBuf::from("a.txt"), hash("v1"));
@@ -487,7 +488,7 @@ mod tests {
             .commit(&cas, 200, "2026-01-01T00:00:01Z".into(), Some(c1.clone()))
             .unwrap();
 
-        let data = cas.read(&c2).unwrap();
+        let data = cas.get(&c2).unwrap();
         let commit: Commit = serde_json::from_slice(&data).unwrap();
         assert_eq!(commit.parent, Some(c1));
     }
@@ -550,7 +551,7 @@ mod tests {
     #[test]
     fn load_tree_from_cas() {
         let dir = tempfile::tempdir().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let mut t = MerkleTree::new();
         t.update(PathBuf::from("a.txt"), hash("hello"));
@@ -570,7 +571,7 @@ mod tests {
     #[test]
     fn load_tree_directly() {
         let dir = tempfile::tempdir().unwrap();
-        let cas = CasStore::new(dir.path().join("cas")).unwrap();
+        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
 
         let mut t = MerkleTree::new();
         t.update(PathBuf::from("x.txt"), hash("data"));
@@ -583,6 +584,80 @@ mod tests {
         let loaded = MerkleTree::load(&commit.tree_hash, &cas).unwrap();
         assert_eq!(loaded.file_count(), 1);
         assert_eq!(loaded.get(Path::new("x.txt")), Some(&hash("data")));
+    }
+
+    #[test]
+    fn tree_round_trip() {
+        let cas = MemoryCas::new();
+
+        let mut tree = MerkleTree::new();
+        tree.update(
+            PathBuf::from("workspace/config.yaml"),
+            cas.put(b"key: value").unwrap(),
+        );
+        tree.update(
+            PathBuf::from("workspace/main.py"),
+            cas.put(b"print('hello')").unwrap(),
+        );
+        let root_hash = tree.store(&cas).unwrap();
+
+        let restored = MerkleTree::load(&root_hash, &cas).unwrap();
+        assert_eq!(restored.file_count(), 2);
+        assert!(restored.contains(Path::new("workspace/config.yaml")));
+        assert!(restored.contains(Path::new("workspace/main.py")));
+
+        let config_hash = restored
+            .get(Path::new("workspace/config.yaml"))
+            .unwrap();
+        let content = cas.get(config_hash).unwrap();
+        assert_eq!(content, b"key: value");
+
+        let main_hash = restored
+            .get(Path::new("workspace/main.py"))
+            .unwrap();
+        let content = cas.get(main_hash).unwrap();
+        assert_eq!(content, b"print('hello')");
+    }
+
+    #[test]
+    fn tree_diff_via_memory_cas() {
+        let cas = MemoryCas::new();
+
+        let mut before = MerkleTree::new();
+        before.update(
+            PathBuf::from("a.txt"),
+            cas.put(b"original").unwrap(),
+        );
+        before.update(
+            PathBuf::from("b.txt"),
+            cas.put(b"keep").unwrap(),
+        );
+        let hash_before = before.store(&cas).unwrap();
+
+        let mut after = MerkleTree::new();
+        after.update(
+            PathBuf::from("a.txt"),
+            cas.put(b"modified").unwrap(),
+        );
+        after.update(
+            PathBuf::from("b.txt"),
+            cas.put(b"keep").unwrap(),
+        );
+        after.update(
+            PathBuf::from("c.txt"),
+            cas.put(b"new").unwrap(),
+        );
+        let hash_after = after.store(&cas).unwrap();
+
+        let before = MerkleTree::load(&hash_before, &cas).unwrap();
+        let after = MerkleTree::load(&hash_after, &cas).unwrap();
+        let diff = before.diff(&after);
+
+        // a.txt modified, c.txt added — b.txt skipped (same hash).
+        assert_eq!(diff.len(), 2);
+        assert!(diff.iter().any(|d| d.path == PathBuf::from("a.txt")));
+        assert!(diff.iter().any(|d| d.path == PathBuf::from("c.txt")));
+        assert!(!diff.iter().any(|d| d.path == PathBuf::from("b.txt")));
     }
 }
 

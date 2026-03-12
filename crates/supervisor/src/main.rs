@@ -12,14 +12,13 @@ mod startup;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
-use argus::cas::CasStore;
+use argus::cas::LocalCas;
 use argus::config::SupervisorConfig;
 use argus::events::{Event, EventPayload, SequenceGenerator};
 use argus::net;
@@ -76,13 +75,11 @@ fn main() -> Result<()> {
         }
     };
 
-    let cas = Arc::new(
-        CasStore::new(config.data_dir.join("cas"))
-            .context("failed to initialize CAS store")?,
-    );
+    let cas = LocalCas::new(config.data_dir.join("cas"))
+        .context("failed to initialize CAS store")?;
 
     let (event_tx, event_rx) = mpsc::channel::<Event>();
-    let seq_gen = Arc::new(SequenceGenerator::default());
+    let seq_gen = SequenceGenerator::default();
 
     let writer_handle = event_writer::spawn(event_rx);
 
@@ -99,7 +96,7 @@ fn main() -> Result<()> {
     let mut tracer = TracerLoop::new(
         config.agent_id.clone(),
         event_tx,
-        Arc::clone(&seq_gen),
+        seq_gen,
         cas,
     );
     tracer.run(child_pid, sync_pipe)?;

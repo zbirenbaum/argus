@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use nix::unistd::{ForkResult, Pid, close, execvpe, pipe, read, write};
+use nix::unistd::{ForkResult, Pid, execvpe, pipe, read};
 use tracing::{Level, event};
 
 /// Subdirectories under `data_dir` required at startup.
