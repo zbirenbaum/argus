@@ -18,6 +18,6 @@ pub use checkpoint::{deserialize_checkpoint, serialize_checkpoint};
 #[doc(inline)]
 pub use diff::{diff_trees, DiffEntry, DiffKind};
 #[doc(inline)]
-pub use tree::{Commit, MerkleTree, TreeEntry, TreeObject};
+pub use tree::{Commit, MerkleTree, TreeObject};
 
 // Rust guideline compliant 2026-02-21

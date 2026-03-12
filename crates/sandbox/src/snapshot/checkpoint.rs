@@ -5,7 +5,7 @@
 //! `checkpoints/{agent_id}/{seq}.bin` every N events (default 1000)
 //! and loaded on restart to avoid replaying the entire event log.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use super::tree::MerkleTree;
 
@@ -15,27 +15,46 @@ use super::tree::MerkleTree;
 /// against the storage and I/O cost of serializing the full tree.
 pub const DEFAULT_CHECKPOINT_INTERVAL: u64 = 1000;
 
+/// Wire format version for checkpoint blobs.
+///
+/// Incremented when the serialization format changes in an
+/// incompatible way. Checked on deserialization so that old binaries
+/// reject payloads they cannot decode.
+const CHECKPOINT_VERSION: u8 = 1;
+
 /// Serialize a `MerkleTree` to a compact binary representation.
 ///
-/// Uses bincode for minimal overhead. The resulting bytes are suitable
-/// for storage in S3 or on the local filesystem.
+/// Prepends a version byte before the bincode payload. The resulting
+/// bytes are suitable for storage in S3 or on the local filesystem.
 ///
 /// # Errors
 ///
 /// Returns an error if bincode serialization fails (should not happen
 /// for well-formed trees).
 pub fn serialize_checkpoint(tree: &MerkleTree) -> Result<Vec<u8>> {
-    bincode::serialize(tree).context("serialize checkpoint")
+    let payload = bincode::serialize(tree).context("serialize checkpoint")?;
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(CHECKPOINT_VERSION);
+    buf.extend_from_slice(&payload);
+    Ok(buf)
 }
 
 /// Deserialize a `MerkleTree` from bytes produced by [`serialize_checkpoint`].
 ///
 /// # Errors
 ///
-/// Returns an error if the data is corrupt or was produced by an
-/// incompatible version.
+/// Returns an error if the version byte is unsupported or the data is
+/// corrupt.
 pub fn deserialize_checkpoint(data: &[u8]) -> Result<MerkleTree> {
-    bincode::deserialize(data).context("deserialize checkpoint")
+    let (&version, payload) = data
+        .split_first()
+        .context("checkpoint data is empty")?;
+    if version != CHECKPOINT_VERSION {
+        bail!(
+            "unsupported checkpoint version {version}, expected {CHECKPOINT_VERSION}"
+        );
+    }
+    bincode::deserialize(payload).context("deserialize checkpoint")
 }
 
 /// Build the S3 key for a checkpoint.
@@ -77,19 +96,33 @@ mod tests {
         );
 
         let data = serialize_checkpoint(&tree).unwrap();
-        let mut restored = deserialize_checkpoint(&data).unwrap();
+        let restored = deserialize_checkpoint(&data).unwrap();
 
         assert_eq!(restored.file_count(), 3);
-        assert_eq!(
-            restored.root_hash(),
-            tree.clone().root_hash()
-        );
+        assert_eq!(restored.root_hash(), tree.root_hash());
     }
 
     #[test]
     fn corrupted_data_errors() {
         let result = deserialize_checkpoint(b"not valid bincode");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_data_errors() {
+        let result = deserialize_checkpoint(b"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wrong_version_errors() {
+        let mut data = serialize_checkpoint(&MerkleTree::new()).unwrap();
+        // Corrupt the version byte to an unsupported value.
+        data[0] = 255;
+        let result = deserialize_checkpoint(&data);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unsupported checkpoint version"));
     }
 
     #[test]
@@ -135,9 +168,9 @@ mod tests {
             );
         }
         let data = serialize_checkpoint(&tree).unwrap();
-        let mut restored = deserialize_checkpoint(&data).unwrap();
+        let restored = deserialize_checkpoint(&data).unwrap();
         assert_eq!(restored.file_count(), 500);
-        assert_eq!(restored.root_hash(), tree.clone().root_hash());
+        assert_eq!(restored.root_hash(), tree.root_hash());
     }
 }
 

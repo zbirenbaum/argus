@@ -1,19 +1,19 @@
 //! Tree diffing between two Merkle roots.
 //!
-//! Given two [`MerkleTree`] snapshots, [`diff_trees`] walks both trees
-//! and reports only the paths that differ. Subtrees with identical root
-//! hashes are skipped entirely, making the diff proportional to the
-//! number of changed files rather than the total tree size.
+//! Given two [`MerkleTree`] snapshots, [`diff_trees`] builds virtual
+//! directory trees and recursively compares them. Subtrees with
+//! identical hashes are skipped entirely, making the diff proportional
+//! to the number of changed files rather than the total tree size.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cas::ContentHash;
 
-use super::tree::MerkleTree;
+use super::tree::{build_dir_tree, hash_dir_node, DirNode, MerkleTree};
 
 /// Kind of change detected between two tree snapshots.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiffKind {
     /// File exists only in the second tree.
     Added,
@@ -24,7 +24,7 @@ pub enum DiffKind {
 }
 
 /// A single file-level difference between two trees.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiffEntry {
     /// Affected path.
     pub path: PathBuf,
@@ -38,53 +38,112 @@ pub struct DiffEntry {
 
 /// Diff two Merkle trees, returning all file-level differences.
 ///
-/// Walks both trees and emits [`DiffEntry`] records for files that
-/// were added, deleted, or modified. The result is sorted by path.
+/// Builds virtual directory trees and walks them recursively,
+/// skipping entire subtrees whose hashes match. The result is
+/// sorted by path.
 pub fn diff_trees(tree_a: &MerkleTree, tree_b: &MerkleTree) -> Vec<DiffEntry> {
+    let files_a: BTreeMap<PathBuf, ContentHash> =
+        tree_a.files().map(|(p, h)| (p.to_path_buf(), h.clone())).collect();
+    let files_b: BTreeMap<PathBuf, ContentHash> =
+        tree_b.files().map(|(p, h)| (p.to_path_buf(), h.clone())).collect();
+
+    let dir_a = build_dir_tree(&files_a);
+    let dir_b = build_dir_tree(&files_b);
+
     let mut diffs = Vec::new();
+    let prefix = PathBuf::new();
+    diff_children(&dir_a, &dir_b, &prefix, &mut diffs);
+    diffs.sort_by(|a, b| a.path.cmp(&b.path));
+    diffs
+}
 
-    let all_paths: BTreeSet<&Path> = tree_a
-        .files()
-        .map(|(p, _)| p)
-        .chain(tree_b.files().map(|(p, _)| p))
-        .collect();
-
-    for path in all_paths {
-        match (tree_a.get(path), tree_b.get(path)) {
-            (None, Some(new_h)) => {
-                diffs.push(DiffEntry {
-                    path: path.to_path_buf(),
-                    kind: DiffKind::Added,
-                    old_hash: None,
-                    new_hash: Some(new_h.clone()),
-                });
-            }
-            (Some(old_h), None) => {
-                diffs.push(DiffEntry {
-                    path: path.to_path_buf(),
-                    kind: DiffKind::Deleted,
-                    old_hash: Some(old_h.clone()),
-                    new_hash: None,
-                });
-            }
-            (Some(old_h), Some(new_h)) if old_h != new_h => {
-                diffs.push(DiffEntry {
-                    path: path.to_path_buf(),
-                    kind: DiffKind::Modified,
-                    old_hash: Some(old_h.clone()),
-                    new_hash: Some(new_h.clone()),
-                });
-            }
-            _ => {}
+/// Recursively diff two directory-level children maps.
+///
+/// When both sides have a directory with the same hash, the entire
+/// subtree is skipped (Merkle subtree-skipping optimization).
+fn diff_children(
+    a: &BTreeMap<String, DirNode>,
+    b: &BTreeMap<String, DirNode>,
+    prefix: &Path,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    for (name, node_a) in a {
+        let child_path = prefix.join(name);
+        match b.get(name) {
+            Some(node_b) => diff_nodes(node_a, node_b, &child_path, diffs),
+            None => collect_all(node_a, &child_path, DiffKind::Deleted, true, diffs),
         }
     }
 
-    diffs
+    for (name, node_b) in b {
+        if !a.contains_key(name) {
+            let child_path = prefix.join(name);
+            collect_all(node_b, &child_path, DiffKind::Added, false, diffs);
+        }
+    }
+}
+
+/// Compare two nodes at the same path, skipping equal subtrees.
+fn diff_nodes(
+    a: &DirNode,
+    b: &DirNode,
+    path: &Path,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    match (a, b) {
+        (DirNode::File(ha), DirNode::File(hb)) => {
+            if ha != hb {
+                diffs.push(DiffEntry {
+                    path: path.to_path_buf(),
+                    kind: DiffKind::Modified,
+                    old_hash: Some(ha.clone()),
+                    new_hash: Some(hb.clone()),
+                });
+            }
+        }
+        (DirNode::Dir(ca), DirNode::Dir(cb)) => {
+            // Merkle subtree-skipping: only recurse when hashes differ
+            if hash_dir_node(ca) != hash_dir_node(cb) {
+                diff_children(ca, cb, path, diffs);
+            }
+        }
+        (DirNode::File(_), DirNode::Dir(_))
+        | (DirNode::Dir(_), DirNode::File(_)) => {
+            // Type changed: treat old as deleted, new as added.
+            collect_all(a, path, DiffKind::Deleted, true, diffs);
+            collect_all(b, path, DiffKind::Added, false, diffs);
+        }
+    }
+}
+
+/// Recursively collect all files under a node as a single diff kind.
+fn collect_all(
+    node: &DirNode,
+    path: &Path,
+    kind: DiffKind,
+    is_old: bool,
+    diffs: &mut Vec<DiffEntry>,
+) {
+    match node {
+        DirNode::File(h) => {
+            diffs.push(DiffEntry {
+                path: path.to_path_buf(),
+                kind,
+                old_hash: if is_old { Some(h.clone()) } else { None },
+                new_hash: if is_old { None } else { Some(h.clone()) },
+            });
+        }
+        DirNode::Dir(children) => {
+            for (name, child) in children {
+                collect_all(child, &path.join(name), kind, is_old, diffs);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use crate::cas::ContentHash;
 
@@ -237,7 +296,10 @@ mod tests {
         a.update(PathBuf::from("old_name.txt"), hash("data"));
 
         let mut b = a.clone();
-        b.rename(Path::new("old_name.txt"), PathBuf::from("new_name.txt"));
+        b.rename(
+            Path::new("old_name.txt"),
+            PathBuf::from("new_name.txt"),
+        );
 
         let d = diff_trees(&a, &b);
         assert_eq!(d.len(), 2);
@@ -247,6 +309,46 @@ mod tests {
 
         let added = d.iter().find(|e| e.kind == DiffKind::Added).unwrap();
         assert_eq!(added.path, PathBuf::from("new_name.txt"));
+    }
+
+    #[test]
+    fn subtree_skipping_skips_identical_dirs() {
+        // Two trees sharing an identical subdirectory should skip it.
+        let mut a = MerkleTree::new();
+        a.update(PathBuf::from("shared/x.txt"), hash("x"));
+        a.update(PathBuf::from("shared/y.txt"), hash("y"));
+        a.update(PathBuf::from("changed/a.txt"), hash("v1"));
+
+        let mut b = MerkleTree::new();
+        b.update(PathBuf::from("shared/x.txt"), hash("x"));
+        b.update(PathBuf::from("shared/y.txt"), hash("y"));
+        b.update(PathBuf::from("changed/a.txt"), hash("v2"));
+
+        let d = diff_trees(&a, &b);
+        // Only the changed file should appear, not the shared ones.
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].path, PathBuf::from("changed/a.txt"));
+        assert_eq!(d[0].kind, DiffKind::Modified);
+    }
+
+    #[test]
+    fn diff_kind_is_copy() {
+        let k = DiffKind::Added;
+        let k2 = k;
+        assert_eq!(k, k2);
+    }
+
+    #[test]
+    fn diff_entry_is_hashable() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(DiffEntry {
+            path: PathBuf::from("a.txt"),
+            kind: DiffKind::Added,
+            old_hash: None,
+            new_hash: Some(hash("x")),
+        });
+        assert_eq!(set.len(), 1);
     }
 }
 

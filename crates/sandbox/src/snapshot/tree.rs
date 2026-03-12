@@ -8,6 +8,7 @@
 //! Tree and commit objects can be persisted into a [`CasStore`] for
 //! durable point-in-time snapshots.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -15,17 +16,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cas::{CasStore, ContentHash};
-
-/// Entry in the Merkle tree representing a file or directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TreeEntry {
-    /// A file whose content lives in CAS at `hash`.
-    Blob { hash: ContentHash },
-    /// A directory with named children mapped to their CAS hashes.
-    Directory {
-        children: BTreeMap<String, ContentHash>,
-    },
-}
 
 /// Serializable directory listing stored as a CAS object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +50,7 @@ pub struct MerkleTree {
 
     /// Cached root hash, invalidated on any mutation.
     #[serde(skip)]
-    cached_root: Option<ContentHash>,
+    cached_root: RefCell<Option<ContentHash>>,
 }
 
 impl Default for MerkleTree {
@@ -74,21 +64,21 @@ impl MerkleTree {
     pub fn new() -> Self {
         Self {
             files: BTreeMap::new(),
-            cached_root: None,
+            cached_root: RefCell::new(None),
         }
     }
 
     /// Insert or update a file at `path` with `hash`.
     pub fn update(&mut self, path: PathBuf, hash: ContentHash) {
         self.files.insert(path, hash);
-        self.cached_root = None;
+        *self.cached_root.borrow_mut() = None;
     }
 
     /// Remove a file at `path`. Returns `true` if it existed.
     pub fn remove(&mut self, path: &Path) -> bool {
         let existed = self.files.remove(path).is_some();
         if existed {
-            self.cached_root = None;
+            *self.cached_root.borrow_mut() = None;
         }
         existed
     }
@@ -100,7 +90,7 @@ impl MerkleTree {
     pub fn rename(&mut self, old: &Path, new: PathBuf) {
         if let Some(hash) = self.files.remove(old) {
             self.files.insert(new, hash);
-            self.cached_root = None;
+            *self.cached_root.borrow_mut() = None;
         }
     }
 
@@ -109,12 +99,12 @@ impl MerkleTree {
     /// Builds a virtual directory tree from the flat file map, hashes
     /// each directory bottom-up, and returns the root hash. The result
     /// is cached until the next mutation.
-    pub fn root_hash(&mut self) -> ContentHash {
-        if let Some(ref h) = self.cached_root {
+    pub fn root_hash(&self) -> ContentHash {
+        if let Some(ref h) = *self.cached_root.borrow() {
             return h.clone();
         }
         let h = compute_root(&self.files);
-        self.cached_root = Some(h.clone());
+        *self.cached_root.borrow_mut() = Some(h.clone());
         h
     }
 
@@ -183,13 +173,13 @@ fn compute_root(files: &BTreeMap<PathBuf, ContentHash>) -> ContentHash {
 
 /// Recursive directory node used during hash computation.
 #[derive(Debug)]
-enum DirNode {
+pub(crate) enum DirNode {
     File(ContentHash),
     Dir(BTreeMap<String, DirNode>),
 }
 
 /// Build a nested `DirNode` tree from the flat file map.
-fn build_dir_tree(files: &BTreeMap<PathBuf, ContentHash>) -> BTreeMap<String, DirNode> {
+pub(crate) fn build_dir_tree(files: &BTreeMap<PathBuf, ContentHash>) -> BTreeMap<String, DirNode> {
     let mut root: BTreeMap<String, DirNode> = BTreeMap::new();
 
     for (path, hash) in files {
@@ -230,7 +220,7 @@ fn insert_into_tree(
 }
 
 /// Recursively hash a directory node.
-fn hash_dir_node(children: &BTreeMap<String, DirNode>) -> ContentHash {
+pub(crate) fn hash_dir_node(children: &BTreeMap<String, DirNode>) -> ContentHash {
     let mut hasher_input = Vec::new();
     for (name, node) in children {
         let child_hash = match node {
