@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result};
@@ -93,6 +93,8 @@ pub struct TracerLoop {
     event_tx: Sender<Event>,
     seq_gen: SequenceGenerator,
     agent_id: String,
+    /// Workspace root for initial filesystem capture.
+    workspace_dir: Option<PathBuf>,
     pub alive_count: u32,
 }
 
@@ -118,8 +120,15 @@ impl TracerLoop {
             event_tx,
             seq_gen,
             agent_id,
+            workspace_dir: None,
             alive_count: 0,
         }
+    }
+
+    /// Set the workspace directory for initial state capture.
+    pub fn with_workspace(mut self, path: PathBuf) -> Self {
+        self.workspace_dir = Some(path);
+        self
     }
 
     /// Runs the main ptrace loop until all traced processes exit.
@@ -145,6 +154,7 @@ impl TracerLoop {
             .context("close sync pipe")?;
 
         self.register_initial_process(initial_pid)?;
+        self.capture_initial_state()?;
         self.alive_count = 1;
 
         event!(
@@ -438,6 +448,138 @@ impl TracerLoop {
         Ok(())
     }
 
+    /// Walks the workspace and captures pre-agent filesystem state.
+    ///
+    /// Emits one `InitialFile` event per file, then a single
+    /// `InitialState` summary. Populates the Merkle tree so the
+    /// first agent write has a valid `before_hash` chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if directory traversal fails.
+    pub fn capture_initial_state(&mut self) -> Result<()> {
+        let workspace = match &self.workspace_dir {
+            Some(p) if p.exists() => p.clone(),
+            _ => return Ok(()),
+        };
+
+        let pid = 0u32; // supervisor pid for initial state events
+        let mut file_count = 0u64;
+        let mut total_size = 0u64;
+
+        self.walk_dir(&workspace, pid, &mut file_count, &mut total_size)?;
+
+        let tree_hash = self.store_tree();
+
+        self.emit(EventPayload::InitialState(
+            crate::events::snapshot::InitialState {
+                tree_hash,
+                file_count,
+                total_size,
+            },
+        ));
+
+        event!(
+            name: "tracer.initial_state.captured",
+            Level::INFO,
+            file_count,
+            total_size,
+            "captured initial filesystem state: {{file_count}} files, {{total_size}} bytes",
+        );
+
+        Ok(())
+    }
+
+    /// Recursively walk a directory, hashing files and emitting events.
+    fn walk_dir(
+        &mut self,
+        dir: &Path,
+        pid: u32,
+        file_count: &mut u64,
+        total_size: &mut u64,
+    ) -> Result<()> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                event!(
+                    name: "tracer.initial_state.dir_error",
+                    Level::WARN,
+                    dir.path = %dir.display(),
+                    error.message = %e,
+                    "cannot read directory {{dir.path}}: {{error.message}}",
+                );
+                return Ok(());
+            }
+        };
+
+        for entry in entries {
+            let entry = entry.context("read directory entry")?;
+            let path = entry.path();
+
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    event!(
+                        name: "tracer.initial_state.meta_error",
+                        Level::WARN,
+                        file.path = %path.display(),
+                        error.message = %e,
+                        "cannot stat {{file.path}}: {{error.message}}",
+                    );
+                    continue;
+                }
+            };
+
+            if meta.is_dir() {
+                self.walk_dir(&path, pid, file_count, total_size)?;
+            } else if meta.is_file() {
+                self.capture_initial_file(&path, &meta, pid, file_count, total_size);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Hash and record a single pre-existing file.
+    fn capture_initial_file(
+        &mut self,
+        path: &Path,
+        meta: &std::fs::Metadata,
+        pid: u32,
+        file_count: &mut u64,
+        total_size: &mut u64,
+    ) {
+        let size = meta.len();
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode()
+        };
+
+        let path_str = path.to_string_lossy().into_owned();
+
+        let content_hash = match hash_file_content(&self.cas, &path_str) {
+            Some(h) => h,
+            None => return,
+        };
+
+        self.tree_update(&path_str, &content_hash);
+        self.path_hashes
+            .insert(path_str.clone(), content_hash.clone());
+
+        self.emit(EventPayload::InitialFile(
+            crate::events::snapshot::InitialFile {
+                pid,
+                path: path_str,
+                content_hash,
+                size,
+                mode,
+            },
+        ));
+
+        *file_count += 1;
+        *total_size += size;
+    }
+
     /// Updates the Merkle tree for a file write and returns the CAS tree hash.
     pub fn tree_update(&mut self, path: &str, content_hash: &str) -> Option<String> {
         use crate::cas::ContentHash;
@@ -675,6 +817,102 @@ mod tests {
 
         // A write to a different path should not be blocked.
         assert!(!tracer.active_writes.contains_key("/workspace/b.txt"));
+    }
+
+    #[test]
+    fn capture_initial_state_empty_workspace() {
+        let (tx, rx) = mpsc::channel();
+        let seq = SequenceGenerator::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas())
+            .with_workspace(ws);
+        tracer.capture_initial_state().unwrap();
+
+        let evt = rx.recv().unwrap();
+        match &evt.payload {
+            EventPayload::InitialState(s) => {
+                assert_eq!(s.file_count, 0);
+                assert_eq!(s.total_size, 0);
+            }
+            other => panic!("expected InitialState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_initial_state_with_files() {
+        let (tx, rx) = mpsc::channel();
+        let seq = SequenceGenerator::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(ws.join("subdir")).unwrap();
+        std::fs::write(ws.join("a.txt"), b"hello").unwrap();
+        std::fs::write(ws.join("subdir/b.txt"), b"world").unwrap();
+
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas())
+            .with_workspace(ws);
+        tracer.capture_initial_state().unwrap();
+
+        let mut events: Vec<_> = rx.try_iter().collect();
+        // Last event is InitialState, preceding are InitialFile.
+        let last = events.pop().unwrap();
+        match &last.payload {
+            EventPayload::InitialState(s) => {
+                assert_eq!(s.file_count, 2);
+                assert_eq!(s.total_size, 10);
+                assert!(s.tree_hash.is_some());
+            }
+            other => panic!("expected InitialState, got {other:?}"),
+        }
+
+        assert_eq!(events.len(), 2);
+        for evt in &events {
+            match &evt.payload {
+                EventPayload::InitialFile(f) => {
+                    assert!(f.size > 0);
+                    assert!(!f.content_hash.is_empty());
+                }
+                other => panic!("expected InitialFile, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn capture_initial_state_populates_merkle_tree() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = SequenceGenerator::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("f.txt"), b"content").unwrap();
+
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas())
+            .with_workspace(ws.clone());
+        tracer.capture_initial_state().unwrap();
+
+        let path = ws.join("f.txt").to_string_lossy().into_owned();
+        assert!(
+            tracer.tree.contains(std::path::Path::new(&path)),
+            "Merkle tree should contain the walked file"
+        );
+        assert!(tracer.path_hashes.contains_key(&path));
+    }
+
+    #[test]
+    fn capture_initial_state_no_workspace_is_noop() {
+        let (tx, rx) = mpsc::channel();
+        let seq = SequenceGenerator::default();
+
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+        tracer.capture_initial_state().unwrap();
+
+        // No events emitted.
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

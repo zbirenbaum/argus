@@ -98,7 +98,8 @@ fn main() -> Result<()> {
         event_tx,
         seq_gen,
         cas,
-    );
+    )
+    .with_workspace(config.workspace_dir.clone());
     tracer.run(child_pid, sync_pipe)?;
 
     event!(
