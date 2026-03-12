@@ -122,6 +122,65 @@ pub struct HealthResponse {
     pub event_count: u64,
 }
 
+/// Request body for `POST /restore`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestoreRequest {
+    /// Wall-clock timestamp to restore to.
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    /// Event sequence number to restore to.
+    #[serde(default)]
+    pub seq: Option<u64>,
+    /// Restore mode: `"full"` or `"selective"`.
+    pub mode: String,
+    /// Target directory for full restore output.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Single path for selective restore.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Multiple paths for selective restore.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+/// Response body for `POST /restore`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreResponse {
+    /// Sequence number of the restored snapshot.
+    pub restored_to_seq: u64,
+    /// Wall-clock timestamp of the restored snapshot.
+    pub restored_to_ts: String,
+    /// Root tree hash of the restored snapshot.
+    pub tree_hash: String,
+    /// Number of files written.
+    pub files_restored: u64,
+    /// Total bytes written.
+    pub bytes_restored: u64,
+}
+
+/// Response body for `GET /tree`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeSnapshotResponse {
+    /// Current root tree hash.
+    pub tree_hash: String,
+    /// Current event sequence number.
+    pub seq: u64,
+    /// Number of tracked files.
+    pub file_count: usize,
+    /// All tracked files with their content hashes.
+    pub files: Vec<TreeFileEntry>,
+}
+
+/// Single file entry in a tree snapshot response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeFileEntry {
+    /// Relative path within the workspace.
+    pub path: String,
+    /// Content hash (SHA-256).
+    pub hash: String,
+}
+
 /// Internal pending approval stored in shared state.
 #[derive(Debug)]
 pub struct PendingApprovalEntry {

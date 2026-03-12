@@ -1024,14 +1024,35 @@ impl TracerLoop {
         Some(self.tree.root_hash().to_string())
     }
 
-    /// Stores tree objects in CAS and returns the root CAS hash.
+    /// Stores tree objects in CAS and swaps tree into Bridge.
+    ///
+    /// Returns the root CAS hash string. Also pushes the current
+    /// tree snapshot to the Bridge's ArcSwap for API access.
     fn store_tree(&self) -> Option<String> {
-        self.tree.store(&self.cas).ok().map(|h| h.to_string())
+        let hash = self.tree.store(&self.cas).ok().map(|h| h.to_string());
+        if hash.is_some() {
+            if let Some(ref state) = self.shared_state {
+                state.store_tree(Arc::new(self.tree.clone()));
+            }
+        }
+        hash
     }
 
     /// Emits an event through the channel.
+    ///
+    /// Automatically records seq → tree_hash in the Bridge for any
+    /// payload that carries a tree_hash, enabling point-in-time restore.
     pub fn emit(&self, payload: EventPayload) {
+        // Extract tree_hash before the payload is moved into the Event.
+        let tree_hash = payload.tree_hash().map(String::from);
+
         let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
+        let seq = evt.seq;
+
+        if let (Some(state), Some(hash)) = (&self.shared_state, &tree_hash) {
+            state.insert_tree_hash(seq, hash.clone());
+        }
+
         if let Err(e) = self.event_tx.send(evt) {
             event!(
                 name: "tracer.event.send_error",

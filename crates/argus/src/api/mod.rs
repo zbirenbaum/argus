@@ -19,7 +19,8 @@ use axum::routing::delete;
 
 use crate::api::routes::{
     approve_handler, delete_rule_handler, deny_handler, get_rules_handler, health_handler,
-    pause_handler, pending_approvals_handler, resume_handler, set_rules_handler, status_handler,
+    pause_handler, pending_approvals_handler, restore_handler, resume_handler, set_rules_handler,
+    status_handler, tree_handler,
 };
 use crate::api::state::SharedState;
 
@@ -34,6 +35,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/approvals/{action_id}/deny", post(deny_handler))
         .route("/rules", get(get_rules_handler).post(set_rules_handler))
         .route("/rules/{index}", delete(delete_rule_handler))
+        .route("/tree", get(tree_handler))
+        .route("/restore", post(restore_handler))
         .route("/health", get(health_handler))
         .with_state(state)
 }
@@ -70,14 +73,20 @@ pub async fn serve(
 mod tests {
     use super::*;
     use crate::api::state::new_shared_state;
+    use crate::cas::MemoryCas;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
+    use std::sync::Arc;
     use tower::ServiceExt;
+
+    fn test_cas() -> Arc<dyn crate::cas::Cas> {
+        Arc::new(MemoryCas::new())
+    }
 
     #[tokio::test]
     async fn router_serves_health() {
-        let state = new_shared_state("integration".into());
+        let state = new_shared_state("integration".into(), test_cas());
         let app = build_router(state);
         let req = Request::builder()
             .method("GET")
@@ -93,7 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_pause_resume_cycle() {
-        let state = new_shared_state("cycle".into());
+        let state = new_shared_state("cycle".into(), test_cas());
         let app = build_router(state);
 
         let req = Request::builder()

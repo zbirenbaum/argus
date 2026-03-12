@@ -1,19 +1,25 @@
 use super::*;
 use crate::api::build_router;
 use crate::api::state::new_shared_state;
+use crate::cas::MemoryCas;
 use crate::events::EventPayload;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tower::ServiceExt;
 
+fn test_cas() -> Arc<dyn crate::cas::Cas> {
+    Arc::new(MemoryCas::new())
+}
+
 fn test_router() -> Router {
-    build_router(new_shared_state("test-agent".into()))
+    build_router(new_shared_state("test-agent".into(), test_cas()))
 }
 
 fn test_router_with_state() -> (Router, SharedState) {
-    let state = new_shared_state("test-agent".into());
+    let state = new_shared_state("test-agent".into(), test_cas());
     let router = build_router(state.clone());
     (router, state)
 }
@@ -23,7 +29,7 @@ fn test_router_with_events() -> (
     SharedState,
     tokio::sync::broadcast::Receiver<crate::events::Event>,
 ) {
-    let state = new_shared_state("test-agent".into());
+    let state = new_shared_state("test-agent".into(), test_cas());
     let rx = state.subscribe_events();
     let router = build_router(state.clone());
     (router, state, rx)

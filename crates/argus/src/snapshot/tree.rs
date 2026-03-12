@@ -8,9 +8,9 @@
 //! Tree and commit objects can be persisted into any [`Cas`] backend for
 //! durable point-in-time snapshots.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -57,19 +57,35 @@ impl Commit {
 /// Files are stored flat in a `BTreeMap<PathBuf, ContentHash>` for
 /// efficient lookup. Directory hashes are computed lazily when the root
 /// hash is requested or a commit is created.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MerkleTree {
     /// Flat map of absolute paths to their content hashes.
     files: BTreeMap<PathBuf, ContentHash>,
 
     /// Cached root hash, invalidated on any mutation.
     #[serde(skip)]
-    cached_root: RefCell<Option<ContentHash>>,
+    cached_root: Mutex<Option<ContentHash>>,
+}
+
+impl Clone for MerkleTree {
+    fn clone(&self) -> Self {
+        let cached = self.cached_root.lock().unwrap().clone();
+        Self {
+            files: self.files.clone(),
+            cached_root: Mutex::new(cached),
+        }
+    }
 }
 
 impl Default for MerkleTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PartialEq for MerkleTree {
+    fn eq(&self, other: &Self) -> bool {
+        self.files == other.files
     }
 }
 
@@ -80,7 +96,7 @@ impl MerkleTree {
         walk_tree_object(cas, root_hash, &PathBuf::new(), &mut files)?;
         Ok(Self {
             files,
-            cached_root: RefCell::new(None),
+            cached_root: Mutex::new(None),
         })
     }
 
@@ -88,21 +104,21 @@ impl MerkleTree {
     pub fn new() -> Self {
         Self {
             files: BTreeMap::new(),
-            cached_root: RefCell::new(None),
+            cached_root: Mutex::new(None),
         }
     }
 
     /// Insert or update a file at `path` with `hash`.
     pub fn update(&mut self, path: PathBuf, hash: ContentHash) {
         self.files.insert(path, hash);
-        *self.cached_root.borrow_mut() = None;
+        *self.cached_root.lock().unwrap() = None;
     }
 
     /// Remove a file at `path`. Returns `true` if it existed.
     pub fn remove(&mut self, path: &Path) -> bool {
         let existed = self.files.remove(path).is_some();
         if existed {
-            *self.cached_root.borrow_mut() = None;
+            *self.cached_root.lock().unwrap() = None;
         }
         existed
     }
@@ -114,7 +130,7 @@ impl MerkleTree {
     pub fn rename(&mut self, old: &Path, new: PathBuf) {
         if let Some(hash) = self.files.remove(old) {
             self.files.insert(new, hash);
-            *self.cached_root.borrow_mut() = None;
+            *self.cached_root.lock().unwrap() = None;
         }
     }
 
@@ -124,11 +140,13 @@ impl MerkleTree {
     /// each directory bottom-up, and returns the root hash. The result
     /// is cached until the next mutation.
     pub fn root_hash(&self) -> ContentHash {
-        if let Some(ref h) = *self.cached_root.borrow() {
+        let cached = self.cached_root.lock().unwrap();
+        if let Some(ref h) = *cached {
             return h.clone();
         }
+        drop(cached);
         let h = compute_root(&self.files);
-        *self.cached_root.borrow_mut() = Some(h.clone());
+        *self.cached_root.lock().unwrap() = Some(h.clone());
         h
     }
 

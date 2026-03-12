@@ -94,8 +94,15 @@ fn main() -> Result<()> {
         }
     };
 
-    let cas = LocalCas::new(config.data_dir.join("cas"))
+    let cas_path = config.data_dir.join("cas");
+    let cas = LocalCas::new(cas_path.clone())
         .context("failed to initialize CAS store")?;
+
+    // Second CAS handle for the API Bridge (same directory, safe
+    // because CAS is append-only with content-addressed dedup).
+    let api_cas: std::sync::Arc<dyn argus::cas::Cas> = std::sync::Arc::new(
+        LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
+    );
 
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     let seq_gen = SequenceGenerator::default();
@@ -105,7 +112,7 @@ fn main() -> Result<()> {
     emit_agent_start(&event_tx, &config, &seq_gen);
 
     // Build lock-free bridge for API server + tracer.
-    let shared = new_shared_state(config.agent_id.clone());
+    let shared = new_shared_state(config.agent_id.clone(), api_cas);
     shared.store_rules(config.build_ruleset());
     let rules_handle = shared.rules_handle();
 

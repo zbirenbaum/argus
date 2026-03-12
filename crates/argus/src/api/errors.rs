@@ -37,6 +37,20 @@ pub enum ApiError {
         /// Description of the problem.
         reason: String,
     },
+
+    /// No tree hash found for the given sequence number.
+    #[error("no tree hash for seq {seq}")]
+    SeqNotFound {
+        /// The sequence number that was looked up.
+        seq: u64,
+    },
+
+    /// Restore operation failed.
+    #[error("restore failed: {reason}")]
+    RestoreFailed {
+        /// Description of the failure.
+        reason: String,
+    },
 }
 
 impl IntoResponse for ApiError {
@@ -46,6 +60,8 @@ impl IntoResponse for ApiError {
             ApiError::AlreadyInState { .. } => (StatusCode::CONFLICT, self.to_string()),
             ApiError::RuleIndexOutOfBounds { .. } => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::InvalidBody { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
+            ApiError::SeqNotFound { .. } => (StatusCode::NOT_FOUND, self.to_string()),
+            ApiError::RestoreFailed { .. } => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 
         let body = axum::Json(json!({ "error": message }));

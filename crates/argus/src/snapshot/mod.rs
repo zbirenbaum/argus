@@ -11,12 +11,15 @@
 
 pub mod checkpoint;
 pub mod diff;
+pub mod restore;
 pub mod tree;
 
 #[doc(inline)]
 pub use checkpoint::{deserialize_checkpoint, serialize_checkpoint};
 #[doc(inline)]
 pub use diff::{DiffEntry, DiffKind};
+#[doc(inline)]
+pub use restore::{RestoreStats, restore_from_hash, restore_full, restore_selective, restore_selective_from_hash};
 #[doc(inline)]
 pub use tree::{Commit, MerkleTree, TreeObject};
 

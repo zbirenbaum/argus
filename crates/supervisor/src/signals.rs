@@ -14,6 +14,7 @@ use tracing::{Level, event};
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Returns `true` if a shutdown signal has been received.
+#[expect(dead_code, reason = "will be polled by ptrace loop for graceful shutdown")]
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
 }

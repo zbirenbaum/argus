@@ -73,6 +73,25 @@ pub enum EventPayload {
     MmapWarning(snapshot::MmapWarning),
 }
 
+impl EventPayload {
+    /// Extract the tree_hash if this event carries one.
+    pub fn tree_hash(&self) -> Option<&str> {
+        match self {
+            EventPayload::Write(e) => e.tree_hash.as_deref(),
+            EventPayload::Rename(e) => e.tree_hash.as_deref(),
+            EventPayload::Unlink(e) => e.tree_hash.as_deref(),
+            EventPayload::Mkdir(e) => e.tree_hash.as_deref(),
+            EventPayload::Rmdir(e) => e.tree_hash.as_deref(),
+            EventPayload::Truncate(e) => e.tree_hash.as_deref(),
+            EventPayload::Link(e) => e.tree_hash.as_deref(),
+            EventPayload::Symlink(e) => e.tree_hash.as_deref(),
+            EventPayload::InitialState(e) => e.tree_hash.as_deref(),
+            EventPayload::Checkpoint(e) => e.tree_hash.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 /// Immutable event record emitted by the supervisor.
 ///
 /// Contains dual timestamps for local ordering and cross-agent correlation,

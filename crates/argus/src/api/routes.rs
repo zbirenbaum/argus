@@ -9,15 +9,20 @@ use axum::Json;
 use axum::extract::{Path, State};
 use chrono::Utc;
 
+use std::path::PathBuf;
+
 use crate::api::errors::ApiError;
 use crate::api::state::{SharedState, resolve_approval};
 use crate::api::types::{
     ApproveResponse, DenyResponse, HealthResponse, PauseResponse, PendingAction,
-    PendingApprovalsResponse, ResumeResponse, RulesAppliedResponse, StatusResponse,
+    PendingApprovalsResponse, RestoreRequest, RestoreResponse, ResumeResponse,
+    RulesAppliedResponse, StatusResponse, TreeFileEntry, TreeSnapshotResponse,
 };
+use crate::cas::ContentHash;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, EventPayload};
 use crate::events::control;
+use crate::snapshot::restore;
 
 /// `POST /agent/pause` — freeze all traced processes.
 ///
@@ -235,6 +240,97 @@ pub async fn delete_rule_handler(
     Ok(Json(RulesAppliedResponse {
         applied: true,
         rule_count: count,
+    }))
+}
+
+/// `GET /tree` — current filesystem tree snapshot.
+pub async fn tree_handler(
+    State(state): State<SharedState>,
+) -> Json<TreeSnapshotResponse> {
+    let tree = state.load_tree();
+    let files: Vec<TreeFileEntry> = tree
+        .files()
+        .map(|(path, hash)| TreeFileEntry {
+            path: path.display().to_string(),
+            hash: hash.to_string(),
+        })
+        .collect();
+
+    Json(TreeSnapshotResponse {
+        tree_hash: tree.root_hash().to_string(),
+        seq: state.event_seq(),
+        file_count: tree.file_count(),
+        files,
+    })
+}
+
+/// `POST /restore` — restore filesystem to a past snapshot.
+///
+/// Requires `seq` in the request body to identify the target
+/// snapshot. Supports `"full"` mode (all files to target dir) and
+/// `"selective"` mode (specific paths only).
+///
+/// # Errors
+///
+/// Returns 404 if no tree hash exists for the given seq, or 500
+/// if the restore operation fails.
+pub async fn restore_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<RestoreRequest>,
+) -> Result<Json<RestoreResponse>, ApiError> {
+    let seq = req.seq.ok_or_else(|| ApiError::InvalidBody {
+        reason: "seq is required".into(),
+    })?;
+
+    let tree_hash_str = state.get_tree_hash(seq).ok_or(ApiError::SeqNotFound { seq })?;
+
+    let tree_hash = ContentHash::try_from(tree_hash_str.clone()).map_err(|e| {
+        ApiError::RestoreFailed {
+            reason: format!("invalid tree hash: {e}"),
+        }
+    })?;
+
+    let cas = state.cas();
+    let target_dir = PathBuf::from(
+        req.target
+            .as_deref()
+            .unwrap_or("/tmp/argus-restore"),
+    );
+
+    let stats = match req.mode.as_str() {
+        "selective" => {
+            let mut paths = Vec::new();
+            if let Some(p) = &req.path {
+                paths.push(PathBuf::from(p));
+            }
+            if let Some(ps) = &req.paths {
+                paths.extend(ps.iter().map(PathBuf::from));
+            }
+            if paths.is_empty() {
+                return Err(ApiError::InvalidBody {
+                    reason: "selective mode requires path or paths".into(),
+                });
+            }
+            restore::restore_selective_from_hash(&tree_hash, &paths, cas.as_ref(), &target_dir)
+                .map_err(|e| ApiError::RestoreFailed {
+                    reason: e.to_string(),
+                })?
+        }
+        _ => {
+            restore::restore_from_hash(&tree_hash, cas.as_ref(), &target_dir).map_err(|e| {
+                ApiError::RestoreFailed {
+                    reason: e.to_string(),
+                }
+            })?
+        }
+    };
+
+    Ok(Json(RestoreResponse {
+        restored_to_seq: seq,
+        restored_to_ts: String::new(),
+        tree_hash: tree_hash_str,
+        files_restored: stats.files_restored,
+        bytes_restored: stats.bytes_restored,
     }))
 }
 
