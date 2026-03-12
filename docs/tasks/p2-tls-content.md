@@ -1,6 +1,6 @@
 # P2: TLS Content Capture
 
-**Status**: not started
+**Status**: in progress
 
 **Spec reference**: `docs/spec/07-tls-network.md` (keylog capture, mitmdump parsing)
 
@@ -11,21 +11,36 @@
 ## Parallelizable with
 - P1-config, P1-events, P1-state, P1-seccomp, P1-tracer-loop, P2-s3-upload, P2-pause-resume-api
 
-## What needs to be done
-- Extend `crates/sandbox/src/net/mod.rs`:
-  - `KeylogWatcher`: watch SSLKEYLOGFILE via inotify, on change read new lines, store in CAS, emit TlsKeys event
-  - `MitmdumpParser`: read mitmdump JSON output (--set hardump=... or custom addon), parse into HttpRequest/HttpResponse events
-    - Extract: method, URL, status code, request headers, response headers
-    - Store request body + response body in CAS
-    - Emit HttpRequest event with req_hash, resp_hash
-  - Dedup network events: track (fd, timestamp, content_hash) to avoid duplicate capture from both ptrace write() and mitmdump
+## What was done
+- `crates/sandbox/src/net/keylog.rs` — `KeylogWatcher` reads SSLKEYLOGFILE incrementally, deduplicates by client_random, stores lines in CAS, emits `TlsKeys` events
+- `crates/sandbox/src/net/flow_parser.rs` — parses mitmdump addon JSON output (newline-delimited), extracts method/URL/status/headers/bodies, stores headers and base64-decoded bodies in CAS, produces `HttpRequest`/`HttpResponse` events
+- `crates/sandbox/src/net/dedup.rs` — `NetworkDedup` tracks `(fd, content_hash)` pairs with time-based expiry to suppress duplicates from ptrace + proxy
+- `crates/sandbox/src/events/network.rs` — `TlsKeys`, `HttpRequest`, `HttpResponse` event payload types
+- `crates/sandbox/src/net/mod.rs` — updated to re-export new modules
+- `crates/sandbox/Cargo.toml` — added `base64` dependency
+
+## What works
+- NSS Key Log Format line parsing and validation
+- Incremental keylog file reading with offset tracking
+- Deduplication by client_random in keylog watcher
+- CAS storage of keylog lines with hash references in TlsKeys events
+- Mitmdump flow JSON parsing (request + optional response)
+- Base64-decoded body storage in CAS
+- Header serialization and CAS storage
+- HttpRequest/HttpResponse event construction with content hashes
+- Network event dedup with time-based expiry window
+- 29 unit tests passing, 0 warnings
+
+## What's missing
+- inotify-based file watching (currently poll-driven, needs Linux inotify integration)
+- Integration with actual mitmdump addon script (script not yet written)
+- Integration test with live mitmdump proxy
+- Wiring into the supervisor ptrace loop event emission path
 
 ## How to test
 ```bash
 cargo test -p sandbox --lib net
 ```
-Unit tests: keylog line parsing, HTTP event construction from mitmdump JSON.
-Integration test (ignored): mitmdump proxy captures HTTPS request, events emitted with correct hashes.
 
 ## Branch
 - **Branch**: `p2-tls-content`

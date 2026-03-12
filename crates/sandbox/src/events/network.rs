@@ -50,8 +50,6 @@ pub struct HttpRequest {
     pub headers_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
 }
 
 /// An HTTP response was captured.
@@ -129,7 +127,6 @@ mod tests {
             url: "https://api.example.com/data".into(),
             headers_hash: Some("h1".into()),
             body_hash: Some("b1".into()),
-            status: Some(200),
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: HttpRequest = serde_json::from_str(&json).unwrap();
@@ -148,5 +145,32 @@ mod tests {
         assert!(!json.contains("headers_hash"));
         let back: HttpResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn tls_keys_none_fields_omitted() {
+        let t = TlsKeys {
+            pid: 1,
+            fd: 3,
+            sni: None,
+            keylog_line_hash: None,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("sni"));
+        assert!(!json.contains("keylog_line_hash"));
+    }
+
+    #[test]
+    fn http_request_none_fields_omitted() {
+        let r = HttpRequest {
+            pid: 1,
+            method: "GET".into(),
+            url: "https://example.com".into(),
+            headers_hash: None,
+            body_hash: None,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("headers_hash"));
+        assert!(!json.contains("body_hash"));
     }
 }
