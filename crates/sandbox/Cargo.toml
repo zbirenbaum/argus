@@ -33,6 +33,7 @@ bytes = "1"
 # Used in cas/store.rs for atomic writes (not just tests).
 tempfile = "3"
 base64 = "0.22"
+hex = "0.4"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

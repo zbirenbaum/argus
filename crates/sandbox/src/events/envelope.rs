@@ -146,6 +146,111 @@ fn monotonic_nanos() -> u64 {
     elapsed.as_nanos() as u64
 }
 
+impl EventPayload {
+    /// Returns the serde discriminator tag for this variant.
+    pub fn event_type_tag(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => "exec",
+            Self::Fork(_) => "fork",
+            Self::Exit(_) => "exit",
+            Self::Read(_) => "read",
+            Self::Write(_) => "write",
+            Self::Rename(_) => "rename",
+            Self::Unlink(_) => "unlink",
+            Self::Mkdir(_) => "mkdir",
+            Self::Rmdir(_) => "rmdir",
+            Self::Chmod(_) => "chmod",
+            Self::Truncate(_) => "truncate",
+            Self::Link(_) => "link",
+            Self::Symlink(_) => "symlink",
+            Self::Stdio(_) => "stdio",
+            Self::PipeCreate(_) => "pipe_create",
+            Self::PipeData(_) => "pipe_data",
+            Self::PipeClose(_) => "pipe_close",
+            Self::PtyCreate(_) => "pty_create",
+            Self::PtyData(_) => "pty_data",
+            Self::FdRedirect(_) => "fd_redirect",
+            Self::Socket(_) => "socket",
+            Self::Connect(_) => "connect",
+            Self::Accept(_) => "accept",
+            Self::TlsKeys(_) => "tls_keys",
+            Self::HttpRequest(_) => "http_request",
+            Self::HttpResponse(_) => "http_response",
+            Self::AgentStart(_) => "agent_start",
+            Self::AgentPause(_) => "agent_pause",
+            Self::AgentResume(_) => "agent_resume",
+            Self::PendingApproval(_) => "pending_approval",
+            Self::ApprovalGranted(_) => "approval_granted",
+            Self::ApprovalDenied(_) => "approval_denied",
+            Self::InitialState(_) => "initial_state",
+            Self::Checkpoint(_) => "checkpoint",
+            Self::MmapWarning(_) => "mmap_warning",
+        }
+    }
+
+    /// Returns the primary PID associated with this event, if any.
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Exec(e) => Some(e.pid),
+            Self::Fork(f) => Some(f.parent_pid),
+            Self::Exit(e) => Some(e.pid),
+            Self::Read(r) => Some(r.pid),
+            Self::Write(w) => Some(w.pid),
+            Self::Rename(r) => Some(r.pid),
+            Self::Unlink(u) => Some(u.pid),
+            Self::Mkdir(m) => Some(m.pid),
+            Self::Rmdir(r) => Some(r.pid),
+            Self::Chmod(c) => Some(c.pid),
+            Self::Truncate(t) => Some(t.pid),
+            Self::Link(l) => Some(l.pid),
+            Self::Symlink(s) => Some(s.pid),
+            Self::Stdio(s) => Some(s.pid),
+            Self::PipeCreate(p) => Some(p.pid),
+            Self::PipeData(p) => Some(p.pid),
+            Self::PipeClose(p) => Some(p.pid),
+            Self::PtyCreate(p) => Some(p.pid),
+            Self::PtyData(p) => Some(p.pid),
+            Self::FdRedirect(f) => Some(f.pid),
+            Self::Socket(s) => Some(s.pid),
+            Self::Connect(c) => Some(c.pid),
+            Self::Accept(a) => Some(a.pid),
+            Self::TlsKeys(t) => Some(t.pid),
+            Self::HttpRequest(r) => Some(r.pid),
+            Self::HttpResponse(r) => Some(r.pid),
+            Self::PendingApproval(p) => Some(p.pid),
+            Self::ApprovalGranted(a) => Some(a.pid),
+            Self::ApprovalDenied(a) => Some(a.pid),
+            Self::MmapWarning(m) => Some(m.pid),
+            Self::AgentStart(_)
+            | Self::AgentPause(_)
+            | Self::AgentResume(_)
+            | Self::InitialState(_)
+            | Self::Checkpoint(_) => None,
+        }
+    }
+
+    /// Returns filesystem paths referenced by this event.
+    ///
+    /// Most events return zero or one path. `Rename` returns both
+    /// the old and new paths.
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            Self::Read(r) => vec![&r.path],
+            Self::Write(w) => vec![&w.path],
+            Self::Rename(r) => vec![&r.old_path, &r.new_path],
+            Self::Unlink(u) => vec![&u.path],
+            Self::Mkdir(m) => vec![&m.path],
+            Self::Rmdir(r) => vec![&r.path],
+            Self::Chmod(c) => vec![&c.path],
+            Self::Truncate(t) => vec![&t.path],
+            Self::Link(l) => vec![&l.target, &l.link_path],
+            Self::Symlink(s) => vec![&s.target, &s.link_path],
+            Self::MmapWarning(m) => vec![&m.path],
+            _ => vec![],
+        }
+    }
+}
+
 impl Event {
     /// Constructs an event with auto-filled seq and timestamps.
     pub fn new(
