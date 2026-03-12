@@ -4,7 +4,6 @@
 //! serializes each HTTP flow as a JSON object with request and response
 //! fields. Extracts headers and bodies, stores bodies in the CAS, and
 //! produces `HttpRequest` and `HttpResponse` event payloads.
-// Rust guideline compliant 2026-02-21
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -82,20 +81,19 @@ pub fn process_flow(
     let req_headers_hash = store_headers(cas, &flow.request.headers)?;
     let req_body_hash = store_body(cas, flow.request.body.as_deref())?;
 
-    let (resp_status, resp_event) = match &flow.response {
+    let resp_event = match &flow.response {
         Some(resp) => {
             let resp_headers_hash = store_headers(cas, &resp.headers)?;
             let resp_body_hash = store_body(cas, resp.body.as_deref())?;
 
-            let http_resp = HttpResponse {
+            Some(HttpResponse {
                 pid,
                 status: resp.status_code,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
-            };
-            (Some(resp.status_code), Some(http_resp))
+            })
         }
-        None => (None, None),
+        None => None,
     };
 
     event!(
@@ -103,7 +101,6 @@ pub fn process_flow(
         Level::DEBUG,
         flow.method = %flow.request.method,
         flow.url = %flow.request.url,
-        flow.status = resp_status.unwrap_or(0),
         "processed HTTP flow",
     );
 
@@ -113,7 +110,6 @@ pub fn process_flow(
         url: flow.request.url.clone(),
         headers_hash: req_headers_hash,
         body_hash: req_body_hash,
-        status: resp_status,
     };
 
     Ok(ProcessedFlow {
@@ -230,7 +226,6 @@ mod tests {
         assert_eq!(result.request.pid, 42);
         assert!(result.request.body_hash.is_some());
         assert!(result.request.headers_hash.is_some());
-        assert_eq!(result.request.status, Some(200));
 
         let resp = result.response.unwrap();
         assert_eq!(resp.status, 200);

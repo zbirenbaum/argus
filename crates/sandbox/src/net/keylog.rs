@@ -4,7 +4,6 @@
 //! line in the CAS, and produces `TlsKeys` events. The watcher is
 //! designed to be driven from a polling loop or inotify callback;
 //! it tracks the last-read byte offset to avoid re-processing lines.
-// Rust guideline compliant 2026-02-21
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -29,13 +28,14 @@ pub struct KeylogLine {
 
 /// Watches an SSLKEYLOGFILE and emits events for new lines.
 ///
-/// Maintains read offset and a set of seen client_random values to
-/// avoid emitting duplicate events when the file is re-read.
+/// Maintains read offset and a set of seen `(label, client_random)` pairs
+/// to avoid emitting duplicate events when the file is re-read. Multiple
+/// TLS secret types share the same client_random, so the label is needed.
 #[derive(Debug)]
 pub struct KeylogWatcher {
     path: PathBuf,
     offset: u64,
-    seen: HashSet<String>,
+    seen: HashSet<(String, String)>,
 }
 
 impl KeylogWatcher {
@@ -86,7 +86,8 @@ impl KeylogWatcher {
             self.offset += bytes_read as u64;
 
             if let Some(parsed) = parse_keylog_line(&buf) {
-                if self.seen.insert(parsed.client_random.clone()) {
+                let key = (parsed.label.clone(), parsed.client_random.clone());
+                if self.seen.insert(key) {
                     new_lines.push(parsed);
                 }
             }
@@ -156,6 +157,18 @@ pub fn parse_keylog_line(line: &str) -> Option<KeylogLine> {
         return None;
     }
 
+    // client_random must be exactly 32 bytes (64 hex characters).
+    if parts[1].len() != 64 {
+        event!(
+            name: "net.keylog.malformed",
+            Level::WARN,
+            keylog.label = parts[0],
+            keylog.client_random_len = parts[1].len(),
+            "skipping keylog entry: client_random is not 64 hex characters",
+        );
+        return None;
+    }
+
     Some(KeylogLine {
         label: parts[0].to_owned(),
         client_random: parts[1].to_owned(),
@@ -174,13 +187,23 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// 64 hex character client_random for tests (32 bytes).
+    const TEST_CR: &str = "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
+
     #[test]
     fn parse_valid_client_random_line() {
-        let line = "CLIENT_RANDOM aabbccdd00112233 \
-                    deadbeefcafebabe00112233445566778899aabb";
-        let parsed = parse_keylog_line(line).expect("should parse");
+        let line = format!("CLIENT_RANDOM {TEST_CR} deadbeef");
+        let parsed = parse_keylog_line(&line).expect("should parse");
         assert_eq!(parsed.label, "CLIENT_RANDOM");
-        assert_eq!(parsed.client_random, "aabbccdd00112233");
+        assert_eq!(parsed.client_random, TEST_CR);
+    }
+
+    #[test]
+    fn parse_rejects_short_client_random() {
+        assert!(
+            parse_keylog_line("CLIENT_RANDOM aabbccdd deadbeef").is_none(),
+            "client_random shorter than 64 hex chars should be rejected"
+        );
     }
 
     #[test]
@@ -204,6 +227,9 @@ mod tests {
         assert!(parse_keylog_line("CLIENT_RANDOM not_hex secret").is_none());
     }
 
+    const TEST_CR2: &str = "ccddaabb00112233ccddaabb00112233ccddaabb00112233ccddaabb00112233";
+    const TEST_CR3: &str = "eeff001122334455eeff001122334455eeff001122334455eeff001122334455";
+
     #[test]
     fn watcher_reads_new_lines_incrementally() {
         let dir = TempDir::new().unwrap();
@@ -211,7 +237,7 @@ mod tests {
 
         fs::write(
             &path,
-            "CLIENT_RANDOM aa11 bb22\nCLIENT_RANDOM cc33 dd44\n",
+            format!("CLIENT_RANDOM {TEST_CR} bb22\nCLIENT_RANDOM {TEST_CR2} dd44\n"),
         )
         .unwrap();
 
@@ -219,33 +245,36 @@ mod tests {
         let first = watcher.read_new_lines().unwrap();
         assert_eq!(first.len(), 2);
 
-        // Append another line.
         use std::io::Write;
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(f, "CLIENT_RANDOM ee55 ff66").unwrap();
+        writeln!(f, "CLIENT_RANDOM {TEST_CR3} ff66").unwrap();
 
         let second = watcher.read_new_lines().unwrap();
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].client_random, "ee55");
+        assert_eq!(second[0].client_random, TEST_CR3);
     }
 
     #[test]
-    fn watcher_deduplicates_by_client_random() {
+    fn watcher_deduplicates_by_label_and_client_random() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("keylog.txt");
 
-        fs::write(&path, "CLIENT_RANDOM aa11 bb22\n").unwrap();
+        fs::write(&path, format!("CLIENT_RANDOM {TEST_CR} bb22\n")).unwrap();
         let mut watcher = KeylogWatcher::new(path.clone());
         let first = watcher.read_new_lines().unwrap();
         assert_eq!(first.len(), 1);
 
-        // Write the same client_random again with a different secret.
         use std::io::Write;
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(f, "CLIENT_RANDOM aa11 cc33").unwrap();
-
+        // Same label + client_random should be skipped.
+        writeln!(f, "CLIENT_RANDOM {TEST_CR} cc33").unwrap();
         let second = watcher.read_new_lines().unwrap();
-        assert_eq!(second.len(), 0, "duplicate client_random should be skipped");
+        assert_eq!(second.len(), 0, "duplicate (label, client_random) should be skipped");
+
+        // Different label with same client_random should NOT be skipped.
+        writeln!(f, "CLIENT_HANDSHAKE_TRAFFIC_SECRET {TEST_CR} dd44").unwrap();
+        let third = watcher.read_new_lines().unwrap();
+        assert_eq!(third.len(), 1, "different label should not be deduped");
     }
 
     #[test]
@@ -263,7 +292,7 @@ mod tests {
 
         fs::write(
             &keylog_path,
-            "CLIENT_RANDOM aa11 bb22\nCLIENT_RANDOM cc33 dd44\n",
+            format!("CLIENT_RANDOM {TEST_CR} bb22\nCLIENT_RANDOM {TEST_CR2} dd44\n"),
         )
         .unwrap();
 
@@ -282,7 +311,7 @@ mod tests {
         let stored = cas.read(&hash).unwrap();
         assert_eq!(
             String::from_utf8(stored).unwrap(),
-            "CLIENT_RANDOM aa11 bb22"
+            format!("CLIENT_RANDOM {TEST_CR} bb22"),
         );
     }
 }

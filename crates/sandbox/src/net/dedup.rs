@@ -4,8 +4,8 @@
 //! by both the ptrace write() interception and the mitmdump proxy.
 //! Tracks `(fd, content_hash)` pairs with timestamps, expiring entries
 //! older than the dedup window to bound memory usage.
-// Rust guideline compliant 2026-02-21
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -62,12 +62,18 @@ impl NetworkDedup {
             content_hash: content_hash.to_owned(),
         };
 
-        if self.seen.contains_key(&key) {
-            return true;
+        match self.seen.entry(key) {
+            Entry::Occupied(_) => true,
+            Entry::Vacant(slot) => {
+                slot.insert(Instant::now());
+                false
+            }
         }
+    }
 
-        self.seen.insert(key, Instant::now());
-        false
+    /// Remove all tracked entries, resetting state for a new session.
+    pub fn clear(&mut self) {
+        self.seen.clear();
     }
 
     /// Number of entries currently tracked.
@@ -147,6 +153,17 @@ mod tests {
         dedup.is_duplicate(2, "b");
         assert_eq!(dedup.len(), 2);
         assert!(!dedup.is_empty());
+    }
+
+    #[test]
+    fn clear_resets_state() {
+        let mut dedup = NetworkDedup::new();
+        dedup.is_duplicate(1, "a");
+        assert_eq!(dedup.len(), 1);
+
+        dedup.clear();
+        assert!(dedup.is_empty());
+        assert!(!dedup.is_duplicate(1, "a"), "after clear, same key should not be duplicate");
     }
 
     #[test]
