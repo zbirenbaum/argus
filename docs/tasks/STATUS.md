@@ -54,45 +54,47 @@ Always verify tests pass in the container before merging.
 | P1: Net/TLS Env | `p1-net-env` | 9 pass | done | e22fda7 |
 | P2: S3 Upload | `p2-s3-upload` | 68 pass | done | 9dc9729 |
 | P1: Tracer Loop | `p1-tracer-loop` | 146 pass | done | 6d973bc |
+| P2: TLS Content | `p2-tls-content` | 29 pass | done | b4acce9 |
+| P2: Event Segments | `p2-event-segments` | 17 pass | done | 7f9b893 |
+| P2: Content Capture | `p2-content-capture` | 13 pass | done | 0cb7f9a |
+| P2: Write Locking | `p2-write-locking` | 8 pass | done | 0cb7f9a |
+| P2: Pause/Resume API | `p2-pause-resume-api` | 36 pass | done | 0cb7f9a |
 
 ## Pending Review (implementation done, blocking on review/fix cycle)
 
 | Task | Branch | Worktree | Tests | Review |
 |-|-|-|-|-|
-| P2: TLS Content | `p2-tls-content` | agent-a5bc4ff9 | 29 pass | review dispatched |
-| P2: Event Segments | `p2-event-segments` | agent-afaf96b9 | 17 pass | review dispatched |
+| P1: Supervisor Main | `p1-supervisor-main` | agent-a908dd0e | 17 pass | needs dispatch |
 
 ## Implementation In Progress
 
-| Task | Branch | Worktree | Agent status |
-|-|-|-|-|
-| P1: Supervisor Main | `p1-supervisor-main` | agent-a908dd0e | running |
-| P2: Content Capture | `p2-content-capture` | agent-a929a1e3 | running |
-| P2: Write Locking | `p2-write-locking` | agent-afbafafc | running |
-| P2: Pause/Resume API | `p2-pause-resume-api` | agent-ae7abb32 | running |
+_None currently running._
+
+## Ready to Dispatch (dependencies met)
+
+| Task | Branch | Depends on |
+|-|-|-|
+| P3: Indexes | `p3-indexes` | events (merged), event-segments (merged) |
+| P3: Merkle Tree | `p3-merkle-tree` | content-capture (merged), write-locking (merged), cas (merged) |
 
 ## Blocked (waiting on dependencies)
 
 | Task | Branch | Depends on |
 |-|-|-|
-| P3: Indexes | `p3-indexes` | events (merged), event-segments (in progress) |
-| P3: Merkle Tree | `p3-merkle-tree` | content-capture (in progress), write-locking (in progress), cas (merged) |
-| P3: Query API | `p3-query-api` | indexes, merkle-tree, pause-resume-api (in progress) |
+| P3: Query API | `p3-query-api` | indexes, merkle-tree, pause-resume-api (merged) |
 | P3: Restore | `p3-restore` | merkle-tree, s3-upload (merged) |
 | P3: Realtime API | `p3-realtime-api` | query-api, events (merged) |
-| P4: Container Image | `p4-container-image` | supervisor-main (in progress), s3-upload (merged) |
+| P4: Container Image | `p4-container-image` | supervisor-main (pending review), s3-upload (merged) |
 | P4: Cross-Agent | `p4-cross-agent` | container-image, query-api, s3-upload (merged) |
-| P5: Polish | `p5-polish` | realtime-api, pause-resume-api (in progress) |
+| P5: Polish | `p5-polish` | realtime-api, pause-resume-api (merged) |
 
 ## Running Agents Tracker
 
 Check these before dispatching new work:
 
-| Agent ID | Task | Type | Worktree | Status |
-|-|-|-|-|-|
-| ad4811153edf13f0e | P2 Event Segments | review | agent-afaf96b9 | running |
-| affed1170d899316a | P2 TLS Content | review | agent-a5bc4ff9 | running |
-| a908dd0e014b86181 | P1 Supervisor Main | impl | agent-a908dd0e | running |
-| a929a1e31aee445ae | P2 Content Capture | impl | agent-a929a1e3 | running |
-| afbafafcf55a2b224 | P2 Write Locking | impl | agent-afbafafc | running |
-| ae7abb32f7a9290cc | P2 Pause/Resume API | impl | agent-ae7abb32 | running |
+_No agents currently running._
+
+## Build Status
+
+- Last test run: 294 pass, 0 fail, 2 ignored (container 04863da34598)
+- Commit: 0cb7f9a
