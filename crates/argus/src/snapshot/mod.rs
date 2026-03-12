@@ -16,7 +16,7 @@ pub mod tree;
 #[doc(inline)]
 pub use checkpoint::{deserialize_checkpoint, serialize_checkpoint};
 #[doc(inline)]
-pub use diff::{diff_trees, DiffEntry, DiffKind};
+pub use diff::{DiffEntry, DiffKind};
 #[doc(inline)]
 pub use tree::{Commit, MerkleTree, TreeObject};
 

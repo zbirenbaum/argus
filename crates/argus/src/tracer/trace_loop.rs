@@ -439,33 +439,38 @@ impl TracerLoop {
         Ok(())
     }
 
-    /// Updates the Merkle tree for a file write and returns the new root hash.
+    /// Updates the Merkle tree for a file write and returns the CAS tree hash.
     pub fn tree_update(&mut self, path: &str, content_hash: &str) -> Option<String> {
         use crate::cas::ContentHash;
         if let Ok(h) = ContentHash::try_from(content_hash.to_string()) {
             self.tree.update(PathBuf::from(path), h);
-            Some(self.tree.root_hash().to_string())
+            self.store_tree()
         } else {
             None
         }
     }
 
-    /// Removes a file from the Merkle tree and returns the new root hash.
+    /// Removes a file from the Merkle tree and returns the CAS tree hash.
     pub fn tree_remove(&mut self, path: &str) -> Option<String> {
         self.tree.remove(std::path::Path::new(path));
-        Some(self.tree.root_hash().to_string())
+        self.store_tree()
     }
 
-    /// Renames a file in the Merkle tree and returns the new root hash.
+    /// Renames a file in the Merkle tree and returns the CAS tree hash.
     pub fn tree_rename(&mut self, old: &str, new: &str) -> Option<String> {
         self.tree
             .rename(std::path::Path::new(old), PathBuf::from(new));
+        self.store_tree()
+    }
+
+    /// Returns the current Merkle tree root hash (without storing).
+    pub fn tree_root(&self) -> Option<String> {
         Some(self.tree.root_hash().to_string())
     }
 
-    /// Returns the current Merkle tree root hash.
-    pub fn tree_root(&self) -> Option<String> {
-        Some(self.tree.root_hash().to_string())
+    /// Stores tree objects in CAS and returns the root CAS hash.
+    fn store_tree(&self) -> Option<String> {
+        self.tree.store(&self.cas).ok().map(|h| h.to_string())
     }
 
     /// Emits an event through the channel.
