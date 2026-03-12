@@ -6,11 +6,16 @@
 //! blocked by I/O.
 
 use std::io::{self, Write};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use argus::events::Event;
 use tracing::{Level, event};
+
+/// Maximum time between flushes. Bounds worst-case latency for
+/// consumers reading the event stream (tests, streaming pipes).
+const FLUSH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Spawns a thread that writes events as JSON lines to stdout.
 ///
@@ -24,34 +29,46 @@ pub fn spawn(rx: Receiver<Event>) -> JoinHandle<()> {
 }
 
 /// Reads events from the channel and writes JSON lines to stdout.
+///
+/// Uses `recv_timeout` to batch events within a flush window. When
+/// the timer fires or the channel empties, the buffer is flushed.
+/// This gives O(1) syscalls per batch instead of per event while
+/// keeping worst-case read latency at `FLUSH_INTERVAL`.
 fn write_loop(rx: Receiver<Event>) {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
     let mut count: u64 = 0;
+    let mut dirty = false;
 
-    for evt in rx {
-        match serde_json::to_string(&evt) {
-            Ok(json) => {
-                // A partial write here is acceptable; the next event
-                // will still be on its own line.
-                if writeln!(out, "{json}").is_err() {
-                    event!(
-                        name: "event_writer.write_error",
-                        Level::ERROR,
-                        "failed to write event to stdout, stopping writer",
-                    );
-                    return;
+    loop {
+        let recv = if dirty {
+            // Already have buffered writes — wait up to the flush
+            // interval for more events before flushing.
+            match rx.recv_timeout(FLUSH_INTERVAL) {
+                Ok(evt) => Some(evt),
+                Err(RecvTimeoutError::Timeout) => {
+                    let _ = out.flush();
+                    dirty = false;
+                    continue;
                 }
-                count += 1;
+                Err(RecvTimeoutError::Disconnected) => None,
             }
-            Err(e) => {
-                event!(
-                    name: "event_writer.serialize_error",
-                    Level::ERROR,
-                    error.message = %e,
-                    event.seq = evt.seq,
-                    "failed to serialize event seq={{event.seq}}: {{error.message}}",
-                );
+        } else {
+            // Buffer is clean — block until the next event arrives.
+            rx.recv().ok()
+        };
+
+        let Some(evt) = recv else { break };
+
+        if write_event(&mut out, &evt) {
+            count += 1;
+            dirty = true;
+        }
+
+        // Drain any queued events without blocking.
+        while let Ok(evt) = rx.try_recv() {
+            if write_event(&mut out, &evt) {
+                count += 1;
             }
         }
     }
@@ -71,6 +88,33 @@ fn write_loop(rx: Receiver<Event>) {
         events.count = count,
         "event writer finished, wrote {{events.count}} events",
     );
+}
+
+/// Serializes and writes a single event. Returns `true` on success.
+fn write_event(out: &mut impl Write, evt: &Event) -> bool {
+    match serde_json::to_string(evt) {
+        Ok(json) => {
+            if writeln!(out, "{json}").is_err() {
+                event!(
+                    name: "event_writer.write_error",
+                    Level::ERROR,
+                    "failed to write event to stdout, stopping writer",
+                );
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            event!(
+                name: "event_writer.serialize_error",
+                Level::ERROR,
+                error.message = %e,
+                event.seq = evt.seq,
+                "failed to serialize event seq={{event.seq}}: {{error.message}}",
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]

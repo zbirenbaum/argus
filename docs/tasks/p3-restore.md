@@ -1,6 +1,6 @@
 # P3: Restore
 
-**Status**: in progress
+**Status**: in progress (validation test integrated)
 
 **Spec reference**: `docs/spec/04-snapshots-restore.md` (restore modes)
 
@@ -49,6 +49,13 @@
   - Creates second LocalCas handle for Bridge (same directory, safe for append-only CAS)
   - Passes `Arc<dyn Cas>` to `new_shared_state`
 
+- `crates/supervisor/src/event_writer.rs`:
+  - Batched flush with 100ms timer via `recv_timeout` instead of per-event flush
+  - Drains queued events before flushing to batch syscalls
+
+- `tests/validate.sh`:
+  - Test 11 implemented: full restore, selective restore, /tree endpoint verification
+
 ## What works
 - Full restore to a new directory from any past seq
 - Selective restore (specific paths) from any past seq
@@ -62,7 +69,6 @@
 - Timestamp-based restore (binary search event log for closest seq)
 - `POST /restore/undo` endpoint
 - `/tree/diff` endpoint (needs two tree hashes)
-- Integration test (test 11 from spec)
 
 ## How to test
 ```bash

@@ -573,8 +573,152 @@ test_10() {
 
 test_11() {
     echo "Test 11: Snapshot and Restore"
-    echo "  SKIP: requires restore API + CLI (not yet integrated)"
-    record 11 "Snapshot/restore" "SKIP"
+    cleanup_workspace
+
+    local ok=true
+    local events_file="/tmp/test11_events.jsonl"
+    local restore_dir="/tmp/argus-test-restore"
+    rm -f "$events_file"
+    rm -rf "$restore_dir"
+
+    # Agent writes v1, waits, writes v2, then sleeps long enough for
+    # us to call the restore API while the supervisor is still alive.
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" \
+        -- bash -c '
+            echo "version-one" > /tmp/argus-test-workspace/snap.txt
+            sleep 1
+            echo "version-two" > /tmp/argus-test-workspace/snap.txt
+            sleep 10
+        ' > "$events_file" 2>/dev/null &
+    local sup_pid=$!
+
+    # Wait for both content writes (size > 0) to land.
+    local waited=0
+    local write_count=0
+    while [ "$write_count" -lt 2 ] && [ "$waited" -lt 40 ]; do
+        sleep 0.3
+        write_count=$(jq -c 'select(.type == "write" and .path == "/tmp/argus-test-workspace/snap.txt" and .size > 0)' "$events_file" 2>/dev/null | wc -l | tr -d ' ')
+        waited=$((waited + 1))
+    done
+
+    if [ "$write_count" -lt 2 ]; then
+        echo "  FAIL: expected >= 2 content write events, got $write_count"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 11 "Snapshot/restore" "FAIL"
+        return
+    fi
+
+    # Get the seq of the first content write (v1 state, size > 0).
+    local first_write_seq
+    first_write_seq=$(jq -c 'select(.type == "write" and .path == "/tmp/argus-test-workspace/snap.txt" and .size > 0)' "$events_file" 2>/dev/null | head -1 | jq '.seq')
+
+    if [ -z "$first_write_seq" ] || [ "$first_write_seq" = "null" ]; then
+        echo "  FAIL: could not find first write seq"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 11 "Snapshot/restore" "FAIL"
+        return
+    fi
+
+    # --- Verify /tree endpoint works ---
+    local tree_resp tree_file_count tree_hash
+    tree_resp=$(curl -sf http://127.0.0.1:9090/tree 2>/dev/null)
+    if [ $? -ne 0 ] || [ -z "$tree_resp" ]; then
+        echo "  FAIL: /tree endpoint failed"
+        ok=false
+        tree_file_count=0
+        tree_hash=""
+    else
+        tree_file_count=$(echo "$tree_resp" | jq '.file_count')
+        tree_hash=$(echo "$tree_resp" | jq -r '.tree_hash // empty')
+        if [ "$tree_file_count" -lt 1 ]; then
+            echo "  FAIL: tree file_count=$tree_file_count, expected >= 1"
+            ok=false
+        fi
+        if [ -z "$tree_hash" ]; then
+            echo "  FAIL: tree response missing tree_hash"
+            ok=false
+        fi
+    fi
+
+    # --- Full restore to v1 ---
+    local restore_resp
+    restore_resp=$(curl -sf -X POST http://127.0.0.1:9090/restore \
+        -H 'Content-Type: application/json' \
+        -d "{\"seq\": $first_write_seq, \"mode\": \"full\", \"target\": \"$restore_dir/full\"}" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$restore_resp" ]; then
+        echo "  FAIL: full restore API call failed (seq=$first_write_seq)"
+        kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+        record 11 "Snapshot/restore" "FAIL"
+        return
+    fi
+
+    local full_files_restored
+    full_files_restored=$(echo "$restore_resp" | jq '.files_restored')
+    if [ "$full_files_restored" -lt 1 ]; then
+        echo "  FAIL: full restore returned files_restored=$full_files_restored"
+        ok=false
+    fi
+
+    # Find where the restored file landed — tree uses absolute paths.
+    local restored_file="$restore_dir/full/tmp/argus-test-workspace/snap.txt"
+    if [ -f "$restored_file" ]; then
+        local restored_content
+        restored_content=$(cat "$restored_file")
+        if [ "$restored_content" != "version-one" ]; then
+            echo "  FAIL: full restore content='$restored_content', expected 'version-one'"
+            ok=false
+        fi
+    else
+        echo "  FAIL: full restore did not create snap.txt"
+        ok=false
+    fi
+
+    # --- Selective restore of snap.txt to v1 ---
+    # Tree stores absolute paths stripped of leading /.
+    local selective_resp selective_files
+    selective_resp=$(curl -sf -X POST http://127.0.0.1:9090/restore \
+        -H 'Content-Type: application/json' \
+        -d "{\"seq\": $first_write_seq, \"mode\": \"selective\", \"target\": \"$restore_dir/selective\", \"paths\": [\"tmp/argus-test-workspace/snap.txt\"]}" 2>/dev/null)
+
+    if [ $? -ne 0 ] || [ -z "$selective_resp" ]; then
+        echo "  FAIL: selective restore API call failed"
+        selective_files=0
+        ok=false
+    else
+        selective_files=$(echo "$selective_resp" | jq '.files_restored')
+        if [ "$selective_files" -ne 1 ]; then
+            echo "  FAIL: selective restore files_restored=$selective_files, expected 1"
+            ok=false
+        fi
+
+        local sel_file="$restore_dir/selective/tmp/argus-test-workspace/snap.txt"
+        if [ -f "$sel_file" ]; then
+            local sel_content
+            sel_content=$(cat "$sel_file")
+            if [ "$sel_content" != "version-one" ]; then
+                echo "  FAIL: selective restore content='$sel_content', expected 'version-one'"
+                ok=false
+            fi
+        else
+            echo "  FAIL: selective restore did not create snap.txt"
+            ok=false
+        fi
+    fi
+
+    # Kill supervisor (agent is still sleeping).
+    kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
+
+    # Cleanup.
+    rm -rf "$restore_dir"
+    cleanup_workspace
+
+    if $ok; then
+        echo "  PASS: full_files=$full_files_restored selective=$selective_files tree_files=$tree_file_count"
+        record 11 "Snapshot/restore" "PASS"
+    else
+        record 11 "Snapshot/restore" "FAIL"
+    fi
 }
 
 test_12() {
