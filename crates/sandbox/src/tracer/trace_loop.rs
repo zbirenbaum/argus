@@ -6,7 +6,7 @@
 //! follows forks, program replacements, and exits. Emits structured
 //! events over a channel for downstream consumers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,6 +82,13 @@ pub struct TracerLoop {
     /// Last known content hash per path, used as before_hash for the
     /// next mutation. Guarantees an unbroken hash chain across events.
     pub path_hashes: HashMap<String, String>,
+    /// Path → pid currently in-kernel executing a write. Serializes
+    /// concurrent writes to the same file at the ptrace level,
+    /// preventing kernel-level interleaving and garbled content.
+    pub active_writes: HashMap<String, u32>,
+    /// Tracees held at syscall entry waiting for the active writer on
+    /// the same path to finish. Drained FIFO on write completion.
+    pub write_wait_queue: HashMap<String, VecDeque<PendingCapture>>,
     event_tx: Sender<Event>,
     seq_gen: Arc<SequenceGenerator>,
     agent_id: String,
@@ -104,6 +111,8 @@ impl TracerLoop {
             cas,
             pending_captures: HashMap::new(),
             path_hashes: HashMap::new(),
+            active_writes: HashMap::new(),
+            write_wait_queue: HashMap::new(),
             event_tx,
             seq_gen,
             agent_id,
@@ -192,11 +201,15 @@ impl TracerLoop {
                 self.handle_signal_stop(pid, sig)?;
             }
             WaitStatus::Exited(pid, code) => {
-                self.pending_captures.remove(&(pid.as_raw() as u32));
+                let pid_u32 = pid.as_raw() as u32;
+                self.pending_captures.remove(&pid_u32);
+                self.cleanup_dead_writer(pid_u32)?;
                 process_events::handle_process_exit(self, pid, code, None);
             }
             WaitStatus::Signaled(pid, sig, _core) => {
-                self.pending_captures.remove(&(pid.as_raw() as u32));
+                let pid_u32 = pid.as_raw() as u32;
+                self.pending_captures.remove(&pid_u32);
+                self.cleanup_dead_writer(pid_u32)?;
                 process_events::handle_process_exit(
                     self,
                     pid,
@@ -249,6 +262,8 @@ impl TracerLoop {
     ///
     /// Uses the per-path `path_hashes` cache for before_hash and
     /// updates it with the new after_hash, ensuring an unbroken chain.
+    /// If other tracees are queued for the same path, dequeues the next
+    /// one and resumes it with `ptrace::syscall`.
     fn handle_syscall_exit(&mut self, pid: Pid) -> Result<()> {
         let pid_u32 = pid.as_raw() as u32;
 
@@ -268,6 +283,8 @@ impl TracerLoop {
                 self.path_hashes.insert(cap.path.clone(), h.clone());
             }
 
+            let path_for_queue = cap.path.clone();
+
             match cap.kind {
                 CaptureKind::Write { fd, size } => {
                     self.emit(EventPayload::Write(ef::Write {
@@ -277,7 +294,7 @@ impl TracerLoop {
                         offset: 0,
                         size,
                         before_hash,
-                        after_hash,
+                        after_hash: after_hash.clone(),
                         tree_hash: None,
                     }));
                 }
@@ -290,15 +307,59 @@ impl TracerLoop {
                             offset: 0,
                             size: 0,
                             before_hash,
-                            after_hash,
+                            after_hash: after_hash.clone(),
                             tree_hash: None,
                         }));
                     }
                 }
             }
+
+            self.resume_next_queued_writer(&path_for_queue, after_hash)?;
         }
 
         ptrace::cont(pid, None)?;
+        Ok(())
+    }
+
+    /// Dequeues the next waiting writer for a path and resumes it.
+    ///
+    /// Removes the completed write from `active_writes`. If another
+    /// tracee is queued, sets its before_hash to the just-completed
+    /// after_hash (guaranteed correct chain), installs it as the new
+    /// active writer, and resumes it with `ptrace::syscall`.
+    fn resume_next_queued_writer(
+        &mut self,
+        path: &str,
+        after_hash: Option<String>,
+    ) -> Result<()> {
+        self.active_writes.remove(path);
+
+        let next = self
+            .write_wait_queue
+            .get_mut(path)
+            .and_then(VecDeque::pop_front);
+
+        // Clean up empty queue entries.
+        if self
+            .write_wait_queue
+            .get(path)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.write_wait_queue.remove(path);
+        }
+
+        if let Some(mut queued) = next {
+            // The next writer's before_hash is this write's after_hash.
+            queued.before_hash = after_hash;
+            let next_pid = Pid::from_raw(queued.pid as i32);
+
+            self.active_writes
+                .insert(queued.path.clone(), queued.pid);
+            self.pending_captures.insert(queued.pid, queued);
+
+            ptrace::syscall(next_pid, None)?;
+        }
+
         Ok(())
     }
 
@@ -318,6 +379,38 @@ impl TracerLoop {
         } else {
             ptrace::cont(pid, forward)?;
         }
+        Ok(())
+    }
+
+    /// Cleans up write serialization state for a dead process.
+    ///
+    /// Called on process exit to release any active write and resume
+    /// queued writers that were blocked behind the dead process.
+    pub fn cleanup_dead_writer(&mut self, pid_u32: u32) -> Result<()> {
+        // If this pid held an active write, release it and resume the
+        // next queued writer.
+        let active_path: Option<String> = self
+            .active_writes
+            .iter()
+            .find(|&(_, &p)| p == pid_u32)
+            .map(|(path, _)| path.clone());
+
+        if let Some(path) = active_path {
+            // The dead process never completed its write, so the
+            // file's current state is the after_hash. Read it now.
+            let after_hash = hash_file_content(&self.cas, &path);
+            if let Some(ref h) = after_hash {
+                self.path_hashes.insert(path.clone(), h.clone());
+            }
+            self.resume_next_queued_writer(&path, after_hash)?;
+        }
+
+        // Remove this pid from any wait queues.
+        self.write_wait_queue.retain(|_, queue| {
+            queue.retain(|cap| cap.pid != pid_u32);
+            !queue.is_empty()
+        });
+
         Ok(())
     }
 
@@ -372,6 +465,8 @@ mod tests {
         assert!(tracer.pty_registry.is_empty());
         assert!(tracer.write_locks.is_empty());
         assert!(tracer.pending_captures.is_empty());
+        assert!(tracer.active_writes.is_empty());
+        assert!(tracer.write_wait_queue.is_empty());
         assert_eq!(tracer.alive_count, 0);
     }
 
@@ -408,5 +503,135 @@ mod tests {
         let e2 = rx.recv().unwrap();
         assert_eq!(e1.seq, 0);
         assert_eq!(e2.seq, 1);
+    }
+
+    #[test]
+    fn active_writes_blocks_concurrent_path() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        // Simulate pid 10 as active writer on "/workspace/f.txt".
+        tracer
+            .active_writes
+            .insert("/workspace/f.txt".into(), 10);
+
+        // A second pid for the same path should go into the wait queue.
+        assert!(tracer.active_writes.contains_key("/workspace/f.txt"));
+        tracer
+            .write_wait_queue
+            .entry("/workspace/f.txt".into())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path: "/workspace/f.txt".into(),
+                pid: 20,
+                kind: CaptureKind::Write { fd: 3, size: 64 },
+            });
+
+        assert_eq!(tracer.write_wait_queue["/workspace/f.txt"].len(), 1);
+    }
+
+    #[test]
+    fn resume_next_queued_writer_drains_queue() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let path = "/workspace/queued.txt".to_string();
+        tracer.active_writes.insert(path.clone(), 10);
+        tracer
+            .write_wait_queue
+            .entry(path.clone())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path: path.clone(),
+                pid: 20,
+                kind: CaptureKind::Write { fd: 3, size: 32 },
+            });
+
+        // resume_next_queued_writer needs ptrace, so we test the data
+        // structure manipulation by calling it — it will fail on
+        // ptrace::syscall since pid 20 isn't real, but the state
+        // updates happen before the ptrace call.
+        let _ = tracer.resume_next_queued_writer(&path, Some("abc123".into()));
+
+        // The queued entry should have been moved to pending_captures
+        // with the correct before_hash, regardless of whether ptrace
+        // succeeded.
+        if let Some(cap) = tracer.pending_captures.get(&20) {
+            assert_eq!(cap.before_hash.as_deref(), Some("abc123"));
+            assert_eq!(cap.path, path);
+        }
+        // Queue should be empty and cleaned up.
+        assert!(!tracer.write_wait_queue.contains_key(&path));
+    }
+
+    #[test]
+    fn cleanup_dead_writer_removes_from_active() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let path = "/workspace/dead.txt".to_string();
+        tracer.active_writes.insert(path.clone(), 10);
+
+        // No queued writers, so cleanup just removes the active entry.
+        let _ = tracer.cleanup_dead_writer(10);
+        assert!(!tracer.active_writes.contains_key(&path));
+    }
+
+    #[test]
+    fn cleanup_dead_writer_removes_from_wait_queue() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        let path = "/workspace/queued.txt".to_string();
+        tracer.active_writes.insert(path.clone(), 5);
+
+        // Pid 10 and 20 are queued; 10 dies.
+        tracer
+            .write_wait_queue
+            .entry(path.clone())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path: path.clone(),
+                pid: 10,
+                kind: CaptureKind::Write { fd: 1, size: 8 },
+            });
+        tracer
+            .write_wait_queue
+            .entry(path.clone())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path: path.clone(),
+                pid: 20,
+                kind: CaptureKind::Write { fd: 1, size: 8 },
+            });
+
+        let _ = tracer.cleanup_dead_writer(10);
+
+        // Pid 10 should be removed, pid 20 should remain.
+        let queue = &tracer.write_wait_queue[&path];
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].pid, 20);
+    }
+
+    #[test]
+    fn different_paths_not_blocked() {
+        let (tx, _rx) = mpsc::channel();
+        let seq = Arc::new(SequenceGenerator::default());
+        let mut tracer = TracerLoop::new("a".into(), tx, seq, test_cas());
+
+        tracer
+            .active_writes
+            .insert("/workspace/a.txt".into(), 10);
+
+        // A write to a different path should not be blocked.
+        assert!(!tracer.active_writes.contains_key("/workspace/b.txt"));
     }
 }

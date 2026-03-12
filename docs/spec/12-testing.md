@@ -173,6 +173,29 @@ for t in threads: t.join()
 
 ---
 
+### Test 7b: Write Interleaving (Hardened)
+
+Uses a C program with real pthreads (no GIL) to stress-test write serialization under true concurrency. Four threads × 100 writes with `O_TRUNC`.
+
+```bash
+gcc -O0 -pthread -o /tmp/concurrent_write tests/concurrent_write.c
+
+./supervisor --agent-id interleave-test --storage.backend local-only \
+  -- /tmp/concurrent_write
+
+sandbox log --path /workspace/shared.txt --type write --format json \
+  | python3 tests/validate_hash_chain.py
+```
+
+**Expect:**
+- 400 write events (4 threads × 100 iterations), clean linear hash chain
+- Zero hash chain breaks
+- Each captured after-state contains a complete `"writer N iteration M\n"` line (no truncated/mixed content)
+
+**Validates:** Per-path write queue in the ptrace loop serializes concurrent writes at syscall entry, preventing kernel-level interleaving.
+
+---
+
 ### Test 8: TLS Capture
 
 ```bash

@@ -157,9 +157,10 @@ pub fn handle_seccomp_stop(tracer: &mut TracerLoop, pid: Pid) -> Result<bool> {
 
 /// Starts a write capture for file targets.
 ///
-/// Hashes the file before the write, stores a [`PendingCapture`],
-/// and resumes with `ptrace::syscall` to catch the exit stop.
-/// Returns `true` if capture was started (tracee already resumed).
+/// If another write to the same path is in-kernel, queues this tracee
+/// instead of resuming it — the tracee stays stopped until the active
+/// writer completes. Returns `true` if the tracee was handled (either
+/// resumed or queued).
 fn try_start_write_capture(
     tracer: &mut TracerLoop,
     pid: Pid,
@@ -175,8 +176,25 @@ fn try_start_write_capture(
         _ => return Ok(false),
     };
 
+    if tracer.active_writes.contains_key(&path) {
+        // Another thread is mid-write to this path. Hold this tracee
+        // at entry; it will be resumed when the active write completes.
+        tracer
+            .write_wait_queue
+            .entry(path.clone())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path,
+                pid: pid_u32,
+                kind: CaptureKind::Write { fd, size },
+            });
+        return Ok(true);
+    }
+
     let before_hash = hash_file_content(&tracer.cas, &path);
 
+    tracer.active_writes.insert(path.clone(), pid_u32);
     tracer.pending_captures.insert(pid_u32, PendingCapture {
         before_hash,
         path,
@@ -197,6 +215,9 @@ const O_RDWR: u64 = 0x2;
 
 /// Captures open(O_TRUNC) as a file mutation so the hash chain
 /// includes truncations between writes.
+///
+/// Respects the per-path write queue — if a write to this path is
+/// in-kernel, queues this tracee until the active write completes.
 fn try_start_open_trunc_capture(
     tracer: &mut TracerLoop,
     pid: Pid,
@@ -213,12 +234,27 @@ fn try_start_open_trunc_capture(
     if flags & O_TRUNC == 0 {
         return Ok(false);
     }
-    // Only capture if the open is for writing.
     if flags & O_WRONLY == 0 && flags & O_RDWR == 0 {
         return Ok(false);
     }
 
     let path = resolve_open_path(pid, nr, r)?;
+    let pid_u32 = pid.as_raw() as u32;
+
+    if tracer.active_writes.contains_key(&path) {
+        tracer
+            .write_wait_queue
+            .entry(path.clone())
+            .or_default()
+            .push_back(PendingCapture {
+                before_hash: None,
+                path,
+                pid: pid_u32,
+                kind: CaptureKind::OpenTrunc,
+            });
+        return Ok(true);
+    }
+
     let before_hash = hash_file_content(&tracer.cas, &path);
 
     // Skip capture if file doesn't exist yet (nothing to truncate).
@@ -226,7 +262,7 @@ fn try_start_open_trunc_capture(
         return Ok(false);
     }
 
-    let pid_u32 = pid.as_raw() as u32;
+    tracer.active_writes.insert(path.clone(), pid_u32);
     tracer.pending_captures.insert(pid_u32, PendingCapture {
         before_hash,
         path,
