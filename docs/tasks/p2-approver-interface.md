@@ -5,21 +5,32 @@
 
 ## What was done
 
-- **`approver/mod.rs`**: `Approver` trait (sync `judge` + `name`), `DynApprover` wrapper (hides `Arc<dyn Approver>` per M-AVOID-WRAPPERS), `Approvers` collection with policy-based fan-out.
+- **`approver/mod.rs`**: `Approver` trait (sync `judge` + `name`), `DynApprover` wrapper (hides `Arc<dyn Approver>` per M-AVOID-WRAPPERS), `Approvers` escalation chain.
 - **`approver/request.rs`**: `ApprovalRequest` struct with all syscall context fields, serde support.
-- **`approver/verdict.rs`**: `Verdict` struct (allow/deny + optional reason + approver identity), `Decision` enum.
-- **`approver/policy.rs`**: `ApprovalPolicy` enum (FirstResponse, Unanimous, AnyAllow), `evaluate()` dispatcher, per-policy combinators.
+- **`approver/verdict.rs`**: `Verdict` enum with `Allow`, `Deny`, `Escalate` variants. Each carries optional reason + approver identity.
+- **`approver/policy.rs`**: `walk_chain()` — walks approvers in order, first non-Escalate verdict wins, errors treated as implicit escalations.
 - **`lib.rs`**: Registered `approver` module.
-- **Spec**: Updated `06-agent-controls.md` with approver interface documentation.
+- **Spec**: Updated `06-agent-controls.md` with escalation chain documentation.
+
+## Design
+
+Escalation chain, not fan-out. Approvers evaluated in config order:
+1. `Allow`/`Deny` → terminal, chain stops
+2. `Escalate` → log, continue to next approver
+3. Error → implicit escalation, continue
+4. All escalate → deny with `system:chain-exhausted`
+
+Last approver should be terminal backstop (human API endpoint).
 
 ## What works
 
 - Sync `Approver` trait — ptrace loop calls directly, no async runtime needed
+- `Verdict` enum with `Allow`/`Deny`/`Escalate` + reason + approver identity
 - `DynApprover` for runtime-polymorphic collections
-- `Approvers::judge()` with three fan-out policies
-- Error handling: failing approvers skipped (first_response/any_allow) or treated as deny (unanimous)
-- Empty approvers → allow (prevents indefinite blocking)
-- 21 new tests (453 total, all passing)
+- `Approvers::judge()` walks escalation chain
+- Error handling: errors treated as implicit escalations
+- Empty chain → allow (prevents indefinite blocking)
+- 28 tests covering chain behavior, verdict serde, edge cases
 
 ## What's missing
 

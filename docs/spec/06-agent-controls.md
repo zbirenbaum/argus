@@ -117,7 +117,7 @@ ws://127.0.0.1:9090/ws/approvals
 
 ## Approver Interface
 
-The approval mechanism is pluggable via the `Approver` trait. When a pause-before-action rule matches, the supervisor fans out to all configured approvers and combines their verdicts per the configured `ApprovalPolicy`.
+The approval mechanism is pluggable via the `Approver` trait. When a pause-before-action rule matches, the supervisor walks an ordered escalation chain of approvers until one returns a terminal verdict.
 
 ### Trait
 
@@ -133,36 +133,44 @@ Sync by design — the ptrace loop holds a tracee frozen at syscall entry. Imple
 ### Verdict
 
 ```rust
-Verdict { decision: Allow | Deny, reason: Option<String>, approver: String }
+pub enum Verdict {
+    Allow  { reason: Option<String>, approver: String },
+    Deny   { reason: Option<String>, approver: String },
+    Escalate { reason: Option<String>, approver: String },
+}
 ```
 
-### Approval Policies
+### Escalation Chain
 
-| Policy | Behavior |
-|-|-|
-| `first_response` | First approver to return a successful verdict wins. Errors skipped. |
-| `unanimous` | All must allow. Single deny or error → deny. |
-| `any_allow` | Any single allow is sufficient. All must deny to deny. |
+Approvers are evaluated in config order. First non-`Escalate` verdict wins.
+
+1. If an approver returns `Allow` or `Deny` → that's the final decision, chain stops.
+2. If an approver returns `Escalate` → log it, move to the next approver.
+3. If an approver returns an error → treat as implicit escalation, move to next.
+4. If every approver escalates (or errors) → deny with `system:chain-exhausted`.
+
+The last approver should be a terminal backstop that never escalates (e.g. the human API endpoint, which blocks until a human decides).
 
 ### Planned Approver Implementations
 
-1. **API Approver** — existing REST/WebSocket endpoint (`POST /approvals/{id}/approve|deny`). Human operator via CLI or dashboard.
-2. **LLM Judge** — HTTP call to an LLM API with the `ApprovalRequest` as context. Returns allow/deny with reasoning.
+1. **API Approver** — existing REST/WebSocket endpoint (`POST /approvals/{id}/approve|deny`). Human operator via CLI or dashboard. Always terminal — blocks until a human decides.
+2. **LLM Judge** — HTTP call to an LLM API with the `ApprovalRequest` as context. Returns `Allow`/`Deny` if confident, `Escalate` if confidence is below threshold.
 3. **Webhook** — POST to a configured URL, wait for response. Supports push notifications, Slack bots, PagerDuty, etc.
 4. **Email/SMS** — Notification with approve/deny links. Polls for response or uses callback URL.
 
 ### Configuration
 
+Approver order in config is the escalation chain order. Automated judges first, human backstop last.
+
 ```yaml
 approvers:
-  policy: first_response
-  backends:
-    - type: api
-    - type: llm
-      endpoint: https://api.anthropic.com/v1/messages
-      model: claude-sonnet-4-20250514
-      timeout: 30s
-    - type: webhook
-      url: https://hooks.example.com/approvals
-      timeout: 60s
+  - type: llm
+    endpoint: https://api.anthropic.com/v1/messages
+    model: claude-sonnet-4-20250514
+    confidence_threshold: 0.8
+    timeout: 30s
+  - type: webhook
+    url: https://hooks.example.com/approvals
+    timeout: 60s
+  - type: api
 ```
