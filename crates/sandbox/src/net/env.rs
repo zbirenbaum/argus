@@ -5,8 +5,6 @@
 //! sandbox CA certificate. These variables are injected into the
 //! agent's process environment at spawn time.
 
-// Rust guideline compliant 2026-02-21
-
 use std::collections::HashMap;
 
 use crate::config::TlsConfig;
@@ -26,6 +24,10 @@ pub fn agent_env_vars(config: &TlsConfig, ca: &CaPaths) -> HashMap<String, Strin
     env.insert("HTTPS_PROXY".into(), proxy.clone());
     env.insert("HTTP_PROXY".into(), proxy);
     env.insert("SSLKEYLOGFILE".into(), keylog);
+    // Spec suggests /etc/ssl/certs/sandbox-ca.pem but the supervisor may
+    // not have write access to /etc/ssl/certs in all environments. The
+    // agent only needs the env var to point at a valid cert file, so we
+    // use the ca_dir path directly.
     env.insert("SSL_CERT_FILE".into(), cert.clone());
     env.insert("REQUESTS_CA_BUNDLE".into(), cert.clone());
     env.insert("NODE_EXTRA_CA_CERTS".into(), cert);

@@ -15,7 +15,7 @@
 - `crates/sandbox/src/net/mod.rs` — module re-exports for `ca`, `env`, `mitmdump`
 - `crates/sandbox/src/net/ca.rs` — self-signed CA generation with `rcgen` (ECDSA P-256, 10-year validity, idempotent)
 - `crates/sandbox/src/net/env.rs` — builds 6 env vars (proxy, keylog, cert paths)
-- `crates/sandbox/src/net/mitmdump.rs` — spawns `mitmdump` in transparent mode, readiness probe, graceful shutdown
+- `crates/sandbox/src/net/mitmdump.rs` — spawns `mitmdump` in regular proxy mode, readiness probe, graceful SIGTERM→SIGKILL shutdown
 - `crates/sandbox/Cargo.toml` — added `rcgen = "0.13"`, `time = "0.3"`
 
 ## What works

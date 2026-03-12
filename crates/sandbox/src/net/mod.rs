@@ -2,10 +2,8 @@
 //!
 //! Implements startup steps 4-6 from the supervisor spec: generating a
 //! self-signed CA keypair for TLS interception, launching `mitmdump` as
-//! a transparent proxy, and assembling the environment variables that
-//! make the traced agent route traffic through the proxy.
-
-// Rust guideline compliant 2026-02-21
+//! a regular HTTP/HTTPS proxy, and assembling the environment variables
+//! that make the traced agent route traffic through the proxy.
 
 mod ca;
 mod env;

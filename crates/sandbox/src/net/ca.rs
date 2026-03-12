@@ -6,8 +6,6 @@
 //! idempotent: if both files already exist, their paths are returned
 //! without overwriting.
 
-// Rust guideline compliant 2026-02-21
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,7 +45,12 @@ pub fn generate_ca(ca_dir: &Path) -> Result<CaPaths> {
     let cert_path = ca_dir.join(CERT_FILENAME);
     let key_path = ca_dir.join(KEY_FILENAME);
 
-    if cert_path.exists() && key_path.exists() {
+    // Both files must exist and be non-empty; a crash mid-write could
+    // leave one file present but the other missing or zero-length.
+    let cert_ok = fs::metadata(&cert_path).is_ok_and(|m| m.len() > 0);
+    let key_ok = fs::metadata(&key_path).is_ok_and(|m| m.len() > 0);
+
+    if cert_ok && key_ok {
         event!(
             name: "net.ca.reuse",
             Level::INFO,
@@ -150,6 +153,41 @@ mod tests {
         assert_eq!(first.key, second.key);
         assert_eq!(first_cert, second_cert, "cert must not be overwritten");
         assert_eq!(first_key, second_key, "key must not be overwritten");
+    }
+
+    #[test]
+    fn regenerates_when_cert_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        let ca_dir = tmp.path().join("ca");
+        fs::create_dir_all(&ca_dir).unwrap();
+
+        // Simulate a crash that left an empty cert file
+        fs::write(ca_dir.join(CERT_FILENAME), "").unwrap();
+        fs::write(ca_dir.join(KEY_FILENAME), "valid-key-content").unwrap();
+
+        let paths = generate_ca(&ca_dir).unwrap();
+        let cert_pem = fs::read_to_string(&paths.cert).unwrap();
+        assert!(
+            cert_pem.contains("BEGIN CERTIFICATE"),
+            "empty cert should trigger regeneration"
+        );
+    }
+
+    #[test]
+    fn regenerates_when_key_missing() {
+        let tmp = TempDir::new().unwrap();
+        let ca_dir = tmp.path().join("ca");
+        fs::create_dir_all(&ca_dir).unwrap();
+
+        // Only cert exists — key was never written
+        fs::write(ca_dir.join(CERT_FILENAME), "cert-content").unwrap();
+
+        let paths = generate_ca(&ca_dir).unwrap();
+        let key_pem = fs::read_to_string(&paths.key).unwrap();
+        assert!(
+            key_pem.contains("BEGIN PRIVATE KEY"),
+            "missing key should trigger regeneration"
+        );
     }
 
     #[test]

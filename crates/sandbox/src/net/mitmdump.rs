@@ -1,17 +1,17 @@
 //! Mitmdump process lifecycle management.
 //!
-//! Spawns `mitmdump` in transparent mode, waits for it to become ready
-//! by probing the listen port, and provides graceful shutdown via
-//! `SIGTERM`. The handle tracks whether the child is still running so
-//! the supervisor can react to unexpected exits.
-
-// Rust guideline compliant 2026-02-21
+//! Spawns `mitmdump` as a regular HTTP/HTTPS proxy, waits for it to
+//! become ready by probing the listen port, and provides graceful
+//! shutdown via `SIGTERM`. The handle tracks whether the child is still
+//! running so the supervisor can react to unexpected exits.
 
 use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use tracing::{event, Level};
 
 use crate::net::CaPaths;
@@ -22,6 +22,9 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Interval between TCP connect probes during readiness check.
 const PROBE_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Grace period after SIGTERM before escalating to SIGKILL.
+const SIGTERM_GRACE: Duration = Duration::from_secs(3);
+
 /// Handle to a running `mitmdump` child process.
 #[derive(Debug)]
 pub struct MitmdumpHandle {
@@ -31,6 +34,9 @@ pub struct MitmdumpHandle {
 
 impl MitmdumpHandle {
     /// Send `SIGTERM` and wait for the process to exit.
+    ///
+    /// Falls back to `SIGKILL` if the process does not exit within
+    /// [`SIGTERM_GRACE`] seconds.
     ///
     /// # Errors
     ///
@@ -43,12 +49,37 @@ impl MitmdumpHandle {
             mitmdump.port = self.port,
             "stopping mitmdump on port {{mitmdump.port}}",
         );
+
+        let pid = Pid::from_raw(self.child.id() as i32);
+        signal::kill(pid, Signal::SIGTERM)
+            .context("failed to send SIGTERM to mitmdump")?;
+
+        let deadline = Instant::now() + SIGTERM_GRACE;
+        loop {
+            if !self.is_running() {
+                self.child
+                    .wait()
+                    .context("failed to wait for mitmdump after SIGTERM")?;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        event!(
+            name: "net.mitmdump.sigkill_fallback",
+            Level::WARN,
+            mitmdump.port = self.port,
+            "mitmdump did not exit after SIGTERM, sending SIGKILL",
+        );
         self.child
             .kill()
-            .context("failed to send kill signal to mitmdump")?;
+            .context("failed to send SIGKILL to mitmdump")?;
         self.child
             .wait()
-            .context("failed to wait for mitmdump to exit")?;
+            .context("failed to wait for mitmdump after SIGKILL")?;
         Ok(())
     }
 
@@ -66,25 +97,37 @@ impl Drop for MitmdumpHandle {
     }
 }
 
-/// Spawn `mitmdump` in transparent proxy mode.
+/// Spawn `mitmdump` as a regular HTTP/HTTPS proxy.
 ///
-/// Blocks until the proxy accepts TCP connections on `port`, or until
-/// the readiness timeout (10 s) expires.
+/// Traffic is routed here via `HTTP_PROXY`/`HTTPS_PROXY` env vars on the
+/// agent process — no iptables rules needed. Blocks until the proxy
+/// accepts TCP connections on `port`, or until the readiness timeout
+/// (10 s) expires.
 ///
 /// # Errors
 ///
 /// Returns an error if `mitmdump` is not installed, fails to start,
 /// or does not become ready within the timeout.
 pub fn start_mitmdump(ca: &CaPaths, port: u16) -> Result<MitmdumpHandle> {
+    start_mitmdump_with_command("mitmdump", ca, port)
+}
+
+/// Spawn a mitmdump-compatible binary at `cmd` as a regular proxy.
+///
+/// Extracted so tests can substitute a nonexistent path without
+/// depending on the host having `mitmdump` installed.
+fn start_mitmdump_with_command(
+    cmd: &str,
+    ca: &CaPaths,
+    port: u16,
+) -> Result<MitmdumpHandle> {
     let ca_dir = ca
         .cert
         .parent()
         .context("CA cert path has no parent directory")?;
 
-    let child = Command::new("mitmdump")
+    let child = Command::new(cmd)
         .args([
-            "--mode",
-            "transparent",
             "--listen-host",
             "127.0.0.1",
             "--listen-port",
@@ -165,14 +208,16 @@ mod tests {
             key: PathBuf::from("/nonexistent/ca-key.pem"),
         };
 
-        let result = start_mitmdump(&ca, 18081);
+        let result = start_mitmdump_with_command(
+            "/nonexistent/mitmdump",
+            &ca,
+            18081,
+        );
 
-        if result.is_err() {
-            let msg = result.unwrap_err().to_string();
-            assert!(
-                msg.contains("mitmdump") || msg.contains("not found"),
-                "error should mention mitmdump: {msg}"
-            );
-        }
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("mitmdump") || msg.contains("not found"),
+            "error should mention mitmdump: {msg}"
+        );
     }
 }
