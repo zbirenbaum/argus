@@ -18,6 +18,9 @@ pub struct Read {
     /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// True when the path matches an `exclude_paths` glob.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// File data was written to a tracked path.
@@ -40,6 +43,9 @@ pub struct Write {
     /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// True when the path matches an `exclude_paths` glob.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// A file or directory was renamed.
@@ -67,6 +73,9 @@ pub struct Unlink {
     /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// True when the path matches an `exclude_paths` glob.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// A directory was created.
@@ -118,6 +127,9 @@ pub struct Truncate {
     /// Encoding of `before_data` and `after_data`; absent means UTF-8, `"base64"` means binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// True when the path matches an `exclude_paths` glob.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// A hard link was created.
@@ -157,6 +169,7 @@ mod tests {
             tree_hash: Some("ef56".into()),
             data: None,
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&w).unwrap();
         let back: Write = serde_json::from_str(&json).unwrap();
@@ -174,6 +187,7 @@ mod tests {
             content_hash: None,
             data: None,
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("content_hash"));
@@ -218,6 +232,7 @@ mod tests {
             before_data: None,
             after_data: None,
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&t).unwrap();
         let back: Truncate = serde_json::from_str(&json).unwrap();
@@ -260,10 +275,12 @@ mod tests {
             tree_hash: None,
             data: Some("hello".into()),
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&w).unwrap();
         assert!(json.contains("\"data\""));
         assert!(!json.contains("\"encoding\""));
+        assert!(!json.contains("\"sensitive\""));
         let back: Write = serde_json::from_str(&json).unwrap();
         assert_eq!(w, back);
     }
@@ -279,6 +296,7 @@ mod tests {
             content_hash: None,
             data: Some("AAAA".into()),
             encoding: Some("base64".into()),
+            sensitive: false,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"base64\""));
@@ -299,6 +317,7 @@ mod tests {
             before_data: Some("old content".into()),
             after_data: Some("".into()),
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"before_data\""));
@@ -315,6 +334,7 @@ mod tests {
             tree_hash: None,
             data: Some("deleted".into()),
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&u).unwrap();
         assert!(json.contains("\"data\""));
@@ -331,6 +351,7 @@ mod tests {
             tree_hash: None,
             data: None,
             encoding: None,
+            sensitive: false,
         };
         let json = serde_json::to_string(&u).unwrap();
         let back: Unlink = serde_json::from_str(&json).unwrap();
@@ -353,5 +374,52 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: Rmdir = serde_json::from_str(&json).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn sensitive_true_serializes() {
+        let w = Write {
+            pid: 1,
+            path: "/workspace/.env".into(),
+            fd: 3,
+            offset: 0,
+            size: 64,
+            before_hash: None,
+            after_hash: None,
+            tree_hash: None,
+            data: None,
+            encoding: None,
+            sensitive: true,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("\"sensitive\":true"));
+        let back: Write = serde_json::from_str(&json).unwrap();
+        assert_eq!(w, back);
+    }
+
+    #[test]
+    fn sensitive_false_omitted() {
+        let r = Read {
+            pid: 1,
+            path: "/workspace/readme.md".into(),
+            fd: 3,
+            offset: 0,
+            size: 100,
+            content_hash: None,
+            data: None,
+            encoding: None,
+            sensitive: false,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("sensitive"));
+        let back: Read = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn sensitive_deserializes_from_missing() {
+        let json = r#"{"pid":1,"path":"/f","fd":3,"offset":0,"size":10}"#;
+        let r: Read = serde_json::from_str(json).unwrap();
+        assert!(!r.sensitive);
     }
 }

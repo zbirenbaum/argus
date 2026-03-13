@@ -104,6 +104,7 @@ fn to_payload(
                 tree_hash,
                 data: None,
                 encoding: None,
+                sensitive: false,
             }))
         }
         Classification::FileRead { path, fd, len, .. } => {
@@ -122,6 +123,7 @@ fn to_payload(
                 content_hash,
                 data: None,
                 encoding: None,
+                sensitive: false,
             }))
         }
         Classification::FileRename { old_path, new_path } => {
@@ -144,6 +146,7 @@ fn to_payload(
                 tree_hash,
                 data: None,
                 encoding: None,
+                sensitive: false,
             }))
         }
         Classification::FileMkdir { path } => {
@@ -180,6 +183,7 @@ fn to_payload(
                 before_data: None,
                 after_data: None,
                 encoding: None,
+                sensitive: false,
             }))
         }
         Classification::FileLink { target, link_path } => {

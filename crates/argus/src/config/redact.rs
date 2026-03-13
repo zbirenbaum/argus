@@ -7,10 +7,44 @@
 //! matching substrings are replaced with a redaction token.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
 use super::enrich::default_true;
+
+const DEFAULT_EXCLUDE_PATHS: &[&str] = &[
+    "*.env",
+    "*.pem",
+    "*.key",
+    "credentials.json",
+    ".ssh/**",
+];
+
+const DEFAULT_DROP_FIELDS: &[&str] = &[
+    "http_request.headers.authorization",
+    "http_request.headers.cookie",
+    "http_request.headers.x-api-key",
+];
+
+const DEFAULT_SCAN_FIELDS: &[&str] = &[
+    "http_request.headers",
+    "http_request.body",
+    "http_response.headers",
+    "http_response.body",
+    "stdio.text",
+    "exec.envp",
+];
+
+/// Pre-built set of default drop fields for O(1) hot-path lookups.
+static DEFAULT_DROP_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    DEFAULT_DROP_FIELDS.iter().copied().collect()
+});
+
+/// Pre-built set of default scan fields for O(1) hot-path lookups.
+static DEFAULT_SCAN_SET: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    DEFAULT_SCAN_FIELDS.iter().copied().collect()
+});
 
 /// Whether built-in redaction rule sets are active.
 ///
@@ -113,43 +147,48 @@ impl Default for RedactConfig {
 
 impl RedactConfig {
     /// Build a `HashSet` from `scan_fields` for O(1) membership checks.
+    ///
+    /// Call once at startup and pass the result into the redaction engine.
     #[must_use]
     pub fn scan_field_set(&self) -> HashSet<String> {
         self.scan_fields.iter().cloned().collect()
     }
+
+    /// Build a `HashSet` from `drop_fields` for O(1) membership checks.
+    ///
+    /// Call once at startup and pass the result into the redaction engine.
+    #[must_use]
+    pub fn drop_field_set(&self) -> HashSet<String> {
+        self.drop_fields.iter().cloned().collect()
+    }
+
+    /// Static default drop fields for hot-path lookups without allocation.
+    #[must_use]
+    pub fn default_drop_set() -> &'static HashSet<&'static str> {
+        &DEFAULT_DROP_SET
+    }
+
+    /// Static default scan fields for hot-path lookups without allocation.
+    #[must_use]
+    pub fn default_scan_set() -> &'static HashSet<&'static str> {
+        &DEFAULT_SCAN_SET
+    }
 }
 
 fn default_exclude_paths() -> Vec<String> {
-    vec![
-        "*.env".into(),
-        "*.pem".into(),
-        "*.key".into(),
-        "credentials.json".into(),
-        ".ssh/**".into(),
-    ]
+    DEFAULT_EXCLUDE_PATHS.iter().map(|s| String::from(*s)).collect()
 }
 
 fn default_drop_fields() -> Vec<String> {
-    vec![
-        "http_request.headers.authorization".into(),
-        "http_request.headers.cookie".into(),
-        "http_request.headers.x-api-key".into(),
-    ]
+    DEFAULT_DROP_FIELDS.iter().map(|s| String::from(*s)).collect()
 }
 
 fn default_scan_fields() -> Vec<String> {
-    vec![
-        "http_request.headers".into(),
-        "http_request.body".into(),
-        "http_response.headers".into(),
-        "http_response.body".into(),
-        "stdio.text".into(),
-        "exec.envp".into(),
-    ]
+    DEFAULT_SCAN_FIELDS.iter().map(|s| String::from(*s)).collect()
 }
 
 fn default_redacted_token() -> String {
-    "[REDACTED]".into()
+    String::from("[REDACTED]")
 }
 
 #[cfg(test)]
@@ -216,5 +255,24 @@ scan_fields:
         let yaml = serde_yaml::to_string(&cfg).unwrap();
         let parsed: RedactConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn drop_field_set_from_config() {
+        let cfg = RedactConfig::default();
+        let set = cfg.drop_field_set();
+        assert!(set.contains("http_request.headers.authorization"));
+        assert!(set.contains("http_request.headers.cookie"));
+        assert!(set.contains("http_request.headers.x-api-key"));
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn static_default_sets_match_config() {
+        let drop_set = RedactConfig::default_drop_set();
+        assert!(drop_set.contains("http_request.headers.authorization"));
+        let scan_set = RedactConfig::default_scan_set();
+        assert!(scan_set.contains("stdio.text"));
+        assert!(scan_set.contains("exec.envp"));
     }
 }

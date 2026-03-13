@@ -136,24 +136,24 @@ pub enum CapturedContent {
     FileWrite {
         before_hash: Option<ContentHash>,
         after_hash: Option<ContentHash>,
-        data: Option<Vec<u8>>,          // NEW: the written bytes
+        data: Option<Vec<u8>>,
         size: usize,
     },
     FileRead {
         content_hash: Option<ContentHash>,
-        data: Option<Vec<u8>>,          // NEW: the read bytes
+        data: Option<Vec<u8>>,
         size: usize,
     },
     StreamData {
         content_hash: Option<ContentHash>,
-        data: Option<Vec<u8>>,          // NEW: stdio/pipe/pty bytes
+        data: Option<Vec<u8>>,
         size: usize,
     },
     FileDelete {
         content_hash: Option<ContentHash>,
-        data: Option<Vec<u8>>,          // NEW: file content before deletion
+        data: Option<Vec<u8>>,
     },
-    FileTruncate {                      // NEW variant
+    FileTruncate {
         before_hash: Option<ContentHash>,
         after_hash: Option<ContentHash>,
         before_data: Option<Vec<u8>>,
@@ -176,7 +176,7 @@ pub struct Stdio {
     pub pipe_inode: Option<u64>,
     pub dest_pid: Option<u32>,
     pub source_pid: Option<u32>,
-    pub text: Option<String>,              // NEW: inline message (lossy UTF-8)
+    pub text: Option<String>,
 }
 
 // io.rs — PipeData
@@ -187,7 +187,7 @@ pub struct PipeData {
     pub content_hash: Option<String>,
     pub size: u64,
     pub dest_pids: Vec<u32>,
-    pub text: Option<String>,              // NEW: inline data (lossy UTF-8)
+    pub text: Option<String>,
 }
 
 // io.rs — PtyData
@@ -197,7 +197,7 @@ pub struct PtyData {
     pub content_hash: Option<String>,
     pub size: u64,
     pub slave_path: String,
-    pub text: Option<String>,              // NEW: inline data (lossy UTF-8)
+    pub text: Option<String>,
 }
 
 // file.rs — Write
@@ -210,7 +210,9 @@ pub struct Write {
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub tree_hash: Option<String>,
-    pub data: Option<String>,              // NEW: inline written content
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 // file.rs — Read
@@ -221,7 +223,9 @@ pub struct Read {
     pub offset: u64,
     pub size: u64,
     pub content_hash: Option<String>,
-    pub data: Option<String>,              // NEW: inline read content
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 // file.rs — Unlink
@@ -230,7 +234,9 @@ pub struct Unlink {
     pub path: String,
     pub content_hash: Option<String>,
     pub tree_hash: Option<String>,
-    pub data: Option<String>,              // NEW: file content before deletion
+    pub data: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 // file.rs — Truncate
@@ -242,8 +248,10 @@ pub struct Truncate {
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub tree_hash: Option<String>,
-    pub before_data: Option<String>,       // NEW: content before truncate
-    pub after_data: Option<String>,        // NEW: content after truncate
+    pub before_data: Option<String>,
+    pub after_data: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 // network.rs — HttpRequest
@@ -253,8 +261,8 @@ pub struct HttpRequest {
     pub url: String,
     pub headers_hash: Option<String>,
     pub body_hash: Option<String>,
-    pub headers: Option<String>,           // NEW: inline headers
-    pub body: Option<String>,              // NEW: inline request body
+    pub headers: Option<String>,
+    pub body: Option<String>,
 }
 
 // network.rs — HttpResponse
@@ -263,8 +271,8 @@ pub struct HttpResponse {
     pub status: u16,
     pub headers_hash: Option<String>,
     pub body_hash: Option<String>,
-    pub headers: Option<String>,           // NEW: inline headers
-    pub body: Option<String>,              // NEW: inline response body
+    pub headers: Option<String>,
+    pub body: Option<String>,
 }
 ```
 

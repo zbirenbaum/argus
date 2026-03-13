@@ -102,6 +102,7 @@ mod tests {
                 tree_hash: None,
                 data: None,
                 encoding: None,
+                sensitive: false,
             }),
         }
     }

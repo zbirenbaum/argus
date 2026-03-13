@@ -24,6 +24,7 @@ fn make_events() -> Vec<Event> {
             tree_hash: None,
             data: None,
             encoding: None,
+            sensitive: false,
         }),
     );
     e.ts_wall = "2026-03-11T14:00:00.000000000Z".into();
@@ -41,6 +42,7 @@ fn make_events() -> Vec<Event> {
             content_hash: None,
             data: None,
             encoding: None,
+            sensitive: false,
         }),
     );
     e.ts_wall = "2026-03-11T15:00:00.000000000Z".into();
