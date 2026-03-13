@@ -4,6 +4,10 @@
 //! For file writes the capture stage reads the pre-write file state (before
 //! hash) and the write buffer content (after hash). For reads and stdio it
 //! reads the buf_addr memory directly. Large blobs are split into chunks.
+//!
+//! Bytes up to `max_inline_bytes` are cloned into the `data` field of the
+//! returned [`CapturedContent`] so downstream enrichment stages can embed
+//! them directly into event records without a CAS round-trip.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +47,11 @@ pub struct CaptureStage {
     /// races between resuming a previous write and reading the file
     /// for the next write's `before_hash`.
     pub file_state: Arc<DashMap<PathBuf, ContentHash>>,
+    /// Maximum bytes to retain as inline data in [`CapturedContent`].
+    ///
+    /// Data larger than this cap is still hashed and stored in CAS but
+    /// the `data` field is set to `None` to keep event records small.
+    pub max_inline_bytes: usize,
 }
 
 impl CaptureStage {
@@ -52,6 +61,7 @@ impl CaptureStage {
         bus: RecordBus,
         policy: CapturePolicy,
         file_state: Arc<DashMap<PathBuf, ContentHash>>,
+        max_inline_bytes: usize,
     ) -> Self {
         Self {
             handle,
@@ -59,6 +69,7 @@ impl CaptureStage {
             policy,
             write_locks: DashMap::new(),
             file_state,
+            max_inline_bytes,
         }
     }
 
@@ -82,6 +93,9 @@ impl CaptureStage {
             }
             Classification::FileUnlink { path } => {
                 self.capture_delete(path).await
+            }
+            Classification::FileTruncate { path, len } => {
+                self.capture_truncate(path, *len).await
             }
             Classification::Stdio { buf_addr, len, .. }
             | Classification::PipeData { buf_addr, len, .. }
@@ -122,13 +136,18 @@ impl CaptureStage {
         // Use tracked in-memory hash instead of racy filesystem read.
         let before_hash = self.file_state.get(path).map(|h| *h);
 
-        let after_hash = if level == CaptureLevel::Full {
-            self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
-                self.policy.record_bytes(pid.as_raw() as u32, d.len());
-                emit_content(&self.bus, d)
-            })
+        let (after_hash, inline_data) = if level == CaptureLevel::Full {
+            match self.handle.read_memory(pid, buf_addr, len).await {
+                Ok(d) => {
+                    self.policy.record_bytes(pid.as_raw() as u32, d.len());
+                    let inline = inline_slice(&d, self.max_inline_bytes);
+                    let hash = emit_content(&self.bus, d);
+                    (Some(hash), inline)
+                }
+                Err(_) => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
 
         // Update tracked state so the next write sees this write's hash.
@@ -136,7 +155,7 @@ impl CaptureStage {
             self.file_state.insert(path.to_path_buf(), hash);
         }
 
-        CapturedContent::FileWrite { before_hash, after_hash, data: None, size: len }
+        CapturedContent::FileWrite { before_hash, after_hash, data: inline_data, size: len }
     }
 
     async fn capture_read(
@@ -154,17 +173,60 @@ impl CaptureStage {
             return CapturedContent::FileRead { content_hash: None, data: None, size: len };
         }
 
-        let content_hash = self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
-            self.policy.record_bytes(pid.as_raw() as u32, d.len());
-            emit_content(&self.bus, d)
-        });
+        let (content_hash, inline_data) = match self.handle.read_memory(pid, buf_addr, len).await {
+            Ok(d) => {
+                self.policy.record_bytes(pid.as_raw() as u32, d.len());
+                let inline = inline_slice(&d, self.max_inline_bytes);
+                let hash = emit_content(&self.bus, d);
+                (Some(hash), inline)
+            }
+            Err(_) => (None, None),
+        };
 
-        CapturedContent::FileRead { content_hash, data: None, size: len }
+        CapturedContent::FileRead { content_hash, data: inline_data, size: len }
     }
 
     async fn capture_delete(&self, path: &Path) -> CapturedContent {
-        let content_hash = self.handle.read_file(path.to_path_buf()).await.ok().map(|d| hash_and_emit(&self.bus, d));
-        CapturedContent::FileDelete { content_hash, data: None }
+        let (content_hash, inline_data) = match self.handle.read_file(path.to_path_buf()).await {
+            Ok(d) => {
+                let inline = inline_slice(&d, self.max_inline_bytes);
+                let hash = hash_and_emit(&self.bus, d);
+                (Some(hash), inline)
+            }
+            Err(_) => (None, None),
+        };
+        CapturedContent::FileDelete { content_hash, data: inline_data }
+    }
+
+    async fn capture_truncate(&self, path: &Path, new_len: u64) -> CapturedContent {
+        // Read before state from disk. The syscall has not yet executed, so
+        // the file still holds its pre-truncation content.
+        let (before_hash, before_data) = match self.handle.read_file(path.to_path_buf()).await {
+            Ok(d) => {
+                let inline = inline_slice(&d, self.max_inline_bytes);
+                let hash = hash_and_emit(&self.bus, d);
+                (Some(hash), inline)
+            }
+            Err(_) => (None, None),
+        };
+
+        // After truncation the content is the first `new_len` bytes of the
+        // before content (or all zeros if new_len exceeds the original).
+        // We compute the after hash from the truncated slice to avoid
+        // re-reading the file after resuming the tracee.
+        let (after_hash, after_data) = match self.handle.read_file(path.to_path_buf()).await {
+            Ok(d) => {
+                let truncated_len = (new_len as usize).min(d.len());
+                let truncated = &d[..truncated_len];
+                let inline = inline_slice(truncated, self.max_inline_bytes);
+                let hash = emit_content(&self.bus, truncated.to_vec());
+                (Some(hash), inline)
+            }
+            // If the file is unreadable after-truncation hash is unavailable.
+            Err(_) => (None, None),
+        };
+
+        CapturedContent::FileTruncate { before_hash, after_hash, before_data, after_data }
     }
 
     async fn capture_stream(
@@ -173,12 +235,24 @@ impl CaptureStage {
         buf_addr: usize,
         len: usize,
     ) -> CapturedContent {
-        let content_hash = self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
-            self.policy.record_bytes(pid.as_raw() as u32, d.len());
-            emit_content(&self.bus, d)
-        });
-        CapturedContent::StreamData { content_hash, data: None, size: len }
+        let (content_hash, inline_data) = match self.handle.read_memory(pid, buf_addr, len).await {
+            Ok(d) => {
+                self.policy.record_bytes(pid.as_raw() as u32, d.len());
+                let inline = inline_slice(&d, self.max_inline_bytes);
+                let hash = emit_content(&self.bus, d);
+                (Some(hash), inline)
+            }
+            Err(_) => (None, None),
+        };
+        CapturedContent::StreamData { content_hash, data: inline_data, size: len }
     }
+}
+
+/// Return `Some(data.clone())` when `data.len() <= cap`, otherwise `None`.
+///
+/// Callers set `cap` from [`CaptureStage::max_inline_bytes`].
+fn inline_slice(data: &[u8], cap: usize) -> Option<Vec<u8>> {
+    if data.len() <= cap { Some(data.to_vec()) } else { None }
 }
 
 /// Emit one or more `Content` records for `data`, returning the root hash.
@@ -209,4 +283,43 @@ fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
 /// Hash and emit content, returning the hash without policy accounting.
 fn hash_and_emit(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
     emit_content(bus, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inline_slice;
+
+    #[test]
+    fn inline_slice_under_cap_returns_some() {
+        let data = vec![1u8, 2, 3, 4, 5];
+        let result = inline_slice(&data, 10);
+        assert_eq!(result, Some(data));
+    }
+
+    #[test]
+    fn inline_slice_exactly_at_cap_returns_some() {
+        let data = vec![0u8; 16];
+        let result = inline_slice(&data, 16);
+        assert_eq!(result, Some(data));
+    }
+
+    #[test]
+    fn inline_slice_over_cap_returns_none() {
+        let data = vec![0u8; 17];
+        let result = inline_slice(&data, 16);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn inline_slice_empty_data_returns_some() {
+        let result = inline_slice(&[], 0);
+        assert_eq!(result, Some(vec![]));
+    }
+
+    #[test]
+    fn inline_slice_zero_cap_with_data_returns_none() {
+        let data = vec![1u8];
+        let result = inline_slice(&data, 0);
+        assert_eq!(result, None);
+    }
 }

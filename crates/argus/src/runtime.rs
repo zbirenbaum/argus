@@ -263,6 +263,7 @@ impl SupervisorRuntime {
             self.ctx.bus.clone(),
             policy,
             file_state,
+            self.config.enrich.max_inline_bytes,
         );
 
         let tree_stage = TreeStage::new(MerkleTree::new(), self.ctx.bus.clone(), 1000);
