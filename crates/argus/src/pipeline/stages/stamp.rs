@@ -5,6 +5,8 @@
 //! variant, fills in sequence numbers, timestamps, and the optional
 //! Merkle-tree root hash.
 
+use std::sync::Arc;
+
 use crate::cas::ContentHash;
 use crate::events::envelope::{Event, EventPayload, SequenceGenerator, timestamp_pair};
 use crate::events::{file as ef, io as eio, network as en, process as ep};
@@ -13,13 +15,13 @@ use crate::pipeline::classified::{Classification, PipeDirection, PtyDataType, St
 
 /// Stage that stamps captured events with sequence numbers and timestamps.
 pub struct StampStage {
-    pub seq_gen: SequenceGenerator,
+    pub seq_gen: Arc<SequenceGenerator>,
     pub agent_id: String,
 }
 
 impl StampStage {
     /// Create a new stamp stage.
-    pub fn new(seq_gen: SequenceGenerator, agent_id: String) -> Self {
+    pub fn new(seq_gen: Arc<SequenceGenerator>, agent_id: String) -> Self {
         Self { seq_gen, agent_id }
     }
 
@@ -317,11 +319,12 @@ fn map_pty_type(t: PtyDataType) -> eio::PtySubtype {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use nix::unistd::Pid;
     use crate::pipeline::captured::CapturedContent;
 
     fn stage() -> StampStage {
-        StampStage::new(SequenceGenerator::new(0), "test-agent".into())
+        StampStage::new(Arc::new(SequenceGenerator::new(0)), "test-agent".into())
     }
 
     fn captured(cls: Classification) -> CapturedEvent {

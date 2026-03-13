@@ -8,6 +8,7 @@
 
 pub(crate) mod bus;
 pub(crate) mod capture_policy;
+pub(crate) mod context;
 #[cfg(test)]
 pub(crate) mod mock_ptrace;
 pub(crate) mod captured;
@@ -26,6 +27,7 @@ pub(crate) mod stages;
 pub use runner::PipelineRunner;
 
 pub(crate) use bus::RecordBus;
+pub(crate) use context::PipelineContext;
 pub(crate) use capture_policy::{CaptureConfig, CaptureLevel, CapturePolicy, CaptureRule};
 pub(crate) use captured::{CapturedContent, CapturedEvent};
 pub(crate) use classified::{ClassifiedEvent, Classification, PipeDirection, PtyDataType, StdioType};
