@@ -27,6 +27,7 @@ aws-config = { version = "1", default-features = false, features = ["behavior-ve
 aws-smithy-runtime = { version = "1", default-features = false }
 aws-smithy-http-client = { version = "1", features = ["default-client", "rustls-ring"] }
 rustls.workspace = true
+parking_lot.workspace = true
 serde_yaml = "0.9"
 glob = "0.3"
 regex = "1"

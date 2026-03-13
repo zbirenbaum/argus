@@ -1,9 +1,8 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that updates the path, PID, and type secondary indexes.
 
-use std::sync::Mutex;
-
 use anyhow::Result;
+use parking_lot::Mutex;
 
 use crate::index::{PathIndex, PidIndex, TypeIndex};
 use crate::pipeline::record::Record;
@@ -62,7 +61,7 @@ impl Sink for IndexSink {
 
         let seq = event.seq;
         let event_type = event.payload.event_type_tag();
-        let mut state = self.state.lock().expect("IndexSink mutex poisoned");
+        let mut state = self.state.lock();
 
         for path in event.payload.paths() {
             state.path_index.insert(path, seq, event_type)?;
@@ -130,7 +129,7 @@ mod tests {
         let event = make_write_event(42, "/tmp/foo.txt", 1234);
         sink.write(Record::Event(event)).expect("write");
 
-        let state = sink.state.lock().unwrap();
+        let state = sink.state.lock();
         let entries = state.path_index.lookup("/tmp/foo.txt");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].seq, 42);
@@ -147,7 +146,7 @@ mod tests {
         let event = make_write_event(10, "/a", 1);
         sink.write(Record::Event(event)).expect("write");
 
-        let state = sink.state.lock().unwrap();
+        let state = sink.state.lock();
         let seqs = state.type_index.lookup("write");
         assert_eq!(seqs, [10]);
     }
@@ -157,7 +156,7 @@ mod tests {
         let sink = make_sink();
         let hash = crate::cas::ContentHash::from_data(b"x");
         sink.write(Record::Content { hash, data: vec![] }).expect("noop");
-        let state = sink.state.lock().unwrap();
+        let state = sink.state.lock();
         assert_eq!(state.path_index.entry_count(), 0);
     }
 

@@ -5,8 +5,9 @@
 //! emits checkpoint records so downstream sinks can persist durable
 //! snapshots.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 
 use tracing::event;
 use tracing::Level;
@@ -50,18 +51,7 @@ impl TreeStage {
         let hash = content_hash(event)?;
 
         let path_display = path.display().to_string();
-        let mut tree = match self.tree.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                event!(
-                    name: "pipeline.tree.lock_poisoned",
-                    Level::ERROR,
-                    error.message = %e,
-                    "tree mutex poisoned, skipping update",
-                );
-                return None;
-            }
-        };
+        let mut tree = self.tree.lock();
         tree.update(path, hash);
         let root = tree.root_hash();
         event!(

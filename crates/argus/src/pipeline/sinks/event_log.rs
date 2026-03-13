@@ -1,9 +1,9 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that appends events to the JSONL segment log.
 
-use std::sync::Mutex;
-
 use anyhow::Result;
+use parking_lot::Mutex;
+use tracing::Level;
 
 use crate::pipeline::record::Record;
 use crate::pipeline::sink::{Sink, SinkPriority};
@@ -38,16 +38,11 @@ impl EventLogSink {
 
     /// Grants mutable access to the inner log for callers that need to
     /// trigger segment rotation or finalization.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (another thread panicked
-    /// while holding it).
     pub fn with_log<F, T>(&self, f: F) -> T
     where
         F: FnOnce(&mut EventLog) -> T,
     {
-        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
+        let mut guard = self.log.lock();
         f(&mut guard)
     }
 }
@@ -67,13 +62,24 @@ impl Sink for EventLogSink {
         };
         // No upload pool here — segment upload is driven by the storage layer
         // separately to keep the sink interface synchronous.
-        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
-        guard.append(&event, None)?;
+        let mut guard = self.log.lock();
+        if let Err(e) = guard.append(&event, None) {
+            // Attempt self-healing: bump the segment and open a fresh file so
+            // subsequent events can land even if the current segment is corrupt.
+            tracing::event!(
+                name: "event_log_sink.append.failed",
+                Level::WARN,
+                error.message = %e,
+                "append failed, attempting segment reopen for self-healing",
+            );
+            let _ = guard.reopen();
+            return Err(e);
+        }
         Ok(())
     }
 
     fn flush(&self) -> Result<()> {
-        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
+        let mut guard = self.log.lock();
         guard.flush()
     }
 

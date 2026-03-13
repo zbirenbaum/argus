@@ -11,7 +11,8 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -70,7 +71,7 @@ pub struct MerkleTree {
 
 impl Clone for MerkleTree {
     fn clone(&self) -> Self {
-        let cached = *self.cached_root.lock().unwrap();
+        let cached = *self.cached_root.lock();
         Self {
             files: self.files.clone(),
             cached_root: Mutex::new(cached),
@@ -112,14 +113,14 @@ impl MerkleTree {
     /// Insert or update a file at `path` with `hash`.
     pub fn update(&mut self, path: PathBuf, hash: ContentHash) {
         self.files.insert(path, hash);
-        *self.cached_root.lock().unwrap() = None;
+        *self.cached_root.lock() = None;
     }
 
     /// Remove a file at `path`. Returns `true` if it existed.
     pub fn remove(&mut self, path: &Path) -> bool {
         let existed = self.files.remove(path).is_some();
         if existed {
-            *self.cached_root.lock().unwrap() = None;
+            *self.cached_root.lock() = None;
         }
         existed
     }
@@ -131,7 +132,7 @@ impl MerkleTree {
     pub fn rename(&mut self, old: &Path, new: PathBuf) {
         if let Some(hash) = self.files.remove(old) {
             self.files.insert(new, hash);
-            *self.cached_root.lock().unwrap() = None;
+            *self.cached_root.lock() = None;
         }
     }
 
@@ -141,13 +142,13 @@ impl MerkleTree {
     /// each directory bottom-up, and returns the root hash. The result
     /// is cached until the next mutation.
     pub fn root_hash(&self) -> ContentHash {
-        let cached = self.cached_root.lock().unwrap();
+        let cached = self.cached_root.lock();
         if let Some(ref h) = *cached {
             return *h;
         }
         drop(cached);
         let h = compute_root(&self.files);
-        *self.cached_root.lock().unwrap() = Some(h);
+        *self.cached_root.lock() = Some(h);
         h
     }
 

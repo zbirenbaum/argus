@@ -1,9 +1,8 @@
 // Rust guideline compliant 2026-02-21
 //! In-memory sink for testing pipeline wiring.
 
-use std::sync::Mutex;
-
 use anyhow::Result;
+use parking_lot::Mutex;
 
 use crate::events::Event;
 use crate::pipeline::record::Record;
@@ -39,23 +38,14 @@ impl MemorySink {
     }
 
     /// Removes and returns all accumulated records.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn drain(&self) -> Vec<Record> {
-        std::mem::take(&mut self.records.lock().expect("MemorySink mutex poisoned"))
+        std::mem::take(&mut self.records.lock())
     }
 
     /// Returns clones of only the event records without clearing the buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn events(&self) -> Vec<Event> {
         self.records
             .lock()
-            .expect("MemorySink mutex poisoned")
             .iter()
             .filter_map(|r| {
                 if let Record::Event(e) = r {
@@ -68,21 +58,13 @@ impl MemorySink {
     }
 
     /// Returns the number of accumulated records.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn len(&self) -> usize {
-        self.records.lock().expect("MemorySink mutex poisoned").len()
+        self.records.lock().len()
     }
 
     /// Returns `true` if no records have been accumulated.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn is_empty(&self) -> bool {
-        self.records.lock().expect("MemorySink mutex poisoned").is_empty()
+        self.records.lock().is_empty()
     }
 }
 
@@ -96,7 +78,7 @@ impl Sink for MemorySink {
     }
 
     fn write(&self, record: Record) -> Result<()> {
-        self.records.lock().expect("MemorySink mutex poisoned").push(record);
+        self.records.lock().push(record);
         Ok(())
     }
 
