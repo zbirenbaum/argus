@@ -50,7 +50,7 @@ pub async fn run(
     crate::signals::install_handler();
 
     let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline();
-    let (proxy_handle, proxy_stop) = runtime.spawn_proxy_pipeline(flow_path);
+    let proxy = runtime.spawn_proxy_pipeline(flow_path);
 
     runtime.emit_initial_state();
 
@@ -74,8 +74,7 @@ pub async fn run(
     shutdown(
         keylog_stop,
         keylog_handle,
-        proxy_stop,
-        proxy_handle,
+        proxy,
         mitmdump.as_mut(),
         ptrace_thread,
         api_shutdown_tx,
@@ -113,8 +112,7 @@ fn spawn_api_server(
 fn shutdown(
     keylog_stop: Arc<AtomicBool>,
     keylog_handle: JoinHandle<()>,
-    proxy_stop: Arc<AtomicBool>,
-    proxy_handle: JoinHandle<()>,
+    proxy: Option<(JoinHandle<()>, Arc<AtomicBool>)>,
     mitmdump: Option<&mut net::MitmdumpHandle>,
     ptrace_thread: JoinHandle<()>,
     api_shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -123,9 +121,13 @@ fn shutdown(
 
     // Stop TLS pipelines before mitmdump exits so they can drain final data.
     keylog_stop.store(true, Ordering::Release);
-    proxy_stop.store(true, Ordering::Release);
+    if let Some((_, ref proxy_stop)) = proxy {
+        proxy_stop.store(true, Ordering::Release);
+    }
     let _ = keylog_handle.join();
-    let _ = proxy_handle.join();
+    if let Some((proxy_handle, _)) = proxy {
+        let _ = proxy_handle.join();
+    }
     event!(Level::DEBUG, "shutdown: keylog and proxy pipelines stopped");
 
     if let Some(m) = mitmdump {

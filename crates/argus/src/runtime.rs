@@ -194,14 +194,15 @@ impl SupervisorRuntime {
         (handle, stop)
     }
 
-    /// Spawn the proxy pipeline thread.
+    /// Spawn the proxy pipeline thread if a flow path is configured.
     ///
-    /// Returns `(join_handle, stop_flag)`. Set `stop_flag` to `true` and
-    /// join the handle during shutdown to drain final flow data.
+    /// Returns `None` when no flow path is provided (mitmdump not running).
+    /// Otherwise returns `(join_handle, stop_flag)`.
     pub fn spawn_proxy_pipeline(
         &self,
         flow_path: Option<PathBuf>,
-    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    ) -> Option<(JoinHandle<()>, Arc<AtomicBool>)> {
+        let path = flow_path?;
         let ctx = self.ctx.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -209,11 +210,11 @@ impl SupervisorRuntime {
         let handle = thread::Builder::new()
             .name("proxy-pipeline".into())
             .spawn(move || {
-                crate::pipeline::proxy_pipeline::run(flow_path, ctx, stop_clone, TLS_POLL_INTERVAL);
+                crate::pipeline::proxy_pipeline::run(Some(path), ctx, stop_clone, TLS_POLL_INTERVAL);
             })
             .expect("failed to spawn proxy pipeline thread");
 
-        (handle, stop)
+        Some((handle, stop))
     }
 
     /// Construct all pipeline stages and return the runner.
