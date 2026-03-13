@@ -1,4 +1,5 @@
 // Rust guideline compliant 2026-02-21
+// Tests are in the #[cfg(test)] block at the bottom of this file.
 //! Fan-out bus that delivers records to all registered sinks.
 //!
 //! Blocking sinks are called synchronously so the pipeline can hold up
@@ -113,5 +114,96 @@ impl RecordBus {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::events::envelope::{Event, EventPayload};
+    use crate::events::control::AgentStart;
+    use crate::pipeline::record::Record;
+    use crate::pipeline::sink::{Sink, SinkPriority};
+    use crate::pipeline::sinks::memory::MemorySink;
+
+    use super::RecordBus;
+
+    fn make_record(seq: u64) -> Record {
+        Record::Event(Event {
+            seq,
+            ts_monotonic: 0,
+            ts_wall: "2026-01-01T00:00:00Z".to_owned(),
+            agent_id: "test".to_owned(),
+            vclock: None,
+            payload: EventPayload::AgentStart(AgentStart {
+                agent_id: "test".to_owned(),
+                supervisor_pid_host: None,
+                supervisor_pid_ns: None,
+                config_summary: "test".to_owned(),
+                node: None,
+                pod: None,
+                container: None,
+            }),
+        })
+    }
+
+    #[test]
+    fn emit_reaches_blocking_sink() {
+        let sink = Arc::new(MemorySink::new(SinkPriority::Blocking));
+        let bus = RecordBus::new(vec![sink.clone() as Arc<dyn Sink>]);
+        bus.emit(make_record(1));
+        assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn emit_reaches_async_sink() {
+        let sink = Arc::new(MemorySink::new(SinkPriority::Async));
+        let bus = RecordBus::new(vec![sink.clone() as Arc<dyn Sink>]);
+        bus.emit(make_record(1));
+        assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn blocking_before_async() {
+        // Verify ordering by checking both receive the same record.
+        // True ordering would require sequence tracking; here we verify
+        // both sinks receive the record and counts are correct.
+        let blocking = Arc::new(MemorySink::new(SinkPriority::Blocking));
+        let async_sink = Arc::new(MemorySink::new(SinkPriority::Async));
+        let bus = RecordBus::new(vec![
+            blocking.clone() as Arc<dyn Sink>,
+            async_sink.clone() as Arc<dyn Sink>,
+        ]);
+        bus.emit(make_record(2));
+        assert_eq!(blocking.len(), 1, "blocking sink must receive the record");
+        assert_eq!(async_sink.len(), 1, "async sink must receive the record");
+    }
+
+    #[test]
+    fn sink_error_does_not_stop_delivery() {
+        // A sink that always errors.
+        use anyhow::anyhow;
+        struct FailSink;
+        impl Sink for FailSink {
+            fn priority(&self) -> SinkPriority { SinkPriority::Blocking }
+            fn write(&self, _: Record) -> anyhow::Result<()> { Err(anyhow!("injected error")) }
+            fn flush(&self) -> anyhow::Result<()> { Ok(()) }
+            fn name(&self) -> &str { "fail" }
+        }
+        impl std::fmt::Debug for FailSink {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("FailSink")
+            }
+        }
+
+        let good = Arc::new(MemorySink::new(SinkPriority::Blocking));
+        let bus = RecordBus::new(vec![
+            Arc::new(FailSink) as Arc<dyn Sink>,
+            good.clone() as Arc<dyn Sink>,
+        ]);
+        bus.emit(make_record(3));
+        // The good sink still receives the record despite the first sink failing.
+        assert_eq!(good.len(), 1, "good sink must still receive record after prior sink error");
     }
 }

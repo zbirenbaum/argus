@@ -173,6 +173,29 @@ mod tests {
     }
 
     #[test]
+    fn rule_matches_glob() {
+        let config = CaptureConfig {
+            rules: vec![CaptureRule {
+                pattern: "**/*.log".to_owned(),
+                level: CaptureLevel::Ignore,
+            }],
+            window_budget: 0,
+            rate_limit_per_pid: 0,
+        };
+        let policy = CapturePolicy::new(&config);
+        assert_eq!(
+            policy.level(Path::new("/workspace/run.log"), 1, 100),
+            CaptureLevel::Ignore,
+            "*.log glob must match log files",
+        );
+        assert_eq!(
+            policy.level(Path::new("/workspace/main.rs"), 1, 100),
+            CaptureLevel::Full,
+            "*.log glob must not match non-log files",
+        );
+    }
+
+    #[test]
     fn budget_reset_restores_full() {
         let config = CaptureConfig {
             rules: Vec::new(),

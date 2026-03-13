@@ -138,4 +138,46 @@ mod tests {
         assert_eq!(stops[0].pid, Pid::from_raw(1));
         assert_eq!(stops[1].pid, Pid::from_raw(2));
     }
+
+    #[test]
+    fn recorder_writes_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+
+        let mut rec = RawStopRecorder::new(&path).unwrap();
+        rec.record(&make_stop(10, 5));
+        rec.record(&make_stop(20, 6));
+        rec.flush().unwrap();
+
+        // Each line must be valid JSON that round-trips to the same stop.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "one JSON line per stop");
+
+        let parsed: RawSyscallStop = serde_json::from_str(lines[0]).expect("line 0 valid JSON");
+        assert_eq!(parsed.pid, Pid::from_raw(10));
+
+        let parsed2: RawSyscallStop = serde_json::from_str(lines[1]).expect("line 1 valid JSON");
+        assert_eq!(parsed2.pid, Pid::from_raw(20));
+    }
+
+    #[test]
+    fn replay_stream_yields_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.jsonl");
+
+        let original = vec![make_stop(1, 100), make_stop(2, 200), make_stop(3, 300)];
+        let mut rec = RawStopRecorder::new(&path).unwrap();
+        for s in &original {
+            rec.record(s);
+        }
+        rec.flush().unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let replayed: Vec<RawSyscallStop> = rt.block_on(async {
+            ReplayStream::open(&path).unwrap().collect().await
+        });
+
+        assert_eq!(replayed, original, "replayed stops must match originals exactly");
+    }
 }

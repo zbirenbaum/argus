@@ -8,6 +8,8 @@
 
 pub mod bus;
 pub mod capture_policy;
+#[cfg(test)]
+pub mod mock_ptrace;
 pub mod captured;
 pub mod classified;
 pub mod directive;

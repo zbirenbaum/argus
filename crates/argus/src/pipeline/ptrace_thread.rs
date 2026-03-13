@@ -225,6 +225,12 @@ pub struct PtraceHandle {
 }
 
 impl PtraceHandle {
+    /// Construct a handle directly from a sender — test helper only.
+    #[cfg(test)]
+    pub fn from_sender(tx: mpsc::UnboundedSender<PipelineDirective>) -> Self {
+        Self { tx }
+    }
+
     /// Send a raw directive without awaiting a reply.
     pub fn directive(&self, d: PipelineDirective) {
         let _ = self.tx.send(d);
@@ -297,6 +303,18 @@ pub struct PtraceStream {
 }
 
 impl PtraceStream {
+    /// Construct a stream from raw channel halves — test helper only.
+    ///
+    /// Allows mock implementations to inject stops without spawning a real
+    /// ptrace thread.
+    #[cfg(test)]
+    pub fn from_channels(
+        stop_rx: mpsc::UnboundedReceiver<RawSyscallStop>,
+        directive_tx: mpsc::UnboundedSender<PipelineDirective>,
+    ) -> Self {
+        Self { stop_rx, directive_tx }
+    }
+
     /// Spawn the ptrace thread for `child_pid` and return the stream.
     pub fn spawn(child_pid: Pid) -> (Self, std::thread::JoinHandle<()>) {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
