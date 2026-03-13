@@ -1,12 +1,12 @@
 // Rust guideline compliant 2026-02-21
 //! High-level facade for supervisor startup wiring.
 //!
-//! Constructs storage, sinks, bus, stages, and TLS watcher internally
+//! Constructs storage, sinks, bus, stages, and pipeline threads internally
 //! so the supervisor binary only deals with config, process lifecycle,
 //! and shutdown coordination.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -24,9 +24,9 @@ use crate::config::SupervisorConfig;
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::snapshot::{InitialFile, InitialState};
 use crate::index::{PathIndex, PidIndex, TypeIndex};
-use crate::net::{FlowWatcher, KeylogWatcher};
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::CapturePolicy;
+use crate::pipeline::context::PipelineContext;
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
 use crate::pipeline::sink::Sink;
@@ -42,22 +42,17 @@ use crate::snapshot::MerkleTree;
 use crate::state::{FdTable, PipeRegistry, PtyRegistry};
 use crate::storage::{DigestCache, DynObjectStore, EventLog, S3Client, UploadPool};
 
-// Sequences for TLS events start far above the tracer generator to avoid
-// collision between the two threads without any cross-thread coordination.
-const TLS_SEQ_START: u64 = 1_000_000;
-
-// Poll interval chosen to be fast enough for SSLKEYLOGFILE changes to appear
-// promptly while not burning CPU when TLS is idle.
+// Chosen to be fast enough for SSLKEYLOGFILE changes to appear promptly
+// while not burning CPU when TLS traffic is idle.
 const TLS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Facade that owns the bus, sequence generator, and shared state.
+/// Facade that owns the pipeline context and shared state.
 ///
 /// Constructs all internal pipeline components so the supervisor binary
 /// never touches sinks, stages, or internal state types directly.
 pub struct SupervisorRuntime {
     config: SupervisorConfig,
-    bus: RecordBus,
-    seq_gen: SequenceGenerator,
+    ctx: PipelineContext,
     shared: SharedState,
 }
 
@@ -85,15 +80,16 @@ impl SupervisorRuntime {
         let (broadcast_tx, _) = broadcast::channel::<Event>(4096);
         let bus = build_bus(sink_cas, event_log, upload_pool, &config, broadcast_tx);
 
-        let seq_gen = SequenceGenerator::default();
+        let seq = Arc::new(SequenceGenerator::default());
+        let ctx = PipelineContext::new(seq, bus.clone(), config.agent_id.clone());
 
         let api_cas: Arc<dyn Cas> = Arc::new(
             LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
         );
-        let shared = new_shared_state(config.agent_id.clone(), api_cas, bus.clone());
+        let shared = new_shared_state(config.agent_id.clone(), api_cas, bus);
         shared.store_rules(config.build_ruleset());
 
-        Ok(Self { config, bus, seq_gen, shared })
+        Ok(Self { config, ctx, shared })
     }
 
     /// Shared state handle for the API server.
@@ -119,8 +115,8 @@ impl SupervisorRuntime {
             container: std::env::var("CONTAINER_NAME").ok(),
         });
 
-        let evt = Event::new(&self.seq_gen, self.config.agent_id.clone(), payload);
-        self.bus.emit(Record::Event(evt));
+        let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        self.ctx.bus.emit(Record::Event(evt));
     }
 
     /// Walk the workspace and emit `InitialFile` + `InitialState` events.
@@ -156,8 +152,8 @@ impl SupervisorRuntime {
                 size,
                 mode,
             });
-            let evt = Event::new(&self.seq_gen, self.config.agent_id.clone(), payload);
-            self.bus.emit(Record::Event(evt));
+            let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+            self.ctx.bus.emit(Record::Event(evt));
 
             file_count += 1;
             total_size += size;
@@ -174,38 +170,55 @@ impl SupervisorRuntime {
             file_count,
             total_size,
         });
-        let evt = Event::new(&self.seq_gen, self.config.agent_id.clone(), payload);
-        self.bus.emit(Record::Event(evt));
+        let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        self.ctx.bus.emit(Record::Event(evt));
     }
 
-    /// Spawn the TLS watcher thread.
+    /// Spawn the keylog pipeline thread.
     ///
     /// Returns `(join_handle, stop_flag)`. Set `stop_flag` to `true` and
-    /// join the handle during shutdown to drain final TLS data.
-    pub fn spawn_tls_watcher(
-        &self,
-        flow_path: Option<PathBuf>,
-    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    /// join the handle during shutdown to drain final TLS key data.
+    pub fn spawn_keylog_pipeline(&self) -> (JoinHandle<()>, Arc<AtomicBool>) {
         let keylog_path = self.config.tls.keylog_path.clone();
-        let bus = self.bus.clone();
-        let tls_seq = SequenceGenerator::new(TLS_SEQ_START);
-        let agent_id = self.config.agent_id.clone();
+        let ctx = self.ctx.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
 
         let handle = thread::Builder::new()
-            .name("tls-watcher".into())
+            .name("keylog-pipeline".into())
             .spawn(move || {
-                tls_watcher_loop(keylog_path, flow_path, bus, tls_seq, agent_id, stop_clone);
+                crate::pipeline::keylog_pipeline::run(keylog_path, ctx, stop_clone, TLS_POLL_INTERVAL);
             })
-            .expect("failed to spawn tls-watcher thread");
+            .expect("failed to spawn keylog pipeline thread");
+
+        (handle, stop)
+    }
+
+    /// Spawn the proxy pipeline thread.
+    ///
+    /// Returns `(join_handle, stop_flag)`. Set `stop_flag` to `true` and
+    /// join the handle during shutdown to drain final flow data.
+    pub fn spawn_proxy_pipeline(
+        &self,
+        flow_path: Option<PathBuf>,
+    ) -> (JoinHandle<()>, Arc<AtomicBool>) {
+        let ctx = self.ctx.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        let handle = thread::Builder::new()
+            .name("proxy-pipeline".into())
+            .spawn(move || {
+                crate::pipeline::proxy_pipeline::run(flow_path, ctx, stop_clone, TLS_POLL_INTERVAL);
+            })
+            .expect("failed to spawn proxy pipeline thread");
 
         (handle, stop)
     }
 
     /// Construct all pipeline stages and return the runner.
     ///
-    /// Consumes `self` — the bus, seq_gen, and config move into the runner.
+    /// Consumes `self` — the context and config move into the runner.
     /// Call `emit_agent_start` and `emit_initial_state` before this.
     pub fn into_pipeline(self, child_pid: Pid) -> (PipelineRunner, JoinHandle<()>) {
         let (ptrace_stream, ptrace_thread) = PtraceStream::spawn(child_pid);
@@ -241,13 +254,13 @@ impl SupervisorRuntime {
         let policy = CapturePolicy::default_full();
         let capture_stage = CaptureStage::new(
             handle.clone(),
-            self.bus.clone(),
+            self.ctx.bus.clone(),
             policy,
             file_state,
         );
 
-        let tree_stage = TreeStage::new(MerkleTree::new(), self.bus.clone(), 1000);
-        let stamp_stage = StampStage::new(Arc::new(self.seq_gen), self.config.agent_id.clone());
+        let tree_stage = TreeStage::new(MerkleTree::new(), self.ctx.bus.clone(), 1000);
+        let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone());
 
         let recorder: Option<RawStopRecorder> = None;
 
@@ -259,7 +272,7 @@ impl SupervisorRuntime {
             capture_stage,
             tree_stage,
             stamp_stage,
-            self.bus,
+            self.ctx.bus,
             recorder,
             self.shared.pause_flag(),
             self.shared,
@@ -324,99 +337,6 @@ fn build_bus(
     }
 
     RecordBus::new(sinks)
-}
-
-/// Polling loop for TLS keylog and flow data.
-fn tls_watcher_loop(
-    keylog_path: PathBuf,
-    flow_output: Option<PathBuf>,
-    bus: RecordBus,
-    seq_gen: SequenceGenerator,
-    agent_id: String,
-    stop: Arc<AtomicBool>,
-) {
-    let mut keylog = KeylogWatcher::new(keylog_path);
-    let mut flow = flow_output.map(FlowWatcher::new);
-
-    event!(
-        name: "tls_watcher.started",
-        Level::INFO,
-        "TLS watcher thread started",
-    );
-
-    loop {
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-
-        poll_keylog(&mut keylog, &bus, &seq_gen, &agent_id);
-
-        if let Some(ref mut fw) = flow {
-            poll_flows(fw, &bus, &seq_gen, &agent_id);
-        }
-
-        thread::sleep(TLS_POLL_INTERVAL);
-    }
-
-    // Final drain ensures no TLS data is lost between last poll and shutdown.
-    poll_keylog(&mut keylog, &bus, &seq_gen, &agent_id);
-    if let Some(ref mut fw) = flow {
-        poll_flows(fw, &bus, &seq_gen, &agent_id);
-    }
-
-    event!(
-        name: "tls_watcher.stopped",
-        Level::INFO,
-        "TLS watcher thread stopped",
-    );
-}
-
-fn poll_keylog(
-    watcher: &mut KeylogWatcher,
-    bus: &RecordBus,
-    seq_gen: &SequenceGenerator,
-    agent_id: &str,
-) {
-    match watcher.process_new_lines(bus, 0, -1) {
-        Ok(tls_events) => {
-            for tls in tls_events {
-                let evt = Event::new(seq_gen, agent_id.to_owned(), EventPayload::TlsKeys(tls));
-                bus.emit(Record::Event(evt));
-            }
-        }
-        Err(e) => {
-            event!(
-                name: "tls_watcher.keylog.error",
-                Level::WARN,
-                error.message = %e,
-                "keylog poll failed: {{error.message}}",
-            );
-        }
-    }
-}
-
-fn poll_flows(
-    watcher: &mut FlowWatcher,
-    bus: &RecordBus,
-    seq_gen: &SequenceGenerator,
-    agent_id: &str,
-) {
-    match watcher.process_new_flows(bus, 0) {
-        Ok(flows) => {
-            for payload in FlowWatcher::into_event_payloads(flows) {
-                let evt = Event::new(seq_gen, agent_id.to_owned(), payload);
-                bus.emit(Record::Event(evt));
-            }
-        }
-        Err(e) => {
-            event!(
-                name: "tls_watcher.flow.error",
-                Level::WARN,
-                error.message = %e,
-                "flow poll failed: {{error.message}}",
-            );
-        }
-    }
 }
 
 fn walk_dir_recursive(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {

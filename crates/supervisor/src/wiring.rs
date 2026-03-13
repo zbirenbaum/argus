@@ -3,6 +3,10 @@
 //!
 //! Owns process lifecycle, API server, and shutdown coordination only.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::thread::JoinHandle;
+
 use anyhow::Result;
 use tracing::{Level, event};
 
@@ -49,7 +53,8 @@ pub async fn run(
     // tracee after attaching; we don't write to it from the async context.
     let _ = nix::unistd::close(spawn.sync_pipe_w);
 
-    let (tls_handle, tls_stop) = runtime.spawn_tls_watcher(flow_path);
+    let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline();
+    let (proxy_handle, proxy_stop) = runtime.spawn_proxy_pipeline(flow_path);
 
     runtime.emit_initial_state();
 
@@ -59,7 +64,15 @@ pub async fn run(
     runner.run().await;
     event!(Level::DEBUG, "wiring: pipeline.run() returned, beginning shutdown");
 
-    shutdown(tls_stop, tls_handle, mitmdump.as_mut(), ptrace_thread, api_shutdown_tx)?;
+    shutdown(
+        keylog_stop,
+        keylog_handle,
+        proxy_stop,
+        proxy_handle,
+        mitmdump.as_mut(),
+        ptrace_thread,
+        api_shutdown_tx,
+    )?;
 
     Ok(())
 }
@@ -91,18 +104,22 @@ fn spawn_api_server(
 
 /// Shuts down all subsystems in dependency order.
 fn shutdown(
-    tls_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    tls_handle: std::thread::JoinHandle<()>,
+    keylog_stop: Arc<AtomicBool>,
+    keylog_handle: JoinHandle<()>,
+    proxy_stop: Arc<AtomicBool>,
+    proxy_handle: JoinHandle<()>,
     mitmdump: Option<&mut net::MitmdumpHandle>,
-    ptrace_thread: std::thread::JoinHandle<()>,
+    ptrace_thread: JoinHandle<()>,
     api_shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
 
-    // Stop TLS watcher before mitmdump exits so it can drain final data.
-    tls_stop.store(true, Ordering::Release);
-    let _ = tls_handle.join();
-    event!(Level::DEBUG, "shutdown: tls-watcher stopped");
+    // Stop TLS pipelines before mitmdump exits so they can drain final data.
+    keylog_stop.store(true, Ordering::Release);
+    proxy_stop.store(true, Ordering::Release);
+    let _ = keylog_handle.join();
+    let _ = proxy_handle.join();
+    event!(Level::DEBUG, "shutdown: keylog and proxy pipelines stopped");
 
     if let Some(m) = mitmdump {
         event!(Level::DEBUG, "shutdown: stopping mitmdump");

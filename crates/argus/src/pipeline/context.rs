@@ -17,16 +17,16 @@ use crate::pipeline::bus::RecordBus;
 #[derive(Clone, Debug)]
 pub struct PipelineContext {
     /// Monotonic sequence counter shared across all pipelines.
-    pub seq: Arc<SequenceGenerator>,
+    pub(crate) seq: Arc<SequenceGenerator>,
     /// Channel to the sink chain (event log, CAS, S3, broadcast).
-    pub bus: RecordBus,
+    pub(crate) bus: RecordBus,
     /// Identifier stamped onto every emitted event.
-    pub agent_id: String,
+    pub(crate) agent_id: String,
 }
 
 impl PipelineContext {
     /// Create a new pipeline context.
-    pub fn new(seq: Arc<SequenceGenerator>, bus: RecordBus, agent_id: String) -> Self {
+    pub(crate) fn new(seq: Arc<SequenceGenerator>, bus: RecordBus, agent_id: String) -> Self {
         Self { seq, bus, agent_id }
     }
 }
