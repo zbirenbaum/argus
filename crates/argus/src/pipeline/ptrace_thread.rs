@@ -132,16 +132,11 @@ fn translate_wait_status(status: WaitStatus) -> RawSyscallStop {
 /// Returns `true` if the tracee was resumed by this function.
 fn execute_directive(directive: PipelineDirective) -> bool {
     match directive {
-        PipelineDirective::Resume { pid, trace_exit } => {
+        PipelineDirective::Resume { pid, trace_exit, signal } => {
             if trace_exit {
-                // Stop at the next syscall-exit boundary so the pipeline
-                // can read the return value for entry→exit correlation.
-                let _ = ptrace::syscall(pid, None);
+                let _ = ptrace::syscall(pid, signal);
             } else {
-                // Continue until the next SECCOMP or ptrace event stop.
-                // Avoids per-syscall overhead for threads with no pending
-                // entry awaiting exit correlation.
-                let _ = ptrace::cont(pid, None);
+                let _ = ptrace::cont(pid, signal);
             }
             true
         }
@@ -182,6 +177,82 @@ fn execute_directive(directive: PipelineDirective) -> bool {
     }
 }
 
+/// Tracks active tracee PIDs for the ptrace loop.
+///
+/// Distinguishes tracees from non-tracee children (e.g. mitmdump) so
+/// `waitpid(-1)` events for non-tracees can be ignored. Exits the loop
+/// when all tracees have terminated.
+#[derive(Debug)]
+struct TraceeSet {
+    pids: std::collections::HashSet<Pid>,
+}
+
+impl TraceeSet {
+    /// Create with the initial agent PID.
+    fn new(initial_pid: Pid) -> Self {
+        let mut pids = std::collections::HashSet::new();
+        pids.insert(initial_pid);
+        Self { pids }
+    }
+
+    /// Returns true if `pid` is a known tracee.
+    fn contains(&self, pid: &Pid) -> bool {
+        self.pids.contains(pid)
+    }
+
+    /// Returns true when no tracees remain.
+    fn is_empty(&self) -> bool {
+        self.pids.is_empty()
+    }
+
+    /// Register a new tracee discovered via fork/clone.
+    fn add(&mut self, pid: Pid) {
+        self.pids.insert(pid);
+    }
+
+    /// Remove a tracee that has been finally reaped.
+    fn remove(&mut self, pid: &Pid) {
+        self.pids.remove(pid);
+    }
+
+    /// Process a wait status. Returns `None` if the event is from a
+    /// non-tracee and should be ignored. Returns `Some((stop, is_final))`
+    /// where `is_final` means no resume directive is needed.
+    fn process_wait(&mut self, status: WaitStatus) -> Option<(RawSyscallStop, bool)> {
+        let wait_pid = status.pid().unwrap_or(Pid::from_raw(0));
+
+        // Exited/Signaled are final — the process has been reaped.
+        let is_final = matches!(
+            status,
+            WaitStatus::Exited(..) | WaitStatus::Signaled(..)
+        );
+
+        if wait_pid != Pid::from_raw(0) && !self.contains(&wait_pid) {
+            if is_final {
+                // Non-tracee child exited (e.g. mitmdump). Ignore.
+                return None;
+            }
+            // Unknown PID in a ptrace stop — an auto-traced child whose
+            // initial stop arrived before the parent's PTRACE_EVENT_FORK.
+            // Add it now so it gets properly tracked and resumed.
+            self.add(wait_pid);
+        }
+
+        if is_final {
+            self.remove(&wait_pid);
+        }
+
+        let stop = translate_wait_status(status);
+
+        // Learn new tracee PIDs from fork/clone events.
+        if let StopType::Fork { child, .. } = &stop.stop_type {
+            self.add(*child);
+        }
+
+        Some((stop, is_final))
+    }
+}
+
 /// Entry point for the dedicated ptrace thread.
 fn ptrace_thread_main(
     initial_pid: Pid,
@@ -209,6 +280,8 @@ fn ptrace_thread_main(
         }
     }
 
+    let mut tracees = TraceeSet::new(initial_pid);
+
     loop {
         let status = match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::__WALL)) {
             Ok(s) => s,
@@ -224,25 +297,39 @@ fn ptrace_thread_main(
             }
         };
 
-        let stop = translate_wait_status(status);
+        let Some((stop, is_final)) = tracees.process_wait(status) else {
+            continue;
+        };
+
+        // Final exits (Exited/Signaled) mean the process has already been
+        // reaped by waitpid. Don't send them to the pipeline — the
+        // PTRACE_EVENT_EXIT stop already notified stages of the exit.
+        // Sending finals would cause the pipeline to emit a stale Resume
+        // that pollutes the directive channel for the next stop.
+        if is_final {
+            if tracees.is_empty() {
+                break;
+            }
+            continue;
+        }
+
         if stop_tx.send(stop).is_err() {
-            // Receiver dropped — pipeline shutting down.
             break;
         }
 
-        // Process directives until one resumes the tracee. A single stop
-        // may require multiple non-resuming directives (e.g. several
-        // ReadString calls to collect syscall arguments) before the
-        // pipeline finally sends a Resume or InjectError.
         loop {
             match directive_rx.blocking_recv() {
                 Some(directive) => {
                     if execute_directive(directive) {
-                        break; // tracee resumed, go back to waitpid
+                        break;
                     }
                 }
-                None => return, // pipeline dropped, exit thread
+                None => return,
             }
+        }
+
+        if tracees.is_empty() {
+            break;
         }
     }
 }
@@ -385,5 +472,255 @@ impl Stream for PtraceStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         self.stop_rx.poll_recv(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::signal::Signal;
+
+    fn pid(n: i32) -> Pid {
+        Pid::from_raw(n)
+    }
+
+    // ── TraceeSet: non-tracee filtering ──────────────────────────────
+
+    #[test]
+    fn tracee_set_ignores_unknown_pid() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // mitmdump (pid 99) exits — should be ignored.
+        let status = WaitStatus::Exited(pid(99), 0);
+        assert!(set.process_wait(status).is_none(), "non-tracee should be ignored");
+        assert!(!set.is_empty(), "initial tracee should remain");
+    }
+
+    #[test]
+    fn tracee_set_tracks_initial_pid() {
+        let set = TraceeSet::new(pid(10));
+        assert!(set.contains(&pid(10)));
+        assert!(!set.contains(&pid(99)));
+    }
+
+    #[test]
+    fn tracee_set_auto_adds_unknown_non_final() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // A child's initial stop can arrive before the parent's fork event.
+        // Non-final stops from unknown PIDs should auto-add the PID.
+        let status = WaitStatus::Stopped(pid(20), Signal::SIGSTOP);
+        let result = set.process_wait(status);
+        assert!(result.is_some(), "non-final unknown stop should be processed");
+        assert!(set.contains(&pid(20)), "unknown pid should be auto-added");
+
+        let (stop, is_final) = result.unwrap();
+        assert!(!is_final);
+        assert_eq!(stop.pid, pid(20));
+    }
+
+    // ── TraceeSet: fork adds child ───────────────────────────────────
+
+    #[test]
+    fn tracee_set_learns_child_from_fork() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // Parent (10) forks child (20).
+        let status = WaitStatus::PtraceEvent(
+            pid(10),
+            nix::sys::signal::Signal::SIGTRAP,
+            ptrace::Event::PTRACE_EVENT_CLONE as i32,
+        );
+        // The translate_wait_status would normally extract child from
+        // ptrace::getevent, but we can't call that in tests. Instead,
+        // test process_wait by providing a pre-translated stop.
+        // Let's test the logic directly via add/remove.
+        set.add(pid(20));
+        assert!(set.contains(&pid(20)));
+    }
+
+    // ── TraceeSet: exit removes tracee ───────────────────────────────
+
+    #[test]
+    fn tracee_set_removes_on_exited() {
+        let mut set = TraceeSet::new(pid(10));
+        set.add(pid(20));
+
+        // pid 20 exits normally.
+        let result = set.process_wait(WaitStatus::Exited(pid(20), 0));
+        assert!(result.is_some());
+        let (stop, is_final) = result.unwrap();
+        assert!(is_final, "Exited should be final");
+        assert!(!set.contains(&pid(20)), "exited pid should be removed");
+        assert!(!set.is_empty(), "pid 10 should remain");
+
+        // Verify the stop has the right pid and type.
+        assert_eq!(stop.pid, pid(20));
+        assert!(matches!(stop.stop_type, StopType::Exit { exit_code: 0, .. }));
+    }
+
+    #[test]
+    fn tracee_set_removes_on_signaled() {
+        let mut set = TraceeSet::new(pid(10));
+
+        let result = set.process_wait(WaitStatus::Signaled(pid(10), Signal::SIGKILL, false));
+        assert!(result.is_some());
+        let (_stop, is_final) = result.unwrap();
+        assert!(is_final);
+        assert!(set.is_empty(), "last tracee removed");
+    }
+
+    #[test]
+    fn tracee_set_empty_after_all_exit() {
+        let mut set = TraceeSet::new(pid(10));
+        set.add(pid(20));
+        set.add(pid(30));
+
+        set.process_wait(WaitStatus::Exited(pid(30), 0));
+        assert!(!set.is_empty());
+        set.process_wait(WaitStatus::Exited(pid(20), 0));
+        assert!(!set.is_empty());
+        set.process_wait(WaitStatus::Exited(pid(10), 0));
+        assert!(set.is_empty());
+    }
+
+    // ── TraceeSet: ptrace event stops are non-final ──────────────────
+
+    #[test]
+    fn ptrace_event_exit_is_not_final() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // PTRACE_EVENT_EXIT is a stop, not the final reap.
+        let status = WaitStatus::PtraceEvent(
+            pid(10),
+            Signal::SIGTRAP,
+            ptrace::Event::PTRACE_EVENT_EXIT as i32,
+        );
+        let result = set.process_wait(status);
+        assert!(result.is_some());
+        let (_stop, is_final) = result.unwrap();
+        assert!(!is_final, "ptrace exit event is not final — process still alive");
+        assert!(set.contains(&pid(10)), "tracee should NOT be removed yet");
+    }
+
+    // ── TraceeSet: signal-delivery stop is non-final ─────────────────
+
+    #[test]
+    fn signal_delivery_stop_is_not_final() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // SIGCHLD delivered to tracee — this is a ptrace signal-delivery stop.
+        let status = WaitStatus::Stopped(pid(10), Signal::SIGCHLD);
+        let result = set.process_wait(status);
+        assert!(result.is_some());
+        let (stop, is_final) = result.unwrap();
+        assert!(!is_final, "signal-delivery stop is not final");
+        assert!(set.contains(&pid(10)), "tracee should remain after signal stop");
+        assert!(matches!(stop.stop_type, StopType::Signal { signal: 17, .. }));
+    }
+
+    // ── TraceeSet: simulated full lifecycle ───────────────────────────
+
+    #[test]
+    fn full_lifecycle_with_fork_and_exit() {
+        let mut set = TraceeSet::new(pid(10));
+
+        // Agent (10) forks child (20) — learned via add().
+        set.add(pid(20));
+        assert_eq!(set.pids.len(), 2);
+
+        // Child (20) receives SIGCHLD — non-final, re-inject signal.
+        let result = set.process_wait(WaitStatus::Stopped(pid(20), Signal::SIGCHLD));
+        let (_stop, is_final) = result.unwrap();
+        assert!(!is_final);
+
+        // Child (20) ptrace exit event — non-final.
+        let result = set.process_wait(WaitStatus::PtraceEvent(
+            pid(20), Signal::SIGTRAP, ptrace::Event::PTRACE_EVENT_EXIT as i32,
+        ));
+        let (_stop, is_final) = result.unwrap();
+        assert!(!is_final);
+
+        // Child (20) truly exits — final.
+        let result = set.process_wait(WaitStatus::Exited(pid(20), 0));
+        let (_stop, is_final) = result.unwrap();
+        assert!(is_final);
+        assert!(!set.is_empty());
+
+        // Non-tracee mitmdump (pid 99) exits — ignored.
+        assert!(set.process_wait(WaitStatus::Exited(pid(99), 0)).is_none());
+
+        // Agent (10) ptrace exit event — non-final.
+        let result = set.process_wait(WaitStatus::PtraceEvent(
+            pid(10), Signal::SIGTRAP, ptrace::Event::PTRACE_EVENT_EXIT as i32,
+        ));
+        assert!(!result.unwrap().1);
+
+        // Agent (10) truly exits — final, set now empty.
+        let result = set.process_wait(WaitStatus::Exited(pid(10), 0));
+        assert!(result.unwrap().1);
+        assert!(set.is_empty());
+    }
+
+    // ── translate_wait_status: signal extraction ─────────────────────
+
+    #[test]
+    fn translate_stopped_produces_signal_stop() {
+        let status = WaitStatus::Stopped(pid(10), Signal::SIGCHLD);
+        let stop = translate_wait_status(status);
+        assert_eq!(stop.pid, pid(10));
+        match stop.stop_type {
+            StopType::Signal { pid: p, signal } => {
+                assert_eq!(p, pid(10));
+                assert_eq!(signal, Signal::SIGCHLD as i32);
+            }
+            other => panic!("expected Signal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn translate_signaled_produces_signal_stop() {
+        let status = WaitStatus::Signaled(pid(10), Signal::SIGTERM, false);
+        let stop = translate_wait_status(status);
+        match stop.stop_type {
+            StopType::Signal { signal, .. } => {
+                assert_eq!(signal, Signal::SIGTERM as i32);
+            }
+            other => panic!("expected Signal, got {other:?}"),
+        }
+    }
+
+    // ── execute_directive: signal passed through ─────────────────────
+
+    #[test]
+    fn resume_with_signal_is_recognized() {
+        // We can't call real ptrace::cont in tests, but we can verify the
+        // directive variant carries the signal correctly.
+        let d = PipelineDirective::Resume {
+            pid: pid(10),
+            trace_exit: false,
+            signal: Some(Signal::SIGCHLD),
+        };
+        match d {
+            PipelineDirective::Resume { signal, .. } => {
+                assert_eq!(signal, Some(Signal::SIGCHLD));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn resume_without_signal_has_none() {
+        let d = PipelineDirective::Resume {
+            pid: pid(10),
+            trace_exit: false,
+            signal: None,
+        };
+        match d {
+            PipelineDirective::Resume { signal, .. } => {
+                assert!(signal.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }

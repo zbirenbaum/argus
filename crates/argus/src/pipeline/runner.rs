@@ -21,6 +21,7 @@ use crate::events::control;
 use crate::pipeline::{PtraceStream, RawStopRecorder, RecordBus};
 use crate::pipeline::classified::Classification;
 use crate::pipeline::directive::PipelineDirective;
+use crate::pipeline::raw_stop::StopType;
 use crate::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
 };
@@ -104,15 +105,27 @@ impl PipelineRunner {
             // ptrace::cont to avoid per-syscall overhead on all threads.
             if matches!(classified.classification, Classification::Passthrough) {
                 let trace_exit = self.classify.pending.contains_key(&classified.pid);
+
+                // Re-inject pending signals so the tracee actually receives
+                // them (e.g. SIGCHLD for child-process notification).
+                let signal = match &classified.raw.stop_type {
+                    StopType::Signal { signal, .. } => {
+                        nix::sys::signal::Signal::try_from(*signal).ok()
+                    }
+                    _ => None,
+                };
+
                 event!(
                     name: "pipeline.ptrace.passthrough",
                     Level::TRACE,
                     pid = pid_raw,
+                    ?signal,
                     "passthrough, resuming immediately",
                 );
                 self.ptrace.directive(PipelineDirective::Resume {
                     pid: classified.pid,
                     trace_exit,
+                    signal,
                 });
                 continue;
             }
@@ -191,6 +204,7 @@ impl PipelineRunner {
             self.ptrace.directive(PipelineDirective::Resume {
                 pid: captured.pid,
                 trace_exit: false,
+                signal: None,
             });
 
             let tree_hash = self.tree.update(&captured);

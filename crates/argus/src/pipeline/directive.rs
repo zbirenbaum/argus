@@ -20,7 +20,15 @@ pub enum PipelineDirective {
     /// When false, `ptrace::cont` is used and only SECCOMP / ptrace
     /// event stops fire — avoiding per-syscall overhead on threads
     /// that do not have a pending entry awaiting exit correlation.
-    Resume { pid: Pid, trace_exit: bool },
+    ///
+    /// `signal` re-injects a pending signal into the tracee. Must be
+    /// set when resuming from a signal-delivery stop so the tracee
+    /// actually receives the signal (e.g. SIGCHLD).
+    Resume {
+        pid: Pid,
+        trace_exit: bool,
+        signal: Option<nix::sys::signal::Signal>,
+    },
 
     /// Read raw bytes from tracee memory.
     ReadMemory {
@@ -66,8 +74,8 @@ pub enum PipelineDirective {
 impl std::fmt::Debug for PipelineDirective {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Resume { pid, trace_exit } => {
-                write!(f, "Resume({pid}, trace_exit={trace_exit})")
+            Self::Resume { pid, trace_exit, signal } => {
+                write!(f, "Resume({pid}, trace_exit={trace_exit}, signal={signal:?})")
             }
             Self::ReadMemory { pid, addr, len, .. } => {
                 write!(f, "ReadMemory({pid}, {addr:#x}, {len})")

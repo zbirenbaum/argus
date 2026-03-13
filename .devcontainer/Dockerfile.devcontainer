@@ -29,6 +29,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code
+ENV CLAUDE_CODE_OAUTH_TOKEN=""
 
 # mitmdump for TLS MITM proxy
 RUN pipx install mitmproxy

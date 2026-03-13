@@ -893,6 +893,106 @@ test_12() {
     fi
 }
 
+test_13() {
+    echo "Test 13: Child Process Reaping (No Zombies)"
+    cleanup_workspace
+
+    local ok=true
+    local events_file="/tmp/test13_events.jsonl"
+    rm -f "$events_file"
+
+    # Simulates a long-running parent (like Node.js / Claude Code) that
+    # spawns many short-lived children concurrently. The parent waits for
+    # each child and then checks for zombies. If the ptrace loop fails to
+    # reap children (e.g. head-of-line blocking on directive processing),
+    # zombie processes will accumulate.
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" \
+        -- python3 -c "
+import subprocess, os, time
+
+# Spawn 10 concurrent children doing file I/O
+procs = []
+for i in range(10):
+    p = subprocess.Popen(
+        ['bash', '-c', f'echo child-{i} > /tmp/argus-test-workspace/child_{i}.txt && cat /tmp/argus-test-workspace/child_{i}.txt && ls -la /tmp/argus-test-workspace/'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    procs.append(p)
+
+# Wait for all to finish
+for p in procs:
+    p.wait()
+
+# Give ptrace loop time to process all stops
+time.sleep(2)
+
+# Count zombie children
+import glob
+my_pid = os.getpid()
+zombies = 0
+for stat_file in glob.glob('/proc/*/stat'):
+    try:
+        with open(stat_file) as f:
+            fields = f.read().split()
+            # fields[3] = ppid, fields[2] = state
+            if len(fields) > 3 and fields[3] == str(my_pid) and fields[2] == 'Z':
+                zombies += 1
+    except (IOError, IndexError):
+        pass
+
+with open('/tmp/argus-test-workspace/zombie_result.txt', 'w') as f:
+    f.write(f'zombie_count={zombies}\n')
+print(f'zombies={zombies}')
+" > "$events_file" 2>/dev/null
+    local exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        echo "  FAIL: supervisor exited with code $exit_code"
+        ok=false
+    fi
+
+    # Check the zombie count reported by the agent.
+    if [ -f /tmp/argus-test-workspace/zombie_result.txt ]; then
+        local zombie_count
+        zombie_count=$(grep -o 'zombie_count=[0-9]*' /tmp/argus-test-workspace/zombie_result.txt | cut -d= -f2)
+        if [ "$zombie_count" != "0" ]; then
+            echo "  FAIL: agent reported $zombie_count zombie child processes"
+            ok=false
+        fi
+    else
+        echo "  FAIL: zombie_result.txt not created (agent may have hung)"
+        ok=false
+    fi
+
+    # Verify we got exit events for the child processes.
+    local events
+    events=$(cat "$events_file")
+    local exit_count
+    exit_count=$(echo "$events" | jq -s '[.[] | select(.type == "exit")] | length')
+    if [ "$exit_count" -lt 10 ]; then
+        echo "  FAIL: expected >= 10 exit events, got $exit_count"
+        ok=false
+    fi
+
+    # Verify we got write events for each child file.
+    local write_count
+    write_count=$(echo "$events" | jq -s '[.[] | select(.type == "write" and (.path // "" | contains("child_")))] | length')
+    if [ "$write_count" -lt 10 ]; then
+        echo "  FAIL: expected >= 10 child write events, got $write_count"
+        ok=false
+    fi
+
+    cleanup_workspace
+    rm -f /tmp/argus-test-workspace/child_*.txt /tmp/argus-test-workspace/zombie_result.txt
+
+    if $ok; then
+        echo "  PASS: exit_events=$exit_count write_events=$write_count zombies=0"
+        record 13 "Child reaping" "PASS"
+    else
+        record 13 "Child reaping" "FAIL"
+    fi
+}
+
 # --- Runner ---
 
 print_summary() {
@@ -910,7 +1010,7 @@ print_summary() {
     fi
 }
 
-ALL_TESTS=(1 2 3 4 5 6 7 7b 8 9 10 11 12)
+ALL_TESTS=(1 2 3 4 5 6 7 7b 8 9 10 11 12 13)
 
 if [ $# -gt 0 ]; then
     TESTS=("$@")
@@ -939,6 +1039,7 @@ for t in "${TESTS[@]}"; do
         10) test_10 ;;
         11) test_11 ;;
         12) test_12 ;;
+        13) test_13 ;;
         *)  echo "Unknown test: $t"; exit 1 ;;
     esac
 done

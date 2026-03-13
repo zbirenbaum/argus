@@ -12,6 +12,13 @@ import base64
 import json
 
 
+def responseheaders(flow):
+    """Enable streaming for SSE and chunked responses so they aren't buffered."""
+    ct = flow.response.headers.get("content-type", "")
+    if "text/event-stream" in ct or "chunked" in flow.response.headers.get("transfer-encoding", ""):
+        flow.response.stream = True
+
+
 def response(flow):
     """Called by mitmdump when a response is received."""
     data = {

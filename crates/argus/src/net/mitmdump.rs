@@ -198,6 +198,8 @@ fn start_mitmdump_inner(
         "--set",
         &format!("confdir={}", ca_dir.display()),
         "--quiet",
+        "--set",
+        "stream_large_bodies=1",
     ]);
 
     if proxy_mode == ProxyMode::Transparent {

@@ -163,13 +163,13 @@ mod tests {
 
         // Resume each stop manually so the driver can proceed.
         let s1 = stream.next().await.expect("stop 1");
-        stream.directive(PipelineDirective::Resume { pid: s1.pid, trace_exit: false });
+        stream.directive(PipelineDirective::Resume { pid: s1.pid, trace_exit: false, signal: None });
 
         let s2 = stream.next().await.expect("stop 2");
-        stream.directive(PipelineDirective::Resume { pid: s2.pid, trace_exit: false });
+        stream.directive(PipelineDirective::Resume { pid: s2.pid, trace_exit: false, signal: None });
 
         let s3 = stream.next().await.expect("stop 3");
-        stream.directive(PipelineDirective::Resume { pid: s3.pid, trace_exit: false });
+        stream.directive(PipelineDirective::Resume { pid: s3.pid, trace_exit: false, signal: None });
 
         assert!(stream.next().await.is_none(), "stream should end");
 
@@ -189,7 +189,7 @@ mod tests {
         // Consume the stop, issue a ReadMemory, then resume.
         let _stop = stream.next().await.expect("stop");
         let data = handle.read_memory(pid, 0x1000, 5).await.expect("read_memory");
-        stream.directive(PipelineDirective::Resume { pid, trace_exit: false });
+        stream.directive(PipelineDirective::Resume { pid, trace_exit: false, signal: None });
 
         assert_eq!(data, b"hello");
         // Drain the stream so the background task finishes.
@@ -201,5 +201,129 @@ mod tests {
         let mock = MockPtraceThread::new();
         let (mut stream, _handle) = mock.into_stream(vec![]);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn signal_stop_resume_carries_signal() {
+        use nix::sys::signal::Signal;
+
+        let mock = MockPtraceThread::new();
+        let signal_stop = RawSyscallStop {
+            pid: Pid::from_raw(10),
+            stop_type: StopType::Signal {
+                pid: Pid::from_raw(10),
+                signal: Signal::SIGCHLD as i32,
+            },
+        };
+        let (mut stream, _handle) = mock.into_stream(vec![signal_stop]);
+
+        let stop = stream.next().await.expect("signal stop");
+        assert!(matches!(stop.stop_type, StopType::Signal { signal: 17, .. }));
+
+        // Simulate what the runner does: extract signal from StopType::Signal
+        // and include it in the Resume directive.
+        let signal = match &stop.stop_type {
+            StopType::Signal { signal, .. } => {
+                Signal::try_from(*signal).ok()
+            }
+            _ => None,
+        };
+        assert_eq!(signal, Some(Signal::SIGCHLD));
+
+        stream.directive(PipelineDirective::Resume {
+            pid: stop.pid,
+            trace_exit: false,
+            signal,
+        });
+
+        assert!(stream.next().await.is_none(), "stream should end");
+    }
+
+    #[tokio::test]
+    async fn non_signal_stop_resume_has_no_signal() {
+        let mock = MockPtraceThread::new();
+        let entry = make_entry(10, 56); // SYS_OPENAT on aarch64
+        let (mut stream, _handle) = mock.into_stream(vec![entry]);
+
+        let stop = stream.next().await.expect("entry stop");
+
+        // Runner logic: non-signal stops get signal: None.
+        let signal = match &stop.stop_type {
+            StopType::Signal { signal, .. } => {
+                nix::sys::signal::Signal::try_from(*signal).ok()
+            }
+            _ => None,
+        };
+        assert!(signal.is_none());
+
+        stream.directive(PipelineDirective::Resume {
+            pid: stop.pid,
+            trace_exit: false,
+            signal,
+        });
+
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fork_and_exit_sequence() {
+        let stops = vec![
+            // Parent executes
+            make_entry(10, 56),
+            // Fork event
+            RawSyscallStop {
+                pid: Pid::from_raw(10),
+                stop_type: StopType::Fork {
+                    parent: Pid::from_raw(10),
+                    child: Pid::from_raw(20),
+                },
+            },
+            // Child does work
+            make_entry(20, 64),
+            // Child exits (ptrace exit event — non-final)
+            RawSyscallStop {
+                pid: Pid::from_raw(20),
+                stop_type: StopType::Exit {
+                    pid: Pid::from_raw(20),
+                    exit_code: 0,
+                },
+            },
+            // Parent gets SIGCHLD
+            RawSyscallStop {
+                pid: Pid::from_raw(10),
+                stop_type: StopType::Signal {
+                    pid: Pid::from_raw(10),
+                    signal: nix::sys::signal::Signal::SIGCHLD as i32,
+                },
+            },
+            // Parent exits
+            RawSyscallStop {
+                pid: Pid::from_raw(10),
+                stop_type: StopType::Exit {
+                    pid: Pid::from_raw(10),
+                    exit_code: 0,
+                },
+            },
+        ];
+
+        let mock = MockPtraceThread::new();
+        let (mut stream, _handle) = mock.into_stream(stops);
+
+        let mut count = 0;
+        while let Some(stop) = stream.next().await {
+            count += 1;
+            let signal = match &stop.stop_type {
+                StopType::Signal { signal, .. } => {
+                    nix::sys::signal::Signal::try_from(*signal).ok()
+                }
+                _ => None,
+            };
+            stream.directive(PipelineDirective::Resume {
+                pid: stop.pid,
+                trace_exit: false,
+                signal,
+            });
+        }
+        assert_eq!(count, 6, "all stops should be delivered");
     }
 }
