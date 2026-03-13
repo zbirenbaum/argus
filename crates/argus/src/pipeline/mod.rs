@@ -9,6 +9,7 @@
 pub(crate) mod bus;
 pub(crate) mod capture_policy;
 pub(crate) mod context;
+pub(crate) mod keylog_pipeline;
 #[cfg(test)]
 pub(crate) mod mock_ptrace;
 pub(crate) mod captured;
