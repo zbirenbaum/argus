@@ -11,6 +11,7 @@ pub mod index;
 pub mod local_cas;
 pub mod memory;
 pub mod remote_cas;
+pub mod stdout;
 
 pub use broadcast::BroadcastSink;
 pub use event_log::EventLogSink;
@@ -18,3 +19,4 @@ pub use index::IndexSink;
 pub use local_cas::LocalCasSink;
 pub use memory::MemorySink;
 pub use remote_cas::RemoteCasSink;
+pub use stdout::StdoutSink;

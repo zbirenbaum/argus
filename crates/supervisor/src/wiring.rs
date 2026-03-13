@@ -22,7 +22,7 @@ use argus::net;
 use argus::pipeline::{PtraceStream, RawStopRecorder, RecordBus, Sink};
 use argus::pipeline::runner::PipelineRunner;
 use argus::pipeline::sinks::{
-    BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink,
+    BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink, StdoutSink,
 };
 use argus::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
@@ -304,6 +304,7 @@ pub fn build_bus(
     broadcast_tx: broadcast::Sender<Event>,
 ) -> RecordBus {
     let mut sinks: Vec<Arc<dyn Sink>> = vec![
+        Arc::new(StdoutSink::new()),
         Arc::new(LocalCasSink::new(local_cas)),
         Arc::new(EventLogSink::new(event_log)),
         Arc::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new())),
