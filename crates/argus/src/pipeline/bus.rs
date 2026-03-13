@@ -16,6 +16,7 @@ use std::sync::Arc;
 use tracing::event;
 use tracing::Level;
 
+use super::emit_result::EmitResult;
 use super::record::Record;
 use super::sink::{Sink, SinkPriority};
 
@@ -60,9 +61,9 @@ impl RecordBus {
     /// Deliver `record` to every accepting sink in priority order.
     ///
     /// Blocking sinks run first and inline. Async sinks run afterward.
-    /// Errors from any sink are logged but do not prevent delivery to
-    /// the remaining sinks.
-    pub fn emit(&self, record: Record) {
+    /// Required sink failures are collected and returned. Optional sink
+    /// failures are logged and discarded.
+    pub fn emit(&self, record: Record) -> EmitResult {
         event!(
             name: "bus.emit",
             Level::TRACE,
@@ -70,31 +71,31 @@ impl RecordBus {
             async_count = self.async_sinks.len(),
             "delivering record to sinks",
         );
-        for sink in &self.blocking {
-            if sink.accept(&record) {
-                if let Err(e) = sink.write(record.clone()) {
+        let mut required_failures: Vec<(String, anyhow::Error)> = Vec::new();
+
+        for sink in self.blocking.iter().chain(self.async_sinks.iter()) {
+            if !sink.accept(&record) {
+                continue;
+            }
+            if let Err(e) = sink.write(record.clone()) {
+                if sink.required() {
+                    required_failures.push((sink.name().to_owned(), e));
+                } else {
                     event!(
                         name: "bus.sink.write_error",
                         Level::WARN,
                         sink.name = sink.name(),
                         error.message = %e,
-                        "blocking sink {{sink.name}} write failed: {{error.message}}",
+                        "optional sink {{sink.name}} write failed: {{error.message}}",
                     );
                 }
             }
         }
-        for sink in &self.async_sinks {
-            if sink.accept(&record) {
-                if let Err(e) = sink.write(record.clone()) {
-                    event!(
-                        name: "bus.sink.async_write_error",
-                        Level::WARN,
-                        sink.name = sink.name(),
-                        error.message = %e,
-                        "async sink {{sink.name}} write failed: {{error.message}}",
-                    );
-                }
-            }
+
+        if required_failures.is_empty() {
+            EmitResult::Ok
+        } else {
+            EmitResult::RequiredFailed(required_failures)
         }
     }
 
@@ -165,7 +166,7 @@ mod tests {
     fn emit_reaches_blocking_sink() {
         let sink = Arc::new(MemorySink::new(SinkPriority::Blocking));
         let bus = RecordBus::new(vec![sink.clone() as Arc<dyn Sink>]);
-        bus.emit(make_record(1));
+        assert!(bus.emit(make_record(1)).is_ok());
         assert_eq!(sink.len(), 1);
     }
 
@@ -173,7 +174,7 @@ mod tests {
     fn emit_reaches_async_sink() {
         let sink = Arc::new(MemorySink::new(SinkPriority::Async));
         let bus = RecordBus::new(vec![sink.clone() as Arc<dyn Sink>]);
-        bus.emit(make_record(1));
+        assert!(bus.emit(make_record(1)).is_ok());
         assert_eq!(sink.len(), 1);
     }
 
@@ -188,14 +189,13 @@ mod tests {
             blocking.clone() as Arc<dyn Sink>,
             async_sink.clone() as Arc<dyn Sink>,
         ]);
-        bus.emit(make_record(2));
+        assert!(bus.emit(make_record(2)).is_ok());
         assert_eq!(blocking.len(), 1, "blocking sink must receive the record");
         assert_eq!(async_sink.len(), 1, "async sink must receive the record");
     }
 
     #[test]
-    fn sink_error_does_not_stop_delivery() {
-        // A sink that always errors.
+    fn required_sink_error_surfaces_in_emit_result() {
         use anyhow::anyhow;
         struct FailSink;
         impl Sink for FailSink {
@@ -203,6 +203,7 @@ mod tests {
             fn write(&self, _: Record) -> anyhow::Result<()> { Err(anyhow!("injected error")) }
             fn flush(&self) -> anyhow::Result<()> { Ok(()) }
             fn name(&self) -> &str { "fail" }
+            // required() defaults to true
         }
         impl std::fmt::Debug for FailSink {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -215,8 +216,37 @@ mod tests {
             Arc::new(FailSink) as Arc<dyn Sink>,
             good.clone() as Arc<dyn Sink>,
         ]);
-        bus.emit(make_record(3));
-        // The good sink still receives the record despite the first sink failing.
+        let result = bus.emit(make_record(3));
+        // Good sink still receives the record.
         assert_eq!(good.len(), 1, "good sink must still receive record after prior sink error");
+        // Required failure is surfaced in the result.
+        assert!(!result.is_ok(), "required sink failure must be surfaced");
+        let super::super::emit_result::EmitResult::RequiredFailed(failures) = result else {
+            panic!("expected RequiredFailed");
+        };
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, "fail");
+    }
+
+    #[test]
+    fn optional_sink_error_does_not_surface() {
+        use anyhow::anyhow;
+        struct OptionalFailSink;
+        impl Sink for OptionalFailSink {
+            fn priority(&self) -> SinkPriority { SinkPriority::Blocking }
+            fn required(&self) -> bool { false }
+            fn write(&self, _: Record) -> anyhow::Result<()> { Err(anyhow!("injected error")) }
+            fn flush(&self) -> anyhow::Result<()> { Ok(()) }
+            fn name(&self) -> &str { "optional-fail" }
+        }
+        impl std::fmt::Debug for OptionalFailSink {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("OptionalFailSink")
+            }
+        }
+
+        let bus = RecordBus::new(vec![Arc::new(OptionalFailSink) as Arc<dyn Sink>]);
+        let result = bus.emit(make_record(4));
+        assert!(result.is_ok(), "optional sink failure must not surface as required failure");
     }
 }

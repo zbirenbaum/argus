@@ -15,6 +15,7 @@ use tracing::{Level, event};
 
 use crate::events::Event;
 use crate::net::FlowWatcher;
+use crate::pipeline::EmitResult;
 use crate::pipeline::Record;
 use crate::pipeline::context::PipelineContext;
 
@@ -85,7 +86,17 @@ fn poll_once(watcher: &mut FlowWatcher, ctx: &PipelineContext) {
                     event.type_ = evt.payload.event_type_tag(),
                     "proxy pipeline emitting event {{event.seq}} {{event.type_}}",
                 );
-                ctx.bus.emit(Record::Event(evt));
+                if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(Record::Event(evt)) {
+                    for (sink_name, err) in &failures {
+                        event!(
+                            name: "pipeline.emit.required_sink_failed",
+                            Level::ERROR,
+                            sink.name = sink_name.as_str(),
+                            error.message = %err,
+                            "required sink failed on proxy path, event may be lost",
+                        );
+                    }
+                }
             }
         }
         Err(e) => {

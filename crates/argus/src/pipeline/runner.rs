@@ -18,7 +18,7 @@ use crate::api::routes::submit_pending_approval;
 use crate::api::state::SharedState;
 use crate::events::{ApprovalDecision, EventPayload};
 use crate::events::control;
-use crate::pipeline::{PtraceStream, RawStopRecorder, RecordBus};
+use crate::pipeline::{EmitResult, PtraceStream, RawStopRecorder, RecordBus};
 use crate::pipeline::classified::Classification;
 use crate::pipeline::directive::PipelineDirective;
 use crate::pipeline::outputs::OutputList;
@@ -152,7 +152,19 @@ impl PipelineRunner {
                         );
                         self.redact.redact(&mut blocked);
                         self.outputs.emit(&blocked);
-                        self.bus.emit(crate::pipeline::Record::Event(blocked));
+                        if let EmitResult::RequiredFailed(failures) =
+                            self.bus.emit(crate::pipeline::Record::Event(blocked))
+                        {
+                            for (sink_name, err) in &failures {
+                                event!(
+                                    name: "pipeline.emit.required_sink_failed",
+                                    Level::ERROR,
+                                    sink.name = sink_name.as_str(),
+                                    error.message = %err,
+                                    "required sink failed on blocked path, event may be lost",
+                                );
+                            }
+                        }
                         continue;
                     }
                     RuleAction::Pause => {
@@ -251,7 +263,19 @@ impl PipelineRunner {
                 // Enriched user-facing output (stdout, file, etc.).
                 self.outputs.emit(&evt);
                 // Internal sinks (event log, index, broadcast).
-                self.bus.emit(crate::pipeline::Record::Event(evt));
+                if let EmitResult::RequiredFailed(failures) =
+                    self.bus.emit(crate::pipeline::Record::Event(evt))
+                {
+                    for (sink_name, err) in &failures {
+                        event!(
+                            name: "pipeline.emit.required_sink_failed",
+                            Level::ERROR,
+                            sink.name = sink_name.as_str(),
+                            error.message = %err,
+                            "required sink failed on ptrace path, event may be lost",
+                        );
+                    }
+                }
             }
         }
 

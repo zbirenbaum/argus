@@ -14,6 +14,7 @@ use tracing::{event, Level};
 
 use crate::cas::ContentHash;
 use crate::events::network::TlsKeys;
+use crate::pipeline::EmitResult;
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::record::Record;
 
@@ -119,7 +120,17 @@ impl KeylogWatcher {
             let raw = format!("{} {} {}", line.label, line.client_random, line.secret);
             let data = raw.into_bytes();
             let hash = ContentHash::from_data(&data);
-            bus.emit(Record::Content { hash, data });
+            if let EmitResult::RequiredFailed(failures) = bus.emit(Record::Content { hash, data }) {
+                for (sink_name, err) in &failures {
+                    event!(
+                        name: "pipeline.emit.required_sink_failed",
+                        Level::ERROR,
+                        sink.name = sink_name.as_str(),
+                        error.message = %err,
+                        "required sink failed emitting TLS key content, data may be lost",
+                    );
+                }
+            }
 
             event!(
                 name: "net.keylog.captured",

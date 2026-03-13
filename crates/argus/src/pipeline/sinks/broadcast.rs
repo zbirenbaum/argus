@@ -36,6 +36,10 @@ impl Sink for BroadcastSink {
         SinkPriority::Async
     }
 
+    fn required(&self) -> bool {
+        false
+    }
+
     fn accept(&self, record: &Record) -> bool {
         matches!(record, Record::Event(_))
     }

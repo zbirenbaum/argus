@@ -50,6 +50,10 @@ impl Sink for IndexSink {
         SinkPriority::Blocking
     }
 
+    fn required(&self) -> bool {
+        false
+    }
+
     fn accept(&self, record: &Record) -> bool {
         matches!(record, Record::Event(_))
     }

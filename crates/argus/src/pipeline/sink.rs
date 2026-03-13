@@ -76,6 +76,15 @@ pub trait Sink: Send + Sync {
         self.flush()
     }
 
+    /// Whether this sink must succeed before the tracee is resumed.
+    ///
+    /// When a required sink fails, the pipeline runner holds the tracee
+    /// frozen and retries with backoff until the sink recovers.
+    /// Default is `true` — override to `false` for best-effort sinks.
+    fn required(&self) -> bool {
+        true
+    }
+
     /// Human-readable name for logging and metrics.
     fn name(&self) -> &str;
 }

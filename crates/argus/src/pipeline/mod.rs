@@ -6,6 +6,7 @@
 //! stage transforms them until they become `Event` records emitted
 //! to the `RecordBus`.
 
+pub(crate) mod emit_result;
 pub(crate) mod durability;
 pub(crate) mod bus;
 pub(crate) mod capture_policy;
@@ -32,6 +33,7 @@ pub(crate) mod stages;
 pub use runner::PipelineRunner;
 
 pub(crate) use bus::RecordBus;
+pub(crate) use emit_result::EmitResult;
 pub(crate) use ptrace_thread::PtraceStream;
 pub(crate) use record::Record;
 pub(crate) use replay::RawStopRecorder;

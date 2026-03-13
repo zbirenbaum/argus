@@ -25,6 +25,7 @@ use crate::config::{OutputConfig, SupervisorConfig};
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::snapshot::{InitialFile, InitialState};
 use crate::index::{PathIndex, PidIndex, TypeIndex};
+use crate::pipeline::EmitResult;
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::CapturePolicy;
 use crate::pipeline::context::PipelineContext;
@@ -49,6 +50,25 @@ use crate::storage::{DigestCache, DynObjectStore, EventLog, S3Client, UploadPool
 // Chosen to be fast enough for SSLKEYLOGFILE changes to appear promptly
 // while not burning CPU when TLS traffic is idle.
 const TLS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Log required-sink failures and continue — used on non-ptrace emit paths.
+///
+/// The ptrace runner will gain a retry loop in Task 3; all other callers
+/// use this helper to surface failures without blocking.
+fn log_required_failures(result: EmitResult, context: &str) {
+    if let EmitResult::RequiredFailed(failures) = result {
+        for (sink_name, err) in &failures {
+            event!(
+                name: "pipeline.emit.required_sink_failed",
+                Level::ERROR,
+                sink.name = sink_name.as_str(),
+                emit.context = context,
+                error.message = %err,
+                "required sink failed on non-ptrace path, event may be lost",
+            );
+        }
+    }
+}
 
 /// Facade that owns the pipeline context and shared state.
 ///
@@ -159,7 +179,7 @@ impl SupervisorRuntime {
         let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
         self.redact.redact(&mut evt);
         self.outputs.emit(&evt);
-        self.ctx.bus.emit(Record::Event(evt));
+        log_required_failures(self.ctx.bus.emit(Record::Event(evt)), "runtime");
     }
 
     /// Walk the workspace and emit `InitialFile` + `InitialState` events.
@@ -198,7 +218,7 @@ impl SupervisorRuntime {
             let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
             self.redact.redact(&mut evt);
             self.outputs.emit(&evt);
-            self.ctx.bus.emit(Record::Event(evt));
+            log_required_failures(self.ctx.bus.emit(Record::Event(evt)), "runtime");
 
             file_count += 1;
             total_size += size;
@@ -218,7 +238,7 @@ impl SupervisorRuntime {
         let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
         self.redact.redact(&mut evt);
         self.outputs.emit(&evt);
-        self.ctx.bus.emit(Record::Event(evt));
+        log_required_failures(self.ctx.bus.emit(Record::Event(evt)), "runtime");
     }
 
     /// Spawn the keylog pipeline thread.

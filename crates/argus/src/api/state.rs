@@ -19,6 +19,7 @@ use crate::api::types::PendingApprovalEntry;
 use crate::cas::Cas;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
+use crate::pipeline::EmitResult;
 use crate::pipeline::RecordBus;
 use crate::pipeline::record::Record;
 use crate::snapshot::MerkleTree;
@@ -114,7 +115,17 @@ impl Bridge {
     /// the event with no allocation.
     pub fn emit(&self, payload: EventPayload) {
         let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
-        self.bus.emit(Record::Event(evt.clone()));
+        if let EmitResult::RequiredFailed(failures) = self.bus.emit(Record::Event(evt.clone())) {
+            for (sink_name, err) in &failures {
+                tracing::event!(
+                    name: "pipeline.emit.required_sink_failed",
+                    tracing::Level::ERROR,
+                    sink.name = sink_name.as_str(),
+                    error.message = %err,
+                    "required sink failed on API path, event may be lost",
+                );
+            }
+        }
         let _ = self.event_tx.send(evt);
     }
 

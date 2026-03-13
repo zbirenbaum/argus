@@ -11,6 +11,7 @@ use tracing::{event, Level};
 
 use crate::cas::ContentHash;
 use crate::events::network::{HttpRequest, HttpResponse};
+use crate::pipeline::EmitResult;
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::record::Record;
 
@@ -162,7 +163,17 @@ fn store_body(
 /// Hash data, emit a Content record to the bus, and return the hash.
 fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
     let hash = ContentHash::from_data(&data);
-    bus.emit(Record::Content { hash, data });
+    if let EmitResult::RequiredFailed(failures) = bus.emit(Record::Content { hash, data }) {
+        for (sink_name, err) in &failures {
+            event!(
+                name: "pipeline.emit.required_sink_failed",
+                Level::ERROR,
+                sink.name = sink_name.as_str(),
+                error.message = %err,
+                "required sink failed emitting content, data may be lost",
+            );
+        }
+    }
     hash
 }
 
