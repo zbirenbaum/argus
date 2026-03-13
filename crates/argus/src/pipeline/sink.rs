@@ -5,9 +5,9 @@
 //! must complete before the tracee is resumed; async sinks are best-effort
 //! and may drop records under back-pressure.
 //!
-//! Each sink owns its mutable state directly. The `RecordBus` wraps every
-//! sink in `Arc<Mutex<dyn Sink>>` so that a single bus can be cloned across
-//! threads without requiring `Sync` on individual sink implementations.
+//! Each sink manages its own interior mutability when needed. The `RecordBus`
+//! wraps every sink in `Arc<dyn Sink>` so that a single bus can be cloned
+//! across threads. Sinks that require mutable state use internal locking.
 
 use anyhow::Result;
 
@@ -31,13 +31,14 @@ pub enum SinkPriority {
 
 /// A composable consumer of pipeline records.
 ///
-/// Implementations own their mutable state directly — no internal `Mutex`
-/// is required. The `RecordBus` provides the outer `Mutex<dyn Sink>` that
-/// serializes concurrent access from multiple threads.
+/// Implementations that require mutable state must manage their own interior
+/// mutability (e.g., `Mutex<T>` inside the struct). The `RecordBus` stores
+/// sinks as `Arc<dyn Sink>` and calls methods on shared references, so the
+/// `Sync` bound must be satisfied.
 ///
 /// The bus calls `write` for every record the sink accepts, then `flush`
 /// at checkpoint boundaries, and `shutdown` when the agent exits.
-pub trait Sink: Send {
+pub trait Sink: Send + Sync {
     /// Scheduling priority relative to tracee resumption.
     fn priority(&self) -> SinkPriority;
 
@@ -54,14 +55,14 @@ pub trait Sink: Send {
     ///
     /// Returns an error if the write fails. The bus logs errors but
     /// continues delivering to other sinks.
-    fn write(&mut self, record: Record) -> Result<()>;
+    fn write(&self, record: Record) -> Result<()>;
 
     /// Flush any in-memory or buffered state to durable storage.
     ///
     /// # Errors
     ///
     /// Returns an error if the flush fails.
-    fn flush(&mut self) -> Result<()>;
+    fn flush(&self) -> Result<()>;
 
     /// Graceful shutdown — flush then release resources.
     ///
@@ -71,7 +72,7 @@ pub trait Sink: Send {
     /// # Errors
     ///
     /// Returns an error if shutdown fails.
-    fn shutdown(&mut self) -> Result<()> {
+    fn shutdown(&self) -> Result<()> {
         self.flush()
     }
 

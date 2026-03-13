@@ -249,14 +249,26 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<chrono::FixedOffset>> {
     DateTime::parse_from_rfc3339(s).ok()
 }
 
+/// Converts epoch-microseconds to a fixed-offset `DateTime`, returning `None`
+/// if the value is out of the representable range.
+fn epoch_micros_to_datetime(micros: i64) -> Option<DateTime<chrono::FixedOffset>> {
+    use chrono::TimeZone;
+    let secs = micros / 1_000_000;
+    let nanos = ((micros % 1_000_000) * 1_000) as u32;
+    chrono::Utc
+        .timestamp_opt(secs, nanos)
+        .single()
+        .map(|dt| dt.fixed_offset())
+}
+
 fn matches_time_range(event: &Event, filter: &QueryFilter) -> bool {
-    let event_ts = match parse_rfc3339(&event.ts_wall) {
+    let event_ts = match epoch_micros_to_datetime(event.ts_wall) {
         Some(ts) => ts,
         None => {
             tracing::warn!(
                 seq = event.seq,
-                ts_wall = %event.ts_wall,
-                "skipping event with unparseable ts_wall"
+                ts_wall = event.ts_wall,
+                "skipping event with out-of-range ts_wall"
             );
             return false;
         }

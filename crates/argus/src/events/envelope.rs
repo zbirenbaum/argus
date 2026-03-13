@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
+use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 
 use super::control;
@@ -108,6 +109,36 @@ pub struct Redaction {
     pub rule: String,
 }
 
+/// Custom serde implementation for `ts_wall`.
+///
+/// Serializes `i64` microseconds as an ISO 8601 string (RFC 3339, microsecond
+/// precision) so JSON consumers see human-readable timestamps. Deserializes
+/// from RFC 3339 strings back to microseconds, preserving round-trip fidelity.
+mod ts_wall_serde {
+    use chrono::DateTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Serialize epoch-microseconds as an RFC 3339 string.
+    pub fn serialize<S>(micros: &i64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let dt = DateTime::from_timestamp_micros(*micros).unwrap_or_default();
+        serializer.serialize_str(&dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    }
+
+    /// Deserialize an RFC 3339 string back to epoch-microseconds.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<i64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&s)
+            .map(|dt| dt.timestamp_micros())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Immutable event record emitted by the supervisor.
 ///
 /// Contains dual timestamps for local ordering and cross-agent correlation,
@@ -116,8 +147,13 @@ pub struct Redaction {
 pub struct Event {
     pub seq: u64,
     pub ts_monotonic: u64,
-    pub ts_wall: String,
-    pub agent_id: String,
+    /// Wall-clock time as microseconds since the Unix epoch.
+    ///
+    /// Stored as `i64` to avoid a format allocation per event; serialized
+    /// as ISO 8601 / RFC 3339 with microsecond precision for JSON consumers.
+    #[serde(with = "ts_wall_serde")]
+    pub ts_wall: i64,
+    pub agent_id: CompactString,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vclock: Option<HashMap<String, u64>>,
     /// Fields that were redacted during pipeline processing.
@@ -169,10 +205,11 @@ impl Default for SequenceGenerator {
 /// `CLOCK_MONOTONIC_RAW` will be used in the tracer; this portable
 /// implementation is sufficient for tests and non-ptrace paths.
 ///
-/// `ts_wall` is RFC 3339 with nanosecond precision from `chrono::Utc`.
-pub fn timestamp_pair() -> (u64, String) {
+/// `ts_wall` is epoch-microseconds from `chrono::Utc::now`, eliminating the
+/// format allocation that would occur if a string were produced here.
+pub fn timestamp_pair() -> (u64, i64) {
     let mono = monotonic_nanos();
-    let wall = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let wall = Utc::now().timestamp_micros();
     (mono, wall)
 }
 
@@ -328,7 +365,7 @@ impl Event {
     /// Constructs an event with auto-filled seq and timestamps.
     pub fn new(
         seq_gen: &SequenceGenerator,
-        agent_id: String,
+        agent_id: CompactString,
         payload: EventPayload,
     ) -> Self {
         let (ts_monotonic, ts_wall) = timestamp_pair();

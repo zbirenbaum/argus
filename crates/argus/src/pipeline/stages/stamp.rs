@@ -6,8 +6,10 @@
 //! Merkle-tree root hash. When enrichment is enabled, raw bytes captured
 //! by the capture stage are embedded as inline `text` or `data` fields.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use compact_str::CompactString;
 use tracing::event;
 use tracing::Level;
 
@@ -21,13 +23,13 @@ use crate::pipeline::classified::{Classification, PipeDirection, PtyDataType, St
 /// Stage that stamps captured events with sequence numbers and timestamps.
 pub struct StampStage {
     seq_gen: Arc<SequenceGenerator>,
-    agent_id: String,
+    agent_id: CompactString,
     enrich: EnrichConfig,
 }
 
 impl StampStage {
     /// Create a new stamp stage.
-    pub fn new(seq_gen: Arc<SequenceGenerator>, agent_id: String, enrich: EnrichConfig) -> Self {
+    pub fn new(seq_gen: Arc<SequenceGenerator>, agent_id: CompactString, enrich: EnrichConfig) -> Self {
         Self { seq_gen, agent_id, enrich }
     }
 
@@ -80,6 +82,17 @@ impl StampStage {
     }
 }
 
+/// Convert an owned `PathBuf` to `String` without allocating for valid UTF-8 paths.
+///
+/// Linux paths are almost always valid UTF-8. `into_os_string().into_string()` reuses
+/// the existing allocation when possible; only non-UTF-8 paths pay for a new allocation
+/// via the `to_string_lossy` fallback.
+fn path_to_string(path: PathBuf) -> String {
+    path.into_os_string()
+        .into_string()
+        .unwrap_or_else(|os| os.to_string_lossy().into_owned())
+}
+
 /// Encode bytes as UTF-8 text or base64-encoded binary.
 ///
 /// Returns `(data_string, encoding)` where `encoding` is `None` for valid
@@ -121,7 +134,7 @@ fn to_payload(
             };
             Some(EventPayload::Write(ef::Write {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 fd,
                 offset: 0,
                 size: size as u64,
@@ -143,7 +156,7 @@ fn to_payload(
             };
             Some(EventPayload::Read(ef::Read {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 fd,
                 offset: 0,
                 size: size as u64,
@@ -156,8 +169,8 @@ fn to_payload(
         Classification::FileRename { old_path, new_path } => {
             Some(EventPayload::Rename(ef::Rename {
                 pid,
-                old_path: old_path.to_string_lossy().into(),
-                new_path: new_path.to_string_lossy().into(),
+                old_path: path_to_string(old_path),
+                new_path: path_to_string(new_path),
                 tree_hash,
             }))
         }
@@ -175,7 +188,7 @@ fn to_payload(
             };
             Some(EventPayload::Unlink(ef::Unlink {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 content_hash,
                 tree_hash,
                 data,
@@ -186,21 +199,21 @@ fn to_payload(
         Classification::FileMkdir { path } => {
             Some(EventPayload::Mkdir(ef::Mkdir {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 tree_hash,
             }))
         }
         Classification::FileRmdir { path } => {
             Some(EventPayload::Rmdir(ef::Rmdir {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 tree_hash,
             }))
         }
         Classification::FileChmod { path, mode } => {
             Some(EventPayload::Chmod(ef::Chmod {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 old_mode: 0,
                 new_mode: mode,
             }))
@@ -234,7 +247,7 @@ fn to_payload(
             };
             Some(EventPayload::Truncate(ef::Truncate {
                 pid,
-                path: path.to_string_lossy().into(),
+                path: path_to_string(path),
                 old_size: 0,
                 new_size: len,
                 before_hash,
@@ -249,16 +262,16 @@ fn to_payload(
         Classification::FileLink { target, link_path } => {
             Some(EventPayload::Link(ef::Link {
                 pid,
-                target: target.to_string_lossy().into(),
-                link_path: link_path.to_string_lossy().into(),
+                target: path_to_string(target),
+                link_path: path_to_string(link_path),
                 tree_hash,
             }))
         }
         Classification::FileSymlink { target, link_path } => {
             Some(EventPayload::Symlink(ef::Symlink {
                 pid,
-                target: target.to_string_lossy().into(),
-                link_path: link_path.to_string_lossy().into(),
+                target: path_to_string(target),
+                link_path: path_to_string(link_path),
                 tree_hash,
             }))
         }
@@ -308,7 +321,7 @@ fn to_payload(
             Some(EventPayload::PtyCreate(eio::PtyCreate {
                 pid,
                 master_fd,
-                slave_path: slave_path.to_string_lossy().into(),
+                slave_path: path_to_string(slave_path),
             }))
         }
         Classification::PtyData { subtype, len, .. } => {
@@ -345,7 +358,7 @@ fn to_payload(
             Some(EventPayload::Exec(ep::Exec {
                 pid,
                 ppid: 0,
-                binary: binary.to_string_lossy().into(),
+                binary: path_to_string(binary),
                 argv,
                 envp,
                 cwd: String::new(),

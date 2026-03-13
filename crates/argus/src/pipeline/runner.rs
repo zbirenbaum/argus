@@ -227,14 +227,20 @@ impl PipelineRunner {
 
             // Sync tree snapshot to SharedState and persist to CAS so
             // the /tree and /restore endpoints can serve it.
-            let cas_tree_hash = {
-                let snapshot = self.tree.tree().lock().unwrap();
-                // store() borrows snapshot; store_tree() needs an owned Arc, so one
-                // deep clone is unavoidable here given that TreeStage holds Mutex<MerkleTree>
-                // rather than Arc<Mutex<MerkleTree>>. Wrap in Arc immediately to make
-                // the ownership intent explicit.
-                self.shared.store_tree(Arc::new(snapshot.clone()));
-                snapshot.store(self.shared.cas().as_ref()).ok()
+            let cas_tree_hash = match self.tree.tree().lock() {
+                Ok(snapshot) => {
+                    self.shared.store_tree(Arc::new(snapshot.clone()));
+                    snapshot.store(self.shared.cas().as_ref()).ok()
+                }
+                Err(e) => {
+                    event!(
+                        name: "pipeline.ptrace.tree_lock_poisoned",
+                        Level::ERROR,
+                        error.message = %e,
+                        "tree mutex poisoned, skipping snapshot sync",
+                    );
+                    None
+                }
             };
 
             if let Some(mut evt) = self.stamp.stamp(captured, tree_hash) {

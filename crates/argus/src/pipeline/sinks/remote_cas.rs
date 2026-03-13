@@ -56,7 +56,7 @@ impl Sink for RemoteCasSink {
         !matches!(record, Record::Event(_))
     }
 
-    fn write(&mut self, record: Record) -> Result<()> {
+    fn write(&self, record: Record) -> Result<()> {
         match record {
             Record::Content { hash, data } => {
                 if self.is_cached(&hash) {
@@ -85,7 +85,7 @@ impl Sink for RemoteCasSink {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         Ok(())
     }
 
@@ -105,12 +105,12 @@ mod tests {
         let event = Event {
             seq: 0,
             ts_monotonic: 0,
-            ts_wall: String::new(),
-            agent_id: String::new(),
+            ts_wall: 0,
+            agent_id: "".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {
-                agent_id: String::new(),
+                agent_id: "".into(),
                 supervisor_pid_host: None,
                 supervisor_pid_ns: None,
                 config_summary: String::new(),

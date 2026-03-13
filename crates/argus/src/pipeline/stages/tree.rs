@@ -50,7 +50,18 @@ impl TreeStage {
         let hash = content_hash(event)?;
 
         let path_display = path.display().to_string();
-        let mut tree = self.tree.lock().unwrap();
+        let mut tree = match self.tree.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                event!(
+                    name: "pipeline.tree.lock_poisoned",
+                    Level::ERROR,
+                    error.message = %e,
+                    "tree mutex poisoned, skipping update",
+                );
+                return None;
+            }
+        };
         tree.update(path, hash);
         let root = tree.root_hash();
         event!(

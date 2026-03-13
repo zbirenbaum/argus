@@ -163,8 +163,14 @@ impl ClassifyStage {
             Ok(b) if b.len() >= 8 => b,
             _ => return Classification::Passthrough,
         };
-        let read_fd = i32::from_ne_bytes(fds_bytes[0..4].try_into().unwrap());
-        let write_fd = i32::from_ne_bytes(fds_bytes[4..8].try_into().unwrap());
+        let Some(read_bytes) = fds_bytes.get(0..4).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
+            return Classification::Passthrough;
+        };
+        let Some(write_bytes) = fds_bytes.get(4..8).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
+            return Classification::Passthrough;
+        };
+        let read_fd = i32::from_ne_bytes(read_bytes);
+        let write_fd = i32::from_ne_bytes(write_bytes);
 
         // Resolve inode via /proc/pid/fd/read_fd symlink.
         let inode = match self.handle.resolve_fd(pid, read_fd).await {

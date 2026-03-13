@@ -447,7 +447,7 @@ mod tests {
             encoding: None,
             sensitive: false,
         });
-        Event::new(&seq, "test".to_owned(), payload)
+        Event::new(&seq, "test".into(), payload)
     }
 
     fn make_stdio_event(text: &str) -> Event {
@@ -463,7 +463,7 @@ mod tests {
             text: Some(text.to_owned()),
             encoding: None,
         });
-        Event::new(&seq, "test".to_owned(), payload)
+        Event::new(&seq, "test".into(), payload)
     }
 
     fn make_http_request_event(headers: Option<&str>, body: Option<&str>) -> Event {
@@ -477,7 +477,7 @@ mod tests {
             headers: headers.map(str::to_owned),
             body: body.map(str::to_owned),
         });
-        Event::new(&seq, "test".to_owned(), payload)
+        Event::new(&seq, "test".into(), payload)
     }
 
     fn make_http_response_event(headers: Option<&str>, body: Option<&str>) -> Event {
@@ -490,7 +490,7 @@ mod tests {
             headers: headers.map(str::to_owned),
             body: body.map(str::to_owned),
         });
-        Event::new(&seq, "test".to_owned(), payload)
+        Event::new(&seq, "test".into(), payload)
     }
 
     // -------------------------------------------------------------------------
@@ -739,7 +739,7 @@ mod tests {
             ],
             cwd: "/workspace".to_owned(),
         });
-        let mut event = Event::new(&seq, "test".to_owned(), payload);
+        let mut event = Event::new(&seq, "test".into(), payload);
 
         stage.redact(&mut event);
 

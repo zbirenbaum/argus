@@ -28,7 +28,14 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputConfig {
     /// Write newline-delimited JSON to stdout.
-    Stdout,
+    Stdout {
+        /// Flush after every event for real-time visibility.
+        ///
+        /// Defaults to true. Set to false for high-throughput pipelines
+        /// piped to a log aggregator where latency is less important.
+        #[serde(default = "default_flush_every_event")]
+        flush_every_event: bool,
+    },
 
     /// Write newline-delimited JSON to a rotating set of files.
     File {
@@ -92,6 +99,10 @@ fn default_retry_max() -> u32 {
     3
 }
 
+fn default_flush_every_event() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,7 +111,7 @@ mod tests {
     fn parse_stdout() {
         let yaml = "type: stdout";
         let out: OutputConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(out, OutputConfig::Stdout);
+        assert_eq!(out, OutputConfig::Stdout { flush_every_event: true });
     }
 
     #[test]
@@ -166,6 +177,6 @@ endpoint: "http://ingest.example.com/events"
 "#;
         let outputs: Vec<OutputConfig> = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(outputs.len(), 4);
-        assert_eq!(outputs[0], OutputConfig::Stdout);
+        assert_eq!(outputs[0], OutputConfig::Stdout { flush_every_event: true });
     }
 }

@@ -116,7 +116,7 @@ mod tests {
         PipelineContext::new(
             Arc::new(SequenceGenerator::new(0)),
             RecordBus::new(vec![]),
-            "test-agent".to_owned(),
+            "test-agent".into(),
         )
     }
 

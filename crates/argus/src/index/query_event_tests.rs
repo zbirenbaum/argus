@@ -27,7 +27,7 @@ fn make_events() -> Vec<Event> {
             sensitive: false,
         }),
     );
-    e.ts_wall = "2026-03-11T14:00:00.000000000Z".into();
+    e.ts_wall = 1_773_237_600_000_000;
     events.push(e);
 
     let mut e = Event::new(
@@ -45,7 +45,7 @@ fn make_events() -> Vec<Event> {
             sensitive: false,
         }),
     );
-    e.ts_wall = "2026-03-11T15:00:00.000000000Z".into();
+    e.ts_wall = 1_773_241_200_000_000;
     events.push(e);
 
     let mut e = Event::new(
@@ -57,7 +57,7 @@ fn make_events() -> Vec<Event> {
             signal: None,
         }),
     );
-    e.ts_wall = "2026-03-11T16:00:00.000000000Z".into();
+    e.ts_wall = 1_773_244_800_000_000;
     events.push(e);
 
     events

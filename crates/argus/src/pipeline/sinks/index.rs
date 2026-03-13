@@ -1,23 +1,36 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that updates the path, PID, and type secondary indexes.
 
+use std::sync::Mutex;
+
 use anyhow::Result;
 
 use crate::index::{PathIndex, PidIndex, TypeIndex};
 use crate::pipeline::record::Record;
 use crate::pipeline::sink::{Sink, SinkPriority};
 
-/// Blocking sink that maintains the three secondary in-memory indexes.
-///
-/// All three indexes are updated per event in a single `write` call.
-/// The bus wraps this sink in `Mutex<dyn Sink>` so no internal locks
-/// are required — fields are accessed directly via `&mut self`.
-/// Non-event records are silently ignored.
-#[derive(Debug)]
-pub struct IndexSink {
+/// State bundle protected by a single mutex inside `IndexSink`.
+struct IndexState {
     path_index: PathIndex,
     pid_index: PidIndex,
     type_index: TypeIndex,
+}
+
+/// Blocking sink that maintains the three secondary in-memory indexes.
+///
+/// All three indexes are updated per event in a single `write` call.
+/// The indexes require mutation on every insert, so this sink wraps them
+/// in a `Mutex` for interior mutability, allowing `write` and `flush` to
+/// take `&self` as required by the `Sink` trait.
+/// Non-event records are silently ignored.
+pub struct IndexSink {
+    state: Mutex<IndexState>,
+}
+
+impl std::fmt::Debug for IndexSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexSink").finish_non_exhaustive()
+    }
 }
 
 impl IndexSink {
@@ -27,7 +40,9 @@ impl IndexSink {
         pid_index: PidIndex,
         type_index: TypeIndex,
     ) -> Self {
-        Self { path_index, pid_index, type_index }
+        Self {
+            state: Mutex::new(IndexState { path_index, pid_index, type_index }),
+        }
     }
 }
 
@@ -40,28 +55,29 @@ impl Sink for IndexSink {
         matches!(record, Record::Event(_))
     }
 
-    fn write(&mut self, record: Record) -> Result<()> {
+    fn write(&self, record: Record) -> Result<()> {
         let Record::Event(event) = record else {
             return Ok(());
         };
 
         let seq = event.seq;
         let event_type = event.payload.event_type_tag();
+        let mut state = self.state.lock().expect("IndexSink mutex poisoned");
 
         for path in event.payload.paths() {
-            self.path_index.insert(path, seq, event_type)?;
+            state.path_index.insert(path, seq, event_type)?;
         }
 
         if let Some(pid) = event.payload.pid() {
-            self.pid_index.insert(pid, seq, event_type)?;
+            state.pid_index.insert(pid, seq, event_type)?;
         }
 
-        self.type_index.insert(event_type, seq)?;
+        state.type_index.insert(event_type, seq)?;
 
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         Ok(())
     }
 
@@ -88,8 +104,8 @@ mod tests {
         Event {
             seq,
             ts_monotonic: 0,
-            ts_wall: "2026-01-01T00:00:00Z".to_owned(),
-            agent_id: "test".to_owned(),
+            ts_wall: 0,
+            agent_id: "test".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::Write(FileWrite {
@@ -110,36 +126,39 @@ mod tests {
 
     #[test]
     fn indexes_path_and_pid() {
-        let mut sink = make_sink();
+        let sink = make_sink();
         let event = make_write_event(42, "/tmp/foo.txt", 1234);
         sink.write(Record::Event(event)).expect("write");
 
-        let entries = sink.path_index.lookup("/tmp/foo.txt");
+        let state = sink.state.lock().unwrap();
+        let entries = state.path_index.lookup("/tmp/foo.txt");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].seq, 42);
         assert_eq!(entries[0].event_type, "write");
 
-        let pid_entries = sink.pid_index.lookup(1234);
+        let pid_entries = state.pid_index.lookup(1234);
         assert_eq!(pid_entries.len(), 1);
         assert_eq!(pid_entries[0].seq, 42);
     }
 
     #[test]
     fn indexes_event_type() {
-        let mut sink = make_sink();
+        let sink = make_sink();
         let event = make_write_event(10, "/a", 1);
         sink.write(Record::Event(event)).expect("write");
 
-        let seqs = sink.type_index.lookup("write");
+        let state = sink.state.lock().unwrap();
+        let seqs = state.type_index.lookup("write");
         assert_eq!(seqs, [10]);
     }
 
     #[test]
     fn non_event_is_noop() {
-        let mut sink = make_sink();
+        let sink = make_sink();
         let hash = crate::cas::ContentHash::from_data(b"x");
         sink.write(Record::Content { hash, data: vec![] }).expect("noop");
-        assert_eq!(sink.path_index.entry_count(), 0);
+        let state = sink.state.lock().unwrap();
+        assert_eq!(state.path_index.entry_count(), 0);
     }
 
     #[test]

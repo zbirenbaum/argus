@@ -5,6 +5,7 @@
 //! corresponding `Classification`. Errors and unrecognized syscalls
 //! fall through to `Classification::Passthrough`.
 
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use nix::unistd::Pid;
@@ -12,13 +13,15 @@ use tracing::event;
 use tracing::Level;
 
 use crate::state::fd_table::{FdTarget, PipeEnd};
-use crate::pipeline::classified::{
-    Classification, PipeDirection, StdioType,
-};
+use crate::pipeline::classified::{Classification, PipeDirection, StdioType};
 use crate::pipeline::raw_stop::SyscallArgs;
 
 use super::classify::{ClassifyStage, PendingEntry};
 use super::sockaddr::{encode_sockaddr, is_tls_port, parse_sockaddr};
+
+/// Fallback address when the real address cannot be read from tracee memory.
+const UNSPECIFIED_ADDR: SocketAddr =
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
 
 /// Dispatch a syscall entry stop to the appropriate handler.
 pub async fn handle_entry(
@@ -350,7 +353,7 @@ async fn handle_connect(
                 let _ = stage.handle.write_memory(pid, sockaddr_addr, proxy_bytes).await;
             }
 
-    let addr = original_dest.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
+    let addr = original_dest.unwrap_or_else(|| UNSPECIFIED_ADDR);
     Classification::NetConnect { fd, addr }
 }
 
@@ -377,9 +380,9 @@ async fn handle_accept(
         stage.handle.read_memory(pid, sockaddr_addr, len).await
             .ok()
             .and_then(|b| parse_sockaddr(&b))
-            .unwrap_or_else(|| "0.0.0.0:0".parse().unwrap())
+            .unwrap_or_else(|| UNSPECIFIED_ADDR)
     } else {
-        "0.0.0.0:0".parse().unwrap()
+        UNSPECIFIED_ADDR
     };
 
     Classification::NetAccept { fd, peer }

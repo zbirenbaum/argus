@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use compact_str::CompactString;
+
 use crate::events::SequenceGenerator;
 use crate::pipeline::bus::RecordBus;
 
@@ -21,12 +23,12 @@ pub struct PipelineContext {
     /// Channel to the sink chain (event log, CAS, S3, broadcast).
     pub(crate) bus: RecordBus,
     /// Identifier stamped onto every emitted event.
-    pub(crate) agent_id: String,
+    pub(crate) agent_id: CompactString,
 }
 
 impl PipelineContext {
     /// Create a new pipeline context.
-    pub(crate) fn new(seq: Arc<SequenceGenerator>, bus: RecordBus, agent_id: String) -> Self {
+    pub(crate) fn new(seq: Arc<SequenceGenerator>, bus: RecordBus, agent_id: CompactString) -> Self {
         Self { seq, bus, agent_id }
     }
 }

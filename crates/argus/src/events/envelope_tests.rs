@@ -27,8 +27,9 @@ fn event_auto_fills_fields() {
     let event = Event::new(&seq_gen, "test-agent".into(), payload);
 
     assert_eq!(event.seq, 0);
-    assert_eq!(event.agent_id, "test-agent");
-    assert!(event.ts_wall.contains('T'));
+    assert_eq!(&*event.agent_id, "test-agent");
+    // ts_wall is epoch-microseconds; a reasonable lower bound is 2020-01-01 in micros.
+    assert!(event.ts_wall > 1_577_836_800_000_000);
     assert!(event.vclock.is_none());
 }
 
@@ -58,10 +59,10 @@ fn timestamp_monotonicity() {
 }
 
 #[test]
-fn timestamp_wall_is_rfc3339() {
+fn timestamp_wall_is_epoch_micros() {
     let (_, wall) = timestamp_pair();
-    chrono::DateTime::parse_from_rfc3339(&wall)
-        .expect("ts_wall must be valid RFC 3339");
+    // Must be a positive value greater than 2020-01-01 in microseconds.
+    assert!(wall > 1_577_836_800_000_000, "ts_wall={wall} looks wrong");
 }
 
 #[test]
@@ -156,7 +157,7 @@ fn agent_start_avoids_field_collision() {
     assert!(json.contains("\"agent_id\":\"envelope-agent\""));
     assert!(json.contains("\"start_agent_id\":\"payload-agent\""));
     let back: Event = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.agent_id, "envelope-agent");
+    assert_eq!(&*back.agent_id, "envelope-agent");
     if let EventPayload::AgentStart(ref start) = back.payload {
         assert_eq!(start.agent_id, "payload-agent");
     } else {
@@ -192,7 +193,7 @@ fn checkpoint_avoids_seq_collision() {
 #[test]
 fn all_variants_round_trip() {
     let seq_gen = SequenceGenerator::default();
-    let agent = "rt".to_string();
+    let agent: compact_str::CompactString = "rt".into();
 
     let payloads: Vec<EventPayload> = vec![
         EventPayload::Exec(process::Exec {
@@ -364,7 +365,7 @@ fn redactions_round_trip() {
 
 #[test]
 fn redactions_deserialize_from_missing() {
-    let json = r#"{"seq":0,"ts_monotonic":0,"ts_wall":"t","agent_id":"a","type":"fork","parent_pid":1,"child_pid":2}"#;
+    let json = r#"{"seq":0,"ts_monotonic":0,"ts_wall":"2024-01-01T00:00:00.000000Z","agent_id":"a","type":"fork","parent_pid":1,"child_pid":2}"#;
     let event: Event = serde_json::from_str(json).unwrap();
     assert!(event.redactions.is_empty());
 }

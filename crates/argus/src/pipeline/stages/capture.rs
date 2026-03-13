@@ -287,7 +287,15 @@ fn emit_content(durability: &DurabilityLayer, data: Vec<u8>) -> ContentHash {
 
     // Manifest hash is derived from the concatenated chunk hash strings so it
     // is deterministic and content-addressable independent of upload order.
-    let manifest_input: String = chunk_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>().join("\n");
+    let manifest_input = {
+        use std::fmt::Write as _;
+        let mut buf = String::new();
+        for (i, h) in chunk_hashes.iter().enumerate() {
+            if i > 0 { buf.push('\n'); }
+            let _ = write!(buf, "{h}");
+        }
+        buf
+    };
     let manifest_hash = ContentHash::from_data(manifest_input.as_bytes());
     let manifest_data = serde_json::to_vec(&chunk_hashes).unwrap_or_default();
     let _ = durability.persist_with_hash(manifest_hash.clone(), &manifest_data);

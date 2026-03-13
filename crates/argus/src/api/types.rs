@@ -244,7 +244,7 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: StatusResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.agent_id, "agent-1");
+        assert_eq!(&*parsed.agent_id, "agent-1");
     }
 
     #[test]

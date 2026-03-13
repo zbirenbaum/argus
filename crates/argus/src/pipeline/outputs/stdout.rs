@@ -15,18 +15,31 @@ use crate::pipeline::output::Output;
 
 /// Writes each enriched event as one JSON line to buffered stdout.
 ///
-/// The `BufWriter` amortizes small writes. Because the buffer is flushed
-/// after every `emit` call, consumers see events as soon as they arrive.
+/// When `flush_every_event` is true (the default), the buffer is flushed
+/// after every `emit` call so consumers see events immediately. When false,
+/// flushing is deferred to `BufWriter`'s natural batching or explicit
+/// `flush()` calls — suitable for high-throughput pipelines piped to log
+/// aggregators.
 #[derive(Debug)]
 pub struct StdoutOutput {
     out: BufWriter<io::Stdout>,
+    flush_every_event: bool,
 }
 
 impl StdoutOutput {
-    /// Creates an output backed by buffered stdout.
+    /// Creates an output backed by buffered stdout with per-event flushing.
     pub fn new() -> Self {
         Self {
             out: BufWriter::new(io::stdout()),
+            flush_every_event: true,
+        }
+    }
+
+    /// Creates an output with configurable flush behavior.
+    pub fn with_flush_policy(flush_every_event: bool) -> Self {
+        Self {
+            out: BufWriter::new(io::stdout()),
+            flush_every_event,
         }
     }
 }
@@ -42,7 +55,10 @@ impl Output for StdoutOutput {
         let json = serde_json::to_string(event)
             .with_context(|| format!("serialize event seq={}", event.seq))?;
         writeln!(self.out, "{json}").context("write event line to stdout")?;
-        self.out.flush().context("flush stdout after emit")
+        if self.flush_every_event {
+            self.out.flush().context("flush stdout after emit")?;
+        }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<()> {
@@ -56,6 +72,8 @@ impl Output for StdoutOutput {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::events::control::AgentStart;
     use crate::events::envelope::{Event, EventPayload};
     use crate::pipeline::output::Output;
@@ -66,8 +84,8 @@ mod tests {
         Event {
             seq: 1,
             ts_monotonic: 0,
-            ts_wall: "2026-01-01T00:00:00Z".to_owned(),
-            agent_id: "test".to_owned(),
+            ts_wall: 0,
+            agent_id: "test".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {

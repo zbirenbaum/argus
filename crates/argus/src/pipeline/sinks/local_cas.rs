@@ -34,7 +34,7 @@ impl Sink for LocalCasSink {
         !matches!(record, Record::Event(_))
     }
 
-    fn write(&mut self, record: Record) -> Result<()> {
+    fn write(&self, record: Record) -> Result<()> {
         match record {
             Record::Content { hash, data } => {
                 self.cas.put_with_hash(hash, &data)?;
@@ -60,7 +60,7 @@ impl Sink for LocalCasSink {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         Ok(())
     }
 
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn stores_content_record() {
-        let (_dir, mut sink) = make_sink();
+        let (_dir, sink) = make_sink();
         let data = b"hello sink".to_vec();
         let hash = ContentHash::from_data(&data);
         let record = Record::Content { hash: hash.clone(), data };
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn stores_manifest_as_json() {
-        let (_dir, mut sink) = make_sink();
+        let (_dir, sink) = make_sink();
         let chunks = vec![
             ContentHash::from_data(b"a"),
             ContentHash::from_data(b"b"),
@@ -113,12 +113,12 @@ mod tests {
         let event = Event {
             seq: 0,
             ts_monotonic: 0,
-            ts_wall: String::new(),
-            agent_id: String::new(),
+            ts_wall: 0,
+            agent_id: "".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {
-                agent_id: String::new(),
+                agent_id: "".into(),
                 supervisor_pid_host: None,
                 supervisor_pid_ns: None,
                 config_summary: String::new(),
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn flush_is_noop() {
-        let (_dir, mut sink) = make_sink();
+        let (_dir, sink) = make_sink();
         sink.flush().expect("flush");
     }
 

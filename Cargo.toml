@@ -13,7 +13,7 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -26,5 +26,6 @@ libc = "0.2"
 nix = { version = "0.30", features = ["ptrace", "signal", "process", "fs", "dir", "mount"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+compact_str = { version = "0.8", features = ["serde"] }
 dashmap = "6.1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }

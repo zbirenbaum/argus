@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use compact_str::CompactString;
 use dashmap::DashMap;
 use nix::unistd::Pid;
 use tokio::sync::broadcast;
@@ -117,12 +118,13 @@ impl SupervisorRuntime {
         );
 
         let seq = Arc::new(SequenceGenerator::default());
-        let ctx = PipelineContext::new(seq, bus.clone(), config.agent_id.clone());
+        let agent_id = CompactString::from(config.agent_id.as_str());
+        let ctx = PipelineContext::new(seq, bus.clone(), agent_id.clone());
 
         let api_cas: Arc<dyn Cas> = Arc::new(
             LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
         );
-        let shared = new_shared_state(config.agent_id.clone(), api_cas, bus);
+        let shared = new_shared_state(agent_id, api_cas, bus);
         shared.store_rules(config.build_ruleset());
 
         let outputs = build_outputs(&config);
@@ -154,7 +156,7 @@ impl SupervisorRuntime {
             container: std::env::var("CONTAINER_NAME").ok(),
         });
 
-        let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
         self.redact.redact(&mut evt);
         self.outputs.emit(&evt);
         self.ctx.bus.emit(Record::Event(evt));
@@ -193,7 +195,7 @@ impl SupervisorRuntime {
                 size,
                 mode,
             });
-            let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+            let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
             self.redact.redact(&mut evt);
             self.outputs.emit(&evt);
             self.ctx.bus.emit(Record::Event(evt));
@@ -213,7 +215,7 @@ impl SupervisorRuntime {
             file_count,
             total_size,
         });
-        let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        let mut evt = Event::new(&self.ctx.seq, self.ctx.agent_id.clone(), payload);
         self.redact.redact(&mut evt);
         self.outputs.emit(&evt);
         self.ctx.bus.emit(Record::Event(evt));
@@ -318,7 +320,7 @@ impl SupervisorRuntime {
             .expect("failed to initialize tree-stage CAS");
         let tree_durability = DurabilityLayer::new(tree_cas, self.upload_pool, None);
         let tree_stage = TreeStage::new(MerkleTree::new(), tree_durability, 1000);
-        let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone(), self.config.enrich.clone());
+        let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.ctx.agent_id.clone(), self.config.enrich.clone());
 
         let recorder: Option<RawStopRecorder> = None;
 
@@ -382,20 +384,20 @@ fn build_bus(
     broadcast_tx: broadcast::Sender<Event>,
     shared_digest_cache: Option<Arc<DigestCache>>,
 ) -> RecordBus {
-    let mut sinks: Vec<Arc<Mutex<dyn Sink>>> = vec![
-        Arc::new(Mutex::new(LocalCasSink::new(local_cas))),
-        Arc::new(Mutex::new(EventLogSink::new(event_log))),
-        Arc::new(Mutex::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new()))),
-        Arc::new(Mutex::new(BroadcastSink::new(broadcast_tx))),
+    let mut sinks: Vec<Arc<dyn Sink>> = vec![
+        Arc::new(LocalCasSink::new(local_cas)),
+        Arc::new(EventLogSink::new(event_log)),
+        Arc::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new())),
+        Arc::new(BroadcastSink::new(broadcast_tx)),
     ];
 
     if let Some(pool) = upload_pool {
         if let Some(digest_cache) = shared_digest_cache {
-            sinks.push(Arc::new(Mutex::new(RemoteCasSink::new(
+            sinks.push(Arc::new(RemoteCasSink::new(
                 pool,
                 digest_cache,
                 config.agent_id.clone(),
-            ))));
+            )));
         }
     }
 
@@ -410,8 +412,8 @@ fn build_outputs(config: &SupervisorConfig) -> OutputList {
     let mut list = OutputList::new();
     for output_config in &config.outputs {
         match output_config {
-            OutputConfig::Stdout => {
-                list.push(Box::new(StdoutOutput::new()));
+            OutputConfig::Stdout { flush_every_event } => {
+                list.push(Box::new(StdoutOutput::with_flush_policy(*flush_every_event)));
             }
             OutputConfig::File { path, max_size, max_files } => {
                 match FileOutput::new(path.clone(), *max_size, *max_files) {

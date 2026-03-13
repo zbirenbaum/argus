@@ -213,7 +213,7 @@ impl SupervisorConfig {
 }
 
 fn default_outputs() -> Vec<OutputConfig> {
-    vec![OutputConfig::Stdout]
+    vec![OutputConfig::Stdout { flush_every_event: true }]
 }
 
 fn default_data_dir() -> PathBuf {

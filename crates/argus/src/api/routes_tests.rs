@@ -193,7 +193,7 @@ async fn status_shows_agent_id_and_uptime() {
     let app = test_router();
     let (_, body) = get_json(&app, "/agent/status").await;
     let resp: StatusResponse = serde_json::from_str(&body).unwrap();
-    assert_eq!(resp.agent_id, "test-agent");
+    assert_eq!(&*resp.agent_id, "test-agent");
     assert!(resp.uptime_seconds >= 0.0);
 }
 
@@ -205,7 +205,7 @@ async fn pause_emits_event() {
 
     let event = rx.try_recv().unwrap();
     assert!(matches!(event.payload, EventPayload::AgentPause(_)));
-    assert_eq!(event.agent_id, "test-agent");
+    assert_eq!(&*event.agent_id, "test-agent");
 }
 
 #[tokio::test]

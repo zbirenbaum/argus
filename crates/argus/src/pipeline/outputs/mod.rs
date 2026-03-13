@@ -131,8 +131,8 @@ mod tests {
         Event {
             seq,
             ts_monotonic: 0,
-            ts_wall: "2026-01-01T00:00:00Z".to_owned(),
-            agent_id: "test".to_owned(),
+            ts_wall: 0,
+            agent_id: "test".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {

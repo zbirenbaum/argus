@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
+use compact_str::CompactString;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 
@@ -33,7 +34,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// Every field is either immutable after construction or uses a lock-free
 /// primitive. The trace loop never blocks on anything the API controls.
 pub struct Bridge {
-    agent_id: String,
+    agent_id: CompactString,
     started_at: Instant,
     paused: Arc<AtomicBool>,
     rules: Arc<ArcSwap<RuleSet>>,
@@ -63,7 +64,7 @@ impl std::fmt::Debug for Bridge {
 
 impl Bridge {
     /// Creates a new bridge with the given CAS backend.
-    pub fn new(agent_id: String, cas: Arc<dyn Cas>, bus: RecordBus) -> Self {
+    pub fn new(agent_id: CompactString, cas: Arc<dyn Cas>, bus: RecordBus) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             agent_id,
@@ -210,7 +211,7 @@ impl Bridge {
 pub type SharedState = Arc<Bridge>;
 
 /// Creates a new shared bridge handle.
-pub fn new_shared_state(agent_id: String, cas: Arc<dyn Cas>, bus: RecordBus) -> SharedState {
+pub fn new_shared_state(agent_id: CompactString, cas: Arc<dyn Cas>, bus: RecordBus) -> SharedState {
     Arc::new(Bridge::new(agent_id, cas, bus))
 }
 
@@ -355,7 +356,7 @@ mod tests {
             stopped_pids: Vec::new(),
         }));
         let evt = rx.try_recv().unwrap();
-        assert_eq!(evt.agent_id, "test");
+        assert_eq!(&*evt.agent_id, "test");
     }
 
     #[test]

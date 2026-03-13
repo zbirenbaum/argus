@@ -1,6 +1,8 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that appends events to the JSONL segment log.
 
+use std::sync::Mutex;
+
 use anyhow::Result;
 
 use crate::pipeline::record::Record;
@@ -9,32 +11,44 @@ use crate::storage::event_log::EventLog;
 
 /// Blocking sink that appends every event to the JSONL event log.
 ///
-/// Non-event records are silently ignored. The bus wraps this sink in
-/// `Mutex<dyn Sink>`, so no internal mutex is needed here — `write` and
-/// `flush` take `&mut self` and access the log directly.
+/// Non-event records are silently ignored. The `EventLog` requires mutation
+/// on every append, so this sink wraps it in a `Mutex` for interior
+/// mutability. This allows the sink to satisfy `&self` on the `Sink` trait
+/// while the bus holds it as `Arc<dyn Sink>` without an outer mutex.
 ///
 /// The sink does not hold an `UploadPool` reference — callers that want
 /// segment rotation to trigger uploads should configure the `EventLog`
 /// with one before handing it to this sink, or drive rotation externally
 /// via finalize/reopen.
-#[derive(Debug)]
 pub struct EventLogSink {
-    log: EventLog,
+    log: Mutex<EventLog>,
+}
+
+impl std::fmt::Debug for EventLogSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventLogSink").finish_non_exhaustive()
+    }
 }
 
 impl EventLogSink {
     /// Creates a sink that writes to `log`.
     pub fn new(log: EventLog) -> Self {
-        Self { log }
+        Self { log: Mutex::new(log) }
     }
 
     /// Grants mutable access to the inner log for callers that need to
     /// trigger segment rotation or finalization.
-    pub fn with_log<F, T>(&mut self, f: F) -> T
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (another thread panicked
+    /// while holding it).
+    pub fn with_log<F, T>(&self, f: F) -> T
     where
         F: FnOnce(&mut EventLog) -> T,
     {
-        f(&mut self.log)
+        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
+        f(&mut guard)
     }
 }
 
@@ -47,18 +61,20 @@ impl Sink for EventLogSink {
         matches!(record, Record::Event(_))
     }
 
-    fn write(&mut self, record: Record) -> Result<()> {
+    fn write(&self, record: Record) -> Result<()> {
         let Record::Event(event) = record else {
             return Ok(());
         };
         // No upload pool here — segment upload is driven by the storage layer
         // separately to keep the sink interface synchronous.
-        self.log.append(&event, None)?;
+        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
+        guard.append(&event, None)?;
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
-        self.log.flush()
+    fn flush(&self) -> Result<()> {
+        let mut guard = self.log.lock().expect("EventLogSink mutex poisoned");
+        guard.flush()
     }
 
     fn name(&self) -> &str {
@@ -89,12 +105,12 @@ mod tests {
         Event {
             seq: 1,
             ts_monotonic: 0,
-            ts_wall: "2026-01-01T00:00:00Z".to_owned(),
-            agent_id: "test-agent".to_owned(),
+            ts_wall: 0,
+            agent_id: "test-agent".into(),
             vclock: None,
             redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {
-                agent_id: "test-agent".to_owned(),
+                agent_id: "test-agent".into(),
                 supervisor_pid_host: None,
                 supervisor_pid_ns: None,
                 config_summary: "test".to_owned(),
@@ -121,14 +137,14 @@ mod tests {
 
     #[test]
     fn write_event_succeeds() {
-        let (_dir, mut sink) = make_sink();
+        let (_dir, sink) = make_sink();
         sink.write(Record::Event(make_event())).expect("write");
         sink.flush().expect("flush");
     }
 
     #[test]
     fn write_non_event_is_noop() {
-        let (_dir, mut sink) = make_sink();
+        let (_dir, sink) = make_sink();
         let hash = crate::cas::ContentHash::from_data(b"x");
         sink.write(Record::Content { hash, data: vec![1, 2, 3] })
             .expect("write non-event noop");
