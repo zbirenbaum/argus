@@ -6,6 +6,7 @@
 //! stage transforms them until they become `Event` records emitted
 //! to the `RecordBus`.
 
+pub(crate) mod durability;
 pub(crate) mod bus;
 pub(crate) mod capture_policy;
 pub(crate) mod context;
@@ -21,6 +22,8 @@ pub(crate) mod raw_stop;
 pub(crate) mod record;
 pub(crate) mod replay;
 pub mod runner;
+pub(crate) mod output;
+pub(crate) mod outputs;
 pub(crate) mod sink;
 pub(crate) mod sinks;
 pub(crate) mod stages;
