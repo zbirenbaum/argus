@@ -18,17 +18,19 @@ use crate::net::FlowWatcher;
 use crate::pipeline::EmitResult;
 use crate::pipeline::Record;
 use crate::pipeline::context::PipelineContext;
+use crate::pipeline::outputs::OutputList;
+use crate::pipeline::stages::redact::RedactStage;
 
 /// Run the proxy pipeline on the calling thread until `stop` is set.
 ///
-/// If `flow_path` is `None` the pipeline logs a notice and returns
-/// immediately — no thread resources are consumed. Otherwise, polls
-/// `flow_path` at `poll_interval`, emitting `HttpRequest`/`HttpResponse`
-/// events to `ctx.bus`. A final drain is performed after the stop flag is
-/// observed so that flows written just before shutdown are not lost.
+/// Each pipeline thread owns its own `OutputList` and `RedactStage`
+/// so no cross-thread sharing is needed. Consumers use the monotonic
+/// sequence number on each event for total ordering.
 pub(crate) fn run(
     flow_path: Option<PathBuf>,
     ctx: PipelineContext,
+    mut outputs: OutputList,
+    redact: RedactStage,
     stop: Arc<AtomicBool>,
     poll_interval: Duration,
 ) {
@@ -59,12 +61,12 @@ pub(crate) fn run(
             );
             break;
         }
-        poll_once(&mut watcher, &ctx);
+        poll_once(&mut watcher, &ctx, &mut outputs, &redact);
         std::thread::sleep(poll_interval);
     }
 
     // Final drain: capture any flows written between the last poll and shutdown.
-    poll_once(&mut watcher, &ctx);
+    poll_once(&mut watcher, &ctx, &mut outputs, &redact);
 
     event!(
         name: "pipeline.proxy.stopped",
@@ -73,12 +75,17 @@ pub(crate) fn run(
     );
 }
 
-/// Poll for new flows and emit `HttpRequest`/`HttpResponse` events to the bus.
-fn poll_once(watcher: &mut FlowWatcher, ctx: &PipelineContext) {
+/// Poll for new flows and emit HTTP events.
+fn poll_once(
+    watcher: &mut FlowWatcher,
+    ctx: &PipelineContext,
+    outputs: &mut OutputList,
+    redact: &RedactStage,
+) {
     match watcher.process_new_flows(&ctx.bus, 0) {
         Ok(flows) => {
             for payload in FlowWatcher::into_event_payloads(flows) {
-                let evt = Event::new(&ctx.seq, ctx.agent_id.clone(), payload);
+                let mut evt = Event::new(&ctx.seq, ctx.agent_id.clone(), payload);
                 event!(
                     name: "pipeline.proxy.event",
                     Level::DEBUG,
@@ -86,6 +93,9 @@ fn poll_once(watcher: &mut FlowWatcher, ctx: &PipelineContext) {
                     event.type_ = evt.payload.event_type_tag(),
                     "proxy pipeline emitting event {{event.seq}} {{event.type_}}",
                 );
+                // Redact and deliver to this thread's user-facing outputs.
+                redact.redact(&mut evt);
+                outputs.emit(&evt);
                 let record = Record::Event(evt);
                 if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(record.clone()) {
                     if let Some(ref overflow) = ctx.overflow {
@@ -123,9 +133,12 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::RedactConfig;
     use crate::events::SequenceGenerator;
     use crate::pipeline::bus::RecordBus;
     use crate::pipeline::context::PipelineContext;
+    use crate::pipeline::outputs::OutputList;
+    use crate::pipeline::stages::redact::RedactStage;
 
     fn make_ctx() -> PipelineContext {
         PipelineContext::new(
@@ -145,9 +158,10 @@ mod tests {
     #[test]
     fn run_skips_when_no_path() {
         let ctx = make_ctx();
+        let outputs = OutputList::new();
+        let redact = RedactStage::new(&RedactConfig::default());
         let stop = Arc::new(AtomicBool::new(false));
-        // Must return immediately without blocking even though stop is not set.
-        super::run(None, ctx, stop, Duration::from_secs(60));
+        super::run(None, ctx, outputs, redact, stop, Duration::from_secs(60));
     }
 
     #[test]
@@ -157,22 +171,27 @@ mod tests {
         fs::write(&path, format!("{}\n", flow_json("GET", "https://a.com/", 200))).unwrap();
 
         let ctx = make_ctx();
+        let outputs = OutputList::new();
+        let redact = RedactStage::new(&RedactConfig::default());
         let stop = Arc::new(AtomicBool::new(false));
 
-        // Signal stop immediately so the loop exits after the first drain.
         stop.store(true, Ordering::Release);
 
-        super::run(Some(path), ctx, stop, Duration::from_millis(1));
+        super::run(Some(path), ctx, outputs, redact, stop, Duration::from_millis(1));
     }
 
     #[test]
     fn run_handles_missing_file() {
         let ctx = make_ctx();
+        let outputs = OutputList::new();
+        let redact = RedactStage::new(&RedactConfig::default());
         let stop = Arc::new(AtomicBool::new(true));
 
         super::run(
             Some(std::path::PathBuf::from("/nonexistent/flows.jsonl")),
             ctx,
+            outputs,
+            redact,
             stop,
             Duration::from_millis(1),
         );

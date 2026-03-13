@@ -259,13 +259,17 @@ impl SupervisorRuntime {
     pub fn spawn_keylog_pipeline(&self) -> Result<(JoinHandle<()>, Arc<AtomicBool>)> {
         let keylog_path = self.config.tls.keylog_path.clone();
         let ctx = self.ctx.clone();
+        let outputs = build_outputs(&self.config);
+        let redact = RedactStage::new(&self.config.redact);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
 
         let handle = thread::Builder::new()
             .name("keylog-pipeline".into())
             .spawn(move || {
-                crate::pipeline::keylog_pipeline::run(keylog_path, ctx, stop_clone, TLS_POLL_INTERVAL);
+                crate::pipeline::keylog_pipeline::run(
+                    keylog_path, ctx, outputs, redact, stop_clone, TLS_POLL_INTERVAL,
+                );
             })
             .context("failed to spawn keylog pipeline thread")?;
 
@@ -288,13 +292,17 @@ impl SupervisorRuntime {
             return Ok(None);
         };
         let ctx = self.ctx.clone();
+        let outputs = build_outputs(&self.config);
+        let redact = RedactStage::new(&self.config.redact);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
 
         let handle = thread::Builder::new()
             .name("proxy-pipeline".into())
             .spawn(move || {
-                crate::pipeline::proxy_pipeline::run(Some(path), ctx, stop_clone, TLS_POLL_INTERVAL);
+                crate::pipeline::proxy_pipeline::run(
+                    Some(path), ctx, outputs, redact, stop_clone, TLS_POLL_INTERVAL,
+                );
             })
             .context("failed to spawn proxy pipeline thread")?;
 

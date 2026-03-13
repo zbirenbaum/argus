@@ -42,6 +42,16 @@ pub(crate) struct RedactStage {
     patterns: Vec<CompiledPattern>,
 }
 
+impl std::fmt::Debug for RedactStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedactStage")
+            .field("exclude_paths", &self.exclude_paths.len())
+            .field("drop_fields", &self.drop_fields.len())
+            .field("patterns", &self.patterns.len())
+            .finish()
+    }
+}
+
 impl RedactStage {
     /// Construct a stage by compiling all glob patterns and regexes.
     ///

@@ -17,16 +17,19 @@ use crate::net::KeylogWatcher;
 use crate::pipeline::EmitResult;
 use crate::pipeline::Record;
 use crate::pipeline::context::PipelineContext;
+use crate::pipeline::outputs::OutputList;
+use crate::pipeline::stages::redact::RedactStage;
 
 /// Run the keylog pipeline on the calling thread until `stop` is set.
 ///
-/// Polls the keylog file at `poll_interval`, emitting `TlsKeys` events to
-/// `ctx.bus` for each new NSS Key Log line. A final drain is performed after
-/// the stop flag is observed so that lines written just before shutdown are
-/// not lost.
+/// Each pipeline thread owns its own `OutputList` and `RedactStage`
+/// so no cross-thread sharing is needed. Consumers use the monotonic
+/// sequence number on each event for total ordering.
 pub(crate) fn run(
     keylog_path: PathBuf,
     ctx: PipelineContext,
+    mut outputs: OutputList,
+    redact: RedactStage,
     stop: Arc<AtomicBool>,
     poll_interval: Duration,
 ) {
@@ -48,12 +51,12 @@ pub(crate) fn run(
             );
             break;
         }
-        poll_once(&mut watcher, &ctx);
+        poll_once(&mut watcher, &ctx, &mut outputs, &redact);
         std::thread::sleep(poll_interval);
     }
 
     // Final drain: capture any lines written between the last poll and shutdown.
-    poll_once(&mut watcher, &ctx);
+    poll_once(&mut watcher, &ctx, &mut outputs, &redact);
 
     event!(
         name: "pipeline.keylog.stopped",
@@ -62,18 +65,26 @@ pub(crate) fn run(
     );
 }
 
-/// Poll for new keylog lines and emit `TlsKeys` events to the bus.
-fn poll_once(watcher: &mut KeylogWatcher, ctx: &PipelineContext) {
+/// Poll for new keylog lines and emit `TlsKeys` events.
+fn poll_once(
+    watcher: &mut KeylogWatcher,
+    ctx: &PipelineContext,
+    outputs: &mut OutputList,
+    redact: &RedactStage,
+) {
     match watcher.process_new_lines(&ctx.bus, 0, -1) {
         Ok(tls_events) => {
             for tls in tls_events {
-                let evt = Event::new(&ctx.seq, ctx.agent_id.clone(), EventPayload::TlsKeys(tls));
+                let mut evt = Event::new(&ctx.seq, ctx.agent_id.clone(), EventPayload::TlsKeys(tls));
                 event!(
                     name: "pipeline.keylog.event",
                     Level::DEBUG,
                     event.seq = evt.seq,
                     "keylog pipeline emitting TlsKeys event {{event.seq}}",
                 );
+                // Redact and deliver to this thread's user-facing outputs.
+                redact.redact(&mut evt);
+                outputs.emit(&evt);
                 let record = Record::Event(evt);
                 if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(record.clone()) {
                     if let Some(ref overflow) = ctx.overflow {
@@ -111,9 +122,12 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::config::RedactConfig;
     use crate::events::SequenceGenerator;
     use crate::pipeline::bus::RecordBus;
     use crate::pipeline::context::PipelineContext;
+    use crate::pipeline::outputs::OutputList;
+    use crate::pipeline::stages::redact::RedactStage;
 
     fn make_ctx() -> PipelineContext {
         PipelineContext::new(
@@ -134,24 +148,28 @@ mod tests {
         fs::write(&path, format!("CLIENT_RANDOM {TEST_CR} deadbeef\n")).unwrap();
 
         let ctx = make_ctx();
+        let outputs = OutputList::new();
+        let redact = RedactStage::new(&RedactConfig::default());
         let stop = Arc::new(AtomicBool::new(false));
 
         // Signal stop immediately so the loop exits after the first drain.
         stop.store(true, Ordering::Release);
 
-        // Should complete without blocking.
-        super::run(path, ctx, stop, Duration::from_millis(1));
+        super::run(path, ctx, outputs, redact, stop, Duration::from_millis(1));
     }
 
     #[test]
     fn run_handles_missing_keylog() {
         let ctx = make_ctx();
+        let outputs = OutputList::new();
+        let redact = RedactStage::new(&RedactConfig::default());
         let stop = Arc::new(AtomicBool::new(true));
 
-        // No file written — should handle gracefully.
         super::run(
             std::path::PathBuf::from("/nonexistent/sslkeylogfile"),
             ctx,
+            outputs,
+            redact,
             stop,
             Duration::from_millis(1),
         );
