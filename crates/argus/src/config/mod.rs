@@ -10,15 +10,21 @@
 
 mod capture;
 mod durability;
+mod enrich;
+mod output;
 mod pause_rules;
+mod redact;
 mod storage;
 mod tls;
 
 pub use capture::{CaptureConfig, CapturePathConfig};
 pub use durability::{DurabilityConfig, DurabilityMode, DurabilityOverride};
+pub use enrich::{CategoryConfig, EnrichConfig};
+pub use output::OutputConfig;
 pub use pause_rules::{
     MatchKind, PauseAction, PauseMatchKind, PauseRule, Rule, RuleDecision, RuleSet,
 };
+pub use redact::{BuiltinRedactions, RedactConfig, RedactPattern};
 pub use storage::{DigestCacheConfig, LocalBufferConfig, S3Config, StorageConfig, UploadConfig};
 pub use tls::{ProxyMode, TlsConfig, UpstreamVerify};
 
@@ -95,6 +101,18 @@ pub struct SupervisorConfig {
     /// When true, record raw ptrace stops to raw_stops.jsonl for offline replay.
     #[serde(default)]
     pub record_raw_stops: bool,
+
+    /// Controls which event data categories are inlined and at what size.
+    #[serde(default)]
+    pub enrich: EnrichConfig,
+
+    /// Three-tier PII scrubbing: path exclusion, field drop, value scan.
+    #[serde(default)]
+    pub redact: RedactConfig,
+
+    /// Destinations that receive every enriched event record.
+    #[serde(default = "default_outputs")]
+    pub outputs: Vec<OutputConfig>,
 }
 
 /// UID/GID to drop to before exec'ing the agent process.
@@ -122,6 +140,9 @@ impl Default for SupervisorConfig {
             pause_before: Vec::new(),
             capture: CaptureConfig::default(),
             record_raw_stops: false,
+            enrich: EnrichConfig::default(),
+            redact: RedactConfig::default(),
+            outputs: default_outputs(),
         }
     }
 }
@@ -189,6 +210,10 @@ impl SupervisorConfig {
             rule.validate_patterns();
         }
     }
+}
+
+fn default_outputs() -> Vec<OutputConfig> {
+    vec![OutputConfig::Stdout]
 }
 
 fn default_data_dir() -> PathBuf {
