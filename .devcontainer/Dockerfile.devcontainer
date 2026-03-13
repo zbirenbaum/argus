@@ -39,5 +39,6 @@ RUN rustup component add clippy rustfmt rust-analyzer \
     && rustup target add aarch64-unknown-linux-musl
 RUN curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
 RUN cargo binstall -y cargo-watch cargo-nextest
+RUN cargo install cargo-modules
 
 WORKDIR /workspace

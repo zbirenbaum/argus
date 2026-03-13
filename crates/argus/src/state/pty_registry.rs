@@ -70,11 +70,10 @@ impl PtyRegistry {
                 && let Some((&pty_num, _)) = self.ptys.iter().find(|(_, info)| info.slave_path == *peer_path)
             {
                 let endpoint = (child_pid, fd);
-                if let Some(info) = self.ptys.get_mut(&pty_num) {
-                    if !info.slave_holders.contains(&endpoint) {
+                if let Some(info) = self.ptys.get_mut(&pty_num)
+                    && !info.slave_holders.contains(&endpoint) {
                         info.slave_holders.push(endpoint);
                     }
-                }
             }
         }
     }

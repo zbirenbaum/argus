@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// Per-path content capture configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct CapturePathConfig {
     /// Glob patterns for full content capture.
     #[serde(default = "default_capture_content_paths")]
@@ -96,8 +97,3 @@ impl Default for CaptureConfig {
     }
 }
 
-impl Default for CapturePathConfig {
-    fn default() -> Self {
-        Self { paths: Vec::new() }
-    }
-}

@@ -5,7 +5,7 @@
 //! hash) and the write buffer content (after hash). For reads and stdio it
 //! reads the buf_addr memory directly. Large blobs are split into chunks.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -87,7 +87,7 @@ impl CaptureStage {
     async fn capture_write(
         &self,
         pid: Pid,
-        path: &PathBuf,
+        path: &Path,
         buf_addr: usize,
         len: usize,
     ) -> CapturedContent {
@@ -98,7 +98,7 @@ impl CaptureStage {
 
         // Acquire per-path lock to serialize concurrent writes for hash
         // chain correctness. Hold through before_hash read → after_hash emit.
-        let lock = self.write_locks.entry(path.clone()).or_insert_with(|| Mutex::new(()));
+        let lock = self.write_locks.entry(path.to_path_buf()).or_insert_with(|| Mutex::new(()));
         let _guard = lock.lock().await;
 
         // Use tracked in-memory hash instead of racy filesystem read.
@@ -115,7 +115,7 @@ impl CaptureStage {
 
         // Update tracked state so the next write sees this write's hash.
         if let Some(ref hash) = after_hash {
-            self.file_state.insert(path.clone(), hash.clone());
+            self.file_state.insert(path.to_path_buf(), hash.clone());
         }
 
         CapturedContent::FileWrite { before_hash, after_hash, size: len }
@@ -124,7 +124,7 @@ impl CaptureStage {
     async fn capture_read(
         &self,
         pid: Pid,
-        path: &PathBuf,
+        path: &Path,
         buf_addr: usize,
         len: usize,
     ) -> CapturedContent {
@@ -144,8 +144,8 @@ impl CaptureStage {
         CapturedContent::FileRead { content_hash, size: len }
     }
 
-    async fn capture_delete(&self, path: &PathBuf) -> CapturedContent {
-        let content_hash = self.handle.read_file(path.clone()).await.ok().map(|d| hash_and_emit(&self.bus, d));
+    async fn capture_delete(&self, path: &Path) -> CapturedContent {
+        let content_hash = self.handle.read_file(path.to_path_buf()).await.ok().map(|d| hash_and_emit(&self.bus, d));
         CapturedContent::FileDelete { content_hash }
     }
 

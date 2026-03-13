@@ -107,7 +107,7 @@ impl TypeIndex {
         for entry in read_dir {
             let entry = entry?;
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e == "idx") {
+            if path.extension().is_none_or(|e| e != "idx") {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str())

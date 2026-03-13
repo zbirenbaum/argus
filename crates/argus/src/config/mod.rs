@@ -214,18 +214,17 @@ fn default_listen_addr() -> SocketAddr {
 /// agent identity to a specific process on a specific node. Falls back
 /// to `AGENT_ID` env var, then `HOSTNAME` env var, then `/etc/hostname`.
 fn generate_agent_id() -> String {
-    if let Ok(id) = std::env::var("AGENT_ID") {
-        if !id.is_empty() {
+    if let Ok(id) = std::env::var("AGENT_ID")
+        && !id.is_empty() {
             return id;
         }
-    }
 
     let hostname = std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_owned())
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "unknown".into());
 
-    let host_pid = read_host_pid().unwrap_or_else(|| std::process::id());
+    let host_pid = read_host_pid().unwrap_or_else(std::process::id);
 
     format!("{hostname}-{host_pid}")
 }

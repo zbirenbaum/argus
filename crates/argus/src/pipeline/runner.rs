@@ -96,7 +96,8 @@ impl PipelineRunner {
                             classified.pid.as_raw() as u32,
                             classified.syscall_name(),
                             classified.primary_path(),
-                            rule_match.description.clone(),
+                            // description is the last use of rule_match; move instead of clone
+                            rule_match.description,
                         );
                         self.bus.emit(crate::pipeline::Record::Event(blocked));
                         continue;
@@ -106,6 +107,8 @@ impl PipelineRunner {
                         let syscall = classified.syscall_name();
                         let path = classified.primary_path();
 
+                        // Emit the WebSocket notification first (clones needed here
+                        // because submit_pending_approval also needs these values).
                         self.shared.emit(EventPayload::PendingApproval(
                             control::PendingApproval {
                                 pid: pid_raw,
@@ -116,13 +119,15 @@ impl PipelineRunner {
                             },
                         ));
 
+                        // Move syscall, path, and description into the last consumer
+                        // to avoid three extra allocations on every pause-before-action.
                         let (_action_id, rx) = submit_pending_approval(
                             &self.shared,
                             pid_raw,
                             format!("pid:{pid_raw}"),
-                            syscall.clone(),
-                            path.clone(),
-                            rule_match.description.clone(),
+                            syscall,
+                            path,
+                            rule_match.description,
                         );
 
                         // Block until the API delivers a decision.
@@ -154,6 +159,10 @@ impl PipelineRunner {
             // the /tree and /restore endpoints can serve it.
             let cas_tree_hash = {
                 let snapshot = self.tree.tree.lock().unwrap();
+                // store() borrows snapshot; store_tree() needs an owned Arc, so one
+                // deep clone is unavoidable here given that TreeStage holds Mutex<MerkleTree>
+                // rather than Arc<Mutex<MerkleTree>>. Wrap in Arc immediately to make
+                // the ownership intent explicit.
                 self.shared.store_tree(Arc::new(snapshot.clone()));
                 snapshot.store(self.shared.cas().as_ref()).ok()
             };

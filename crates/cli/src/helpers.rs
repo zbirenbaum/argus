@@ -95,11 +95,10 @@ pub fn build_timeline_params<'a>(
     event_type: Option<&'a str>,
 ) -> Vec<(&'a str, String)> {
     let mut params: Vec<(&str, String)> = vec![("agents", agents.to_owned())];
-    if let Some(s) = since {
-        if let Ok(resolved) = resolve_since(s) {
+    if let Some(s) = since
+        && let Ok(resolved) = resolve_since(s) {
             params.push(("since", resolved));
         }
-    }
     if let Some(t) = event_type {
         params.push(("type", t.to_owned()));
     }

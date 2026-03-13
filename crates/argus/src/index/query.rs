@@ -119,7 +119,7 @@ impl<'a> QueryEngine<'a> {
             .filter(|e| {
                 candidate_seqs
                     .as_ref()
-                    .map_or(true, |seqs| seqs.contains(&e.seq))
+                    .is_none_or(|seqs| seqs.contains(&e.seq))
             })
             .filter(|e| self.matches_seq_range(e.seq, filter))
             .filter(|e| matches_time_range(e, filter))
@@ -211,16 +211,14 @@ impl<'a> QueryEngine<'a> {
     }
 
     fn matches_seq_range(&self, seq: u64, filter: &QueryFilter) -> bool {
-        if let Some(from) = filter.seq_from {
-            if seq < from {
+        if let Some(from) = filter.seq_from
+            && seq < from {
                 return false;
             }
-        }
-        if let Some(to) = filter.seq_to {
-            if seq > to {
+        if let Some(to) = filter.seq_to
+            && seq > to {
                 return false;
             }
-        }
         true
     }
 }
@@ -263,20 +261,16 @@ fn matches_time_range(event: &Event, filter: &QueryFilter) -> bool {
             return false;
         }
     };
-    if let Some(since) = &filter.since {
-        if let Some(since_ts) = parse_rfc3339(since) {
-            if event_ts < since_ts {
+    if let Some(since) = &filter.since
+        && let Some(since_ts) = parse_rfc3339(since)
+            && event_ts < since_ts {
                 return false;
             }
-        }
-    }
-    if let Some(until) = &filter.until {
-        if let Some(until_ts) = parse_rfc3339(until) {
-            if event_ts > until_ts {
+    if let Some(until) = &filter.until
+        && let Some(until_ts) = parse_rfc3339(until)
+            && event_ts > until_ts {
                 return false;
             }
-        }
-    }
     true
 }
 

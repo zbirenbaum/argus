@@ -150,11 +150,10 @@ fn combine(
 /// First terminal verdict wins. Errors and escalations skipped.
 fn combine_first(outcomes: &[Outcome], group_name: &str) -> Verdict {
     for outcome in outcomes {
-        if let Outcome::Ok(v) = outcome {
-            if v.is_terminal() {
+        if let Outcome::Ok(v) = outcome
+            && v.is_terminal() {
                 return v.clone();
             }
-        }
     }
     Verdict::escalate("all inner approvers escalated or failed", group_name)
 }

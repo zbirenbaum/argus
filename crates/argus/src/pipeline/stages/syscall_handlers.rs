@@ -343,14 +343,12 @@ async fn handle_connect(
         .unwrap_or_default();
     let original_dest = parse_sockaddr(&sockaddr_bytes);
 
-    if stage.transparent_mode {
-        if let Some(addr) = &original_dest {
-            if is_tls_port(addr) && !addr.ip().is_loopback() {
+    if stage.transparent_mode
+        && let Some(addr) = &original_dest
+            && is_tls_port(addr) && !addr.ip().is_loopback() {
                 let proxy_bytes = encode_sockaddr(stage.proxy_addr);
                 let _ = stage.handle.write_memory(pid, sockaddr_addr, proxy_bytes).await;
             }
-        }
-    }
 
     let addr = original_dest.unwrap_or_else(|| "0.0.0.0:0".parse().unwrap());
     Classification::NetConnect { fd, addr }

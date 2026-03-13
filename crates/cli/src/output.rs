@@ -152,20 +152,18 @@ pub fn print_process_tree(node: &ProcessTreeNode, depth: usize) {
         bin = node.binary,
         argv = node.argv.join(" "),
     );
-    if let Some(ref out) = node.stdout {
-        if !out.is_empty() {
+    if let Some(ref out) = node.stdout
+        && !out.is_empty() {
             for line in out.lines().take(5) {
                 println!("{indent}  stdout: {line}");
             }
         }
-    }
-    if let Some(ref err) = node.stderr {
-        if !err.is_empty() {
+    if let Some(ref err) = node.stderr
+        && !err.is_empty() {
             for line in err.lines().take(5) {
                 println!("{indent}  stderr: {line}");
             }
         }
-    }
     for child in &node.children {
         print_process_tree(child, depth + 1);
     }

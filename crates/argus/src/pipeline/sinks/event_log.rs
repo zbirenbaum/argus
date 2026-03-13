@@ -70,9 +70,7 @@ impl Sink for EventLogSink {
         self.log
             .lock()
             .expect("event log mutex poisoned")
-            .flush()
-            .map_err(Into::into)
-    }
+            .flush()}
 
     fn name(&self) -> &str {
         "event-log"
@@ -83,6 +81,7 @@ impl Sink for EventLogSink {
 mod tests {
     use super::*;
     use crate::config::DurabilityMode;
+    use crate::events::Event;
     use crate::pipeline::record::Record;
 
     fn make_sink() -> (tempfile::TempDir, EventLogSink) {

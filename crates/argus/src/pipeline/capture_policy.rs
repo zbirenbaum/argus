@@ -95,7 +95,7 @@ impl CapturePolicy {
     pub fn level(&self, path: &Path, pid: u32, size: usize) -> CaptureLevel {
         // Static rules take priority; first match wins.
         for (rule, compiled) in self.rules.iter().zip(self.compiled.iter()) {
-            let matched = compiled.as_ref().map_or(false, |p| {
+            let matched = compiled.as_ref().is_some_and(|p| {
                 p.matches_path(path)
             });
             if matched {

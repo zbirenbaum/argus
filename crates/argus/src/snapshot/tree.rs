@@ -245,7 +245,7 @@ pub(crate) fn build_dir_tree(files: &BTreeMap<PathBuf, ContentHash>) -> BTreeMap
             })
             .collect();
 
-        insert_into_tree(&mut root, &components, hash.clone());
+        insert_into_tree(&mut root, &components, hash);
     }
 
     root
@@ -255,12 +255,13 @@ pub(crate) fn build_dir_tree(files: &BTreeMap<PathBuf, ContentHash>) -> BTreeMap
 fn insert_into_tree(
     node: &mut BTreeMap<String, DirNode>,
     components: &[&str],
-    hash: ContentHash,
+    hash: &ContentHash,
 ) {
     match components {
         [] => {}
         [name] => {
-            node.insert((*name).to_owned(), DirNode::File(hash));
+            // Clone only at the leaf where ownership is required.
+            node.insert((*name).to_owned(), DirNode::File(hash.clone()));
         }
         [dir, rest @ ..] => {
             let entry = node
@@ -277,14 +278,19 @@ fn insert_into_tree(
 pub(crate) fn hash_dir_node(children: &BTreeMap<String, DirNode>) -> ContentHash {
     let mut hasher_input = Vec::new();
     for (name, node) in children {
-        let child_hash = match node {
-            DirNode::File(h) => h.clone(),
-            DirNode::Dir(sub) => hash_dir_node(sub),
+        // Avoid cloning File hashes — borrow the str representation directly.
+        let dir_hash: ContentHash;
+        let child_hash_str = match node {
+            DirNode::File(h) => h.as_str(),
+            DirNode::Dir(sub) => {
+                dir_hash = hash_dir_node(sub);
+                dir_hash.as_str()
+            }
         };
         // Format: "name\0hash\n" — deterministic, sorted by BTreeMap.
         hasher_input.extend_from_slice(name.as_bytes());
         hasher_input.push(0);
-        hasher_input.extend_from_slice(child_hash.as_str().as_bytes());
+        hasher_input.extend_from_slice(child_hash_str.as_bytes());
         hasher_input.push(b'\n');
     }
     ContentHash::from_data(&hasher_input)

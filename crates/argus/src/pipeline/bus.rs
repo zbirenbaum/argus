@@ -59,8 +59,8 @@ impl RecordBus {
     /// the remaining sinks.
     pub fn emit(&self, record: Record) {
         for sink in &self.blocking {
-            if sink.accept(&record) {
-                if let Err(e) = sink.write(record.clone()) {
+            if sink.accept(&record)
+                && let Err(e) = sink.write(record.clone()) {
                     event!(
                         name: "bus.sink.write_error",
                         Level::WARN,
@@ -69,11 +69,10 @@ impl RecordBus {
                         "blocking sink {{sink.name}} write failed: {{error.message}}",
                     );
                 }
-            }
         }
         for sink in &self.async_sinks {
-            if sink.accept(&record) {
-                if let Err(e) = sink.write(record.clone()) {
+            if sink.accept(&record)
+                && let Err(e) = sink.write(record.clone()) {
                     event!(
                         name: "bus.sink.async_write_error",
                         Level::WARN,
@@ -82,7 +81,6 @@ impl RecordBus {
                         "async sink {{sink.name}} write failed: {{error.message}}",
                     );
                 }
-            }
         }
     }
 
