@@ -10,3 +10,7 @@
 
 #/target
 .claude/worktrees/
+deploy/claude-auth/
+NEXT
+prompt
+scripts/__pycache__/

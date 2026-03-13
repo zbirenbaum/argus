@@ -15,7 +15,9 @@ pub mod ptrace_thread;
 pub mod raw_stop;
 pub mod record;
 pub mod replay;
+pub mod runner;
 pub mod sink;
+pub mod sinks;
 pub mod stages;
 
 pub use bus::RecordBus;
@@ -26,4 +28,6 @@ pub use directive::PipelineDirective;
 pub use ptrace_thread::{PtraceHandle, PtraceStream};
 pub use raw_stop::{RawSyscallStop, StopType, SyscallArgs};
 pub use record::Record;
+pub use replay::RawStopRecorder;
+pub use runner::PipelineRunner;
 pub use sink::{Sink, SinkPriority};

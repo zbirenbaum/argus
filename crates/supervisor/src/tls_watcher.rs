@@ -97,7 +97,7 @@ fn poll_keylog(
 ) {
     // pid=0, fd=-1 because keylog lines come from the SSLKEYLOGFILE env var,
     // not from a specific traced process fd at poll time.
-    match watcher.process_new_lines_bus(bus, 0, -1) {
+    match watcher.process_new_lines(bus, 0, -1) {
         Ok(tls_events) => {
             for tls in tls_events {
                 let evt = Event::new(
@@ -126,7 +126,7 @@ fn poll_flows(
     seq_gen: &SequenceGenerator,
     agent_id: &str,
 ) {
-    match watcher.process_new_flows_bus(bus, 0) {
+    match watcher.process_new_flows(bus, 0) {
         Ok(flows) => {
             for payload in FlowWatcher::into_event_payloads(flows) {
                 let evt = Event::new(

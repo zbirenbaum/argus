@@ -2309,6 +2309,7 @@ dependencies = [
  "anyhow",
  "argus",
  "clap",
+ "dashmap",
  "libc",
  "nix",
  "serde_json",

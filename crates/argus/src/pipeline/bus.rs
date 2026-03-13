@@ -18,6 +18,11 @@ use super::sink::{Sink, SinkPriority};
 /// Create with [`RecordBus::new`], then call [`RecordBus::emit`] for
 /// every captured event. Call [`RecordBus::flush_all`] at checkpoint
 /// boundaries and [`RecordBus::shutdown_all`] on agent exit.
+///
+/// `Clone` shares the same underlying `Arc<dyn Sink>` handles so all
+/// clones deliver to the same sinks — useful for handing one copy to
+/// the pipeline runner and another to the TLS watcher thread.
+#[derive(Clone)]
 pub struct RecordBus {
     blocking: Vec<Arc<dyn Sink>>,
     async_sinks: Vec<Arc<dyn Sink>>,

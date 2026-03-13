@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::cas::store::LocalCas;
+use crate::cas::LocalCas;
 use crate::cas::ContentHash;
 use crate::pipeline::record::Record;
 use crate::pipeline::sink::{Sink, SinkPriority};
@@ -74,7 +74,7 @@ impl Sink for LocalCasSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cas::traits::Cas as _;
+    use crate::cas::Cas as _;
     use crate::pipeline::record::Record;
 
     fn make_sink() -> (tempfile::TempDir, LocalCasSink) {
@@ -94,7 +94,7 @@ mod tests {
         sink.write(record).expect("write");
         // Confirm the object landed by constructing a fresh CAS view on the
         // same root directory — verifying the file actually persisted.
-        let cas = Arc::clone(&sink.cas);
+        let cas: Arc<LocalCas> = Arc::clone(&sink.cas);
         assert!(cas.exists(&hash).expect("exists"));
     }
 

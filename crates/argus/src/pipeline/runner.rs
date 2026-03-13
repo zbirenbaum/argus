@@ -8,7 +8,7 @@
 
 use futures::StreamExt;
 
-use crate::pipeline::{PtraceStream, RecordBus, RawStopRecorder};
+use crate::pipeline::{PtraceStream, RawStopRecorder, RecordBus};
 
 use crate::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
@@ -64,24 +64,28 @@ impl PipelineRunner {
                 continue;
             }
 
-            if let Some(_rule_match) = self.rules.check_block(&classified) {
+            if let Some(rule_match) = self.rules.check_block(&classified) {
                 self.ptrace.directive(PipelineDirective::InjectError {
                     pid: classified.pid,
                     // EPERM is the standard error for policy-blocked operations;
                     // matches what seccomp SECCOMP_RET_ERRNO would return.
                     errno: libc::EPERM,
                 });
-                let blocked = self.stamp.stamp_blocked(&classified);
+                let blocked = self.stamp.stamp_blocked(
+                    classified.pid.as_raw() as u32,
+                    classified.syscall_name(),
+                    classified.primary_path(),
+                    rule_match.description.clone(),
+                );
                 self.bus.emit(crate::pipeline::Record::Event(blocked));
                 continue;
             }
 
-            if self.rules.needs_approval(&classified) {
-                if !self.approvals.process(&classified).await {
-                    // The approval stage already sent InjectError for denied
-                    // requests, so there is nothing more to do here.
-                    continue;
-                }
+            if self.rules.needs_approval(&classified)
+                && !self.approvals.process(&classified)
+            {
+                // ApprovalStage already sent InjectError for denied requests.
+                continue;
             }
 
             let captured = self.capture.capture(classified).await;
@@ -90,8 +94,9 @@ impl PipelineRunner {
             });
 
             let tree_hash = self.tree.update(&captured);
-            let event = self.stamp.stamp(captured, tree_hash);
-            self.bus.emit(crate::pipeline::Record::Event(event));
+            if let Some(event) = self.stamp.stamp(captured, tree_hash) {
+                self.bus.emit(crate::pipeline::Record::Event(event));
+            }
         }
     }
 }

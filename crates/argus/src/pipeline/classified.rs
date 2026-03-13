@@ -152,3 +152,32 @@ pub struct ClassifiedEvent {
     pub raw: RawSyscallStop,
     pub classification: Classification,
 }
+
+impl ClassifiedEvent {
+    /// Returns the syscall number as a string, for use in blocked event records.
+    pub fn syscall_name(&self) -> String {
+        use super::raw_stop::StopType;
+        match self.raw.stop_type {
+            StopType::SyscallEntry { syscall_nr, .. }
+            | StopType::SyscallExit { syscall_nr, .. } => format!("syscall_{syscall_nr}"),
+            _ => "unknown".to_string(),
+        }
+    }
+
+    /// Returns the primary path associated with this event, if any.
+    pub fn primary_path(&self) -> Option<String> {
+        match &self.classification {
+            Classification::FileWrite { path, .. }
+            | Classification::FileRead { path, .. }
+            | Classification::FileUnlink { path }
+            | Classification::FileMkdir { path }
+            | Classification::FileRmdir { path }
+            | Classification::FileChmod { path, .. }
+            | Classification::FileTruncate { path, .. } => Some(path.display().to_string()),
+            Classification::FileRename { old_path, .. } => Some(old_path.display().to_string()),
+            Classification::FileLink { target, .. }
+            | Classification::FileSymlink { target, .. } => Some(target.display().to_string()),
+            _ => None,
+        }
+    }
+}

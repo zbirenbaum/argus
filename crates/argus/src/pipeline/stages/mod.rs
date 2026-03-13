@@ -9,3 +9,10 @@ pub mod sockaddr;
 pub mod stamp;
 pub mod syscall_handlers;
 pub mod tree;
+
+pub use approvals::ApprovalStage;
+pub use capture::CaptureStage;
+pub use check_rules::CheckRulesStage;
+pub use classify::ClassifyStage;
+pub use stamp::StampStage;
+pub use tree::TreeStage;

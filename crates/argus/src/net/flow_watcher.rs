@@ -276,7 +276,7 @@ mod tests {
     fn skips_blank_lines() {
         let dir = TempDir::new().unwrap();
         let flow_path = dir.path().join("flows.jsonl");
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
+        let bus = noop_bus();
 
         let content = format!(
             "\n\n{}\n\n",
@@ -285,7 +285,7 @@ mod tests {
         fs::write(&flow_path, content).unwrap();
 
         let mut watcher = FlowWatcher::new(flow_path);
-        let flows = watcher.process_new_flows(&cas, 1).unwrap();
+        let flows = watcher.process_new_flows(&bus, 1).unwrap();
         assert_eq!(flows.len(), 1);
     }
 }

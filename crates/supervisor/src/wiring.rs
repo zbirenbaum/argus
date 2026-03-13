@@ -4,27 +4,34 @@
 //! Called from `main` after CLI parsing and TLS setup. Extracted here
 //! so `main.rs` stays under the 300-line guideline limit.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use dashmap::DashMap;
+use nix::unistd::Pid;
 use tokio::sync::broadcast;
 use tracing::{Level, event};
 
 use argus::api;
 use argus::api::state::{SharedState, new_shared_state};
+use argus::approver::Approvers;
 use argus::cas::LocalCas;
 use argus::config::SupervisorConfig;
 use argus::events::{Event, EventPayload, SequenceGenerator};
 use argus::net;
-use argus::pipeline::{PipelineRunner, PtraceStream, RawStopRecorder, RecordBus, Sink};
+use argus::pipeline::{PtraceStream, RawStopRecorder, RecordBus, Sink};
+use argus::pipeline::runner::PipelineRunner;
 use argus::pipeline::sinks::{
     BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink,
 };
 use argus::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
 };
-use argus::storage::{DynObjectStore, EventLog, S3Client, UploadPool};
+use argus::index::{PathIndex, PidIndex, TypeIndex};
+use argus::pipeline::capture_policy::CapturePolicy;
+use argus::snapshot::MerkleTree;
+use argus::state::{FdTable, PipeRegistry, PtyRegistry};
+use argus::storage::{DynObjectStore, DigestCache, EventLog, S3Client, UploadPool};
 
 use crate::startup;
 use crate::tls_watcher;
@@ -56,8 +63,11 @@ pub async fn run(
 
     crate::signals::install_handler();
 
-    let (ptrace_stream, ptrace_thread) =
-        PtraceStream::spawn(spawn.child_pid, spawn.sync_pipe_w);
+    // Close the write end of the sync pipe — the ptrace thread signals the
+    // tracee after attaching; we don't write to it from the async context.
+    let _ = unsafe { nix::unistd::close(spawn.sync_pipe_w) };
+
+    let (ptrace_stream, ptrace_thread) = PtraceStream::spawn(spawn.child_pid);
 
     let runner = build_runner(
         ptrace_stream,
@@ -123,8 +133,7 @@ async fn init_storage_and_bus(
     let tls_handle = tls_watcher::spawn(
         config.tls.keylog_path.clone(),
         flow_path,
-        LocalCas::new(cas_path).context("failed to initialize TLS watcher CAS handle")?,
-        bus.legacy_sender(),
+        bus.clone(),
         tls_seq,
         config.agent_id.clone(),
         tls_stop.clone(),
@@ -180,15 +189,39 @@ fn build_runner(
     seq_gen: SequenceGenerator,
     config: &SupervisorConfig,
 ) -> PipelineRunner {
-    let proxy_mode = config.tls.proxy_mode;
-    let classify = ClassifyStage::new(shared.clone(), proxy_mode, config.tls.mitm_proxy_port);
+    let handle = ptrace_stream.handle();
+
+    // fd/pipe/pty state shared between ClassifyStage and the ptrace loop.
+    let fd_tables: Arc<DashMap<Pid, FdTable>> = Arc::new(DashMap::new());
+    let pipe_registry = Arc::new(Mutex::new(PipeRegistry::new()));
+    let pty_registry = Arc::new(Mutex::new(PtyRegistry::new()));
+
+    let transparent_mode = matches!(
+        config.tls.proxy_mode,
+        argus::config::ProxyMode::Transparent
+    );
+    let proxy_addr = std::net::SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        config.tls.mitm_proxy_port,
+    );
+
+    let classify = ClassifyStage::new(
+        handle.clone(),
+        fd_tables,
+        pipe_registry,
+        pty_registry,
+        transparent_mode,
+        proxy_addr,
+    );
     let rules_stage = CheckRulesStage::new(shared.rules_handle());
-    let approvals = ApprovalStage::new(shared.clone());
-    let capture_stage = CaptureStage::new(local_cas, bus.clone());
-    let tree_stage = TreeStage::new(shared.clone());
+    let approvals = ApprovalStage::new(Approvers::new());
+
+    let policy = CapturePolicy::default_full();
+    let capture_stage = CaptureStage::new(handle.clone(), bus.clone(), policy);
+
+    let tree_stage = TreeStage::new(MerkleTree::new(), bus.clone(), 1000);
     let stamp_stage = StampStage::new(seq_gen, config.agent_id.clone());
     // Raw stop recording is opt-in; no config field exposes it yet.
-    // TODO: wire to a config field when RawStopRecorder is fully implemented.
     let recorder: Option<RawStopRecorder> = None;
 
     PipelineRunner {
@@ -213,6 +246,8 @@ fn shutdown(
     ptrace_thread: std::thread::JoinHandle<()>,
     api_shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
+    use std::sync::atomic::Ordering;
+
     // Stop TLS watcher before mitmdump exits so it can drain final data.
     tls_stop.store(true, Ordering::Release);
     let _ = tls_handle.join();
@@ -247,11 +282,7 @@ async fn build_upload_pool(config: &SupervisorConfig) -> Result<Option<Arc<Uploa
         .await
         .context("failed to create S3 client")?;
     let dyn_store = DynObjectStore::new(s3_client);
-
-    // Channel capacity: enough to buffer bursts without back-pressure on the
-    // pipeline. 4096 matches the broadcast channel capacity.
-    const UPLOAD_CHANNEL_CAPACITY: usize = 4096;
-    let pool = UploadPool::new(dyn_store, &config.storage.upload, UPLOAD_CHANNEL_CAPACITY);
+    let pool = UploadPool::new(dyn_store, &config.storage.upload);
 
     event!(
         name: "supervisor.storage.s3",
@@ -275,12 +306,18 @@ pub fn build_bus(
     let mut sinks: Vec<Arc<dyn Sink>> = vec![
         Arc::new(LocalCasSink::new(local_cas)),
         Arc::new(EventLogSink::new(event_log)),
-        Arc::new(IndexSink::new(config.data_dir.join("indexes"))),
+        Arc::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new())),
         Arc::new(BroadcastSink::new(broadcast_tx)),
     ];
 
     if let Some(pool) = upload_pool {
-        sinks.push(Arc::new(RemoteCasSink::new(pool, config.agent_id.clone())));
+        let cache_path = config.data_dir.join("digest-cache.bin");
+        let digest_cache = Arc::new(Mutex::new(DigestCache::new(cache_path)));
+        sinks.push(Arc::new(RemoteCasSink::new(
+            pool.job_sender(),
+            digest_cache,
+            config.agent_id.clone(),
+        )));
     }
 
     RecordBus::new(sinks)
