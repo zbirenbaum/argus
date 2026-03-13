@@ -35,22 +35,22 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Stage that captures content from traced syscalls.
 pub struct CaptureStage {
-    pub handle: PtraceHandle,
-    pub durability: DurabilityLayer,
-    pub policy: CapturePolicy,
+    handle: PtraceHandle,
+    durability: DurabilityLayer,
+    policy: CapturePolicy,
     /// Per-path mutex that serializes concurrent writes to the same file.
-    pub write_locks: DashMap<PathBuf, Mutex<()>>,
+    write_locks: DashMap<PathBuf, Mutex<()>>,
     /// Tracked file content hashes shared with `ClassifyStage`.
     ///
     /// Used instead of filesystem reads for `before_hash` to avoid
     /// races between resuming a previous write and reading the file
     /// for the next write's `before_hash`.
-    pub file_state: Arc<DashMap<PathBuf, ContentHash>>,
+    file_state: Arc<DashMap<PathBuf, ContentHash>>,
     /// Maximum bytes to retain as inline data in [`CapturedContent`].
     ///
     /// Data larger than this cap is still hashed and stored in CAS but
     /// the `data` field is set to `None` to keep event records small.
-    pub max_inline_bytes: usize,
+    max_inline_bytes: usize,
 }
 
 impl CaptureStage {
@@ -198,34 +198,35 @@ impl CaptureStage {
     }
 
     async fn capture_truncate(&self, path: &Path, new_len: u64) -> CapturedContent {
-        // Read before state from disk. The syscall has not yet executed, so
-        // the file still holds its pre-truncation content.
-        let (before_hash, before_data) = match self.handle.read_file(path.to_path_buf()).await {
-            Ok(d) => {
-                let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = emit_content(&self.durability, d);
-                (Some(hash), inline)
+        // Read before state from disk once. The syscall has not yet executed,
+        // so the file still holds its pre-truncation content. Derive the
+        // after-truncation state by slicing the same buffer.
+        let before_bytes = match self.handle.read_file(path.to_path_buf()).await {
+            Ok(d) => d,
+            Err(_) => {
+                return CapturedContent::FileTruncate {
+                    before_hash: None,
+                    after_hash: None,
+                    before_data: None,
+                    after_data: None,
+                };
             }
-            Err(_) => (None, None),
         };
 
-        // After truncation the content is the first `new_len` bytes of the
-        // before content (or all zeros if new_len exceeds the original).
-        // We compute the after hash from the truncated slice to avoid
-        // re-reading the file after resuming the tracee.
-        let (after_hash, after_data) = match self.handle.read_file(path.to_path_buf()).await {
-            Ok(d) => {
-                let truncated_len = (new_len as usize).min(d.len());
-                let truncated = &d[..truncated_len];
-                let inline = inline_slice(truncated, self.max_inline_bytes);
-                let hash = emit_content(&self.durability, truncated.to_vec());
-                (Some(hash), inline)
-            }
-            // If the file is unreadable after-truncation hash is unavailable.
-            Err(_) => (None, None),
-        };
+        let before_inline = inline_slice(&before_bytes, self.max_inline_bytes);
+        let before_hash = emit_content(&self.durability, before_bytes.clone());
 
-        CapturedContent::FileTruncate { before_hash, after_hash, before_data, after_data }
+        let truncated_len = (new_len as usize).min(before_bytes.len());
+        let truncated = &before_bytes[..truncated_len];
+        let after_inline = inline_slice(truncated, self.max_inline_bytes);
+        let after_hash = emit_content(&self.durability, truncated.to_vec());
+
+        CapturedContent::FileTruncate {
+            before_hash: Some(before_hash),
+            after_hash: Some(after_hash),
+            before_data: before_inline,
+            after_data: after_inline,
+        }
     }
 
     async fn capture_stream(

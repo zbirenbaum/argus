@@ -228,7 +228,7 @@ impl PipelineRunner {
             // Sync tree snapshot to SharedState and persist to CAS so
             // the /tree and /restore endpoints can serve it.
             let cas_tree_hash = {
-                let snapshot = self.tree.tree.lock().unwrap();
+                let snapshot = self.tree.tree().lock().unwrap();
                 // store() borrows snapshot; store_tree() needs an owned Arc, so one
                 // deep clone is unavoidable here given that TreeStage holds Mutex<MerkleTree>
                 // rather than Arc<Mutex<MerkleTree>>. Wrap in Arc immediately to make

@@ -20,9 +20,9 @@ use crate::pipeline::classified::{Classification, PipeDirection, PtyDataType, St
 
 /// Stage that stamps captured events with sequence numbers and timestamps.
 pub struct StampStage {
-    pub seq_gen: Arc<SequenceGenerator>,
-    pub agent_id: String,
-    pub enrich: EnrichConfig,
+    seq_gen: Arc<SequenceGenerator>,
+    agent_id: String,
+    enrich: EnrichConfig,
 }
 
 impl StampStage {

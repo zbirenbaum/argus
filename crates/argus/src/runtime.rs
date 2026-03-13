@@ -74,8 +74,11 @@ impl SupervisorRuntime {
         let data_dir = &config.data_dir;
         let cas_path = data_dir.join("cas");
 
-        let sink_cas = LocalCas::new(cas_path.clone())
-            .context("failed to initialize sink CAS")?;
+        // Single LocalCas instance shared by DurabilityLayer and LocalCasSink.
+        // LocalCas is a cheap path wrapper with no open file handles.
+        let shared_cas = LocalCas::new(cas_path.clone())
+            .context("failed to initialize shared CAS")?;
+
         let event_log = EventLog::new(
             config.agent_id.clone(),
             data_dir.join("events"),
@@ -84,25 +87,34 @@ impl SupervisorRuntime {
         .context("failed to initialize event log")?;
         let upload_pool = build_upload_pool(&config).await?;
 
-        // Build a DurabilityLayer for CaptureStage and TreeStage. When S3 is
-        // configured we also attach a DigestCache so upload_async skips objects
-        // that are already confirmed remote.
-        let durability_cas = LocalCas::new(cas_path.clone())
-            .context("failed to initialize durability CAS")?;
-        let digest_cache_for_durability = if upload_pool.is_some() {
+        // Single DigestCache shared by DurabilityLayer and RemoteCasSink so
+        // uploads confirmed by one path are visible to the other immediately.
+        let shared_digest_cache = if upload_pool.is_some() {
             let cache_path = data_dir.join("digest-cache.bin");
             Some(Arc::new(DigestCache::new(cache_path)))
         } else {
             None
         };
+
+        // DurabilityLayer for CaptureStage (and later TreeStage gets its own
+        // lightweight handle to the same CAS directory).
+        let durability_cas = LocalCas::new(cas_path.clone())
+            .context("failed to initialize durability CAS")?;
         let durability = DurabilityLayer::new(
             durability_cas,
             upload_pool.clone(),
-            digest_cache_for_durability,
+            shared_digest_cache.clone(),
         );
 
         let (broadcast_tx, _) = broadcast::channel::<Event>(4096);
-        let bus = build_bus(sink_cas, event_log, upload_pool.clone(), &config, broadcast_tx);
+        let bus = build_bus(
+            shared_cas,
+            event_log,
+            upload_pool.clone(),
+            &config,
+            broadcast_tx,
+            shared_digest_cache,
+        );
 
         let seq = Arc::new(SequenceGenerator::default());
         let ctx = PipelineContext::new(seq, bus.clone(), config.agent_id.clone());
@@ -368,6 +380,7 @@ fn build_bus(
     upload_pool: Option<Arc<UploadPool>>,
     config: &SupervisorConfig,
     broadcast_tx: broadcast::Sender<Event>,
+    shared_digest_cache: Option<Arc<DigestCache>>,
 ) -> RecordBus {
     let mut sinks: Vec<Arc<Mutex<dyn Sink>>> = vec![
         Arc::new(Mutex::new(LocalCasSink::new(local_cas))),
@@ -377,13 +390,13 @@ fn build_bus(
     ];
 
     if let Some(pool) = upload_pool {
-        let cache_path = config.data_dir.join("digest-cache.bin");
-        let digest_cache = Arc::new(DigestCache::new(cache_path));
-        sinks.push(Arc::new(Mutex::new(RemoteCasSink::new(
-            pool,
-            digest_cache,
-            config.agent_id.clone(),
-        ))));
+        if let Some(digest_cache) = shared_digest_cache {
+            sinks.push(Arc::new(Mutex::new(RemoteCasSink::new(
+                pool,
+                digest_cache,
+                config.agent_id.clone(),
+            ))));
+        }
     }
 
     RecordBus::new(sinks)

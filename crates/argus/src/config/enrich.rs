@@ -161,7 +161,7 @@ const fn default_max_inline_bytes() -> usize {
     256 * 1024
 }
 
-pub(crate) const fn default_true() -> bool {
+pub(super) const fn default_true() -> bool {
     true
 }
 

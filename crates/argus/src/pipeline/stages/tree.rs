@@ -19,14 +19,19 @@ use crate::snapshot::MerkleTree;
 
 /// Stage that maintains the in-memory Merkle tree and persists checkpoints.
 pub struct TreeStage {
-    pub tree: Mutex<MerkleTree>,
-    pub durability: DurabilityLayer,
+    tree: Mutex<MerkleTree>,
+    durability: DurabilityLayer,
     /// How many mutating events between checkpoint persists.
-    pub checkpoint_interval: u64,
-    pub events_since_checkpoint: AtomicU64,
+    checkpoint_interval: u64,
+    events_since_checkpoint: AtomicU64,
 }
 
 impl TreeStage {
+    /// Access the inner Merkle tree for snapshot operations.
+    pub(crate) fn tree(&self) -> &Mutex<MerkleTree> {
+        &self.tree
+    }
+
     /// Create a new stage from an existing tree and durability layer.
     pub fn new(tree: MerkleTree, durability: DurabilityLayer, checkpoint_interval: u64) -> Self {
         Self {

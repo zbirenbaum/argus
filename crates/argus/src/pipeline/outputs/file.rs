@@ -27,7 +27,7 @@ use crate::pipeline::output::Output;
 /// ```ignore
 /// use std::path::PathBuf;
 /// use bytesize::ByteSize;
-/// use argus::pipeline::outputs::FileOutput;
+/// use crate::pipeline::outputs::FileOutput;
 ///
 /// let mut out = FileOutput::new(PathBuf::from("/tmp/events.jsonl"),
 ///                               ByteSize::mb(100), 5).unwrap();

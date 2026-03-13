@@ -25,12 +25,9 @@ struct CompiledPattern {
     replacement: String,
 }
 
-/// Information about a single regex match within a field value.
+/// Name of a rule that triggered during scrubbing.
 struct ScrubMatch {
-    /// Name of the rule that triggered.
     rule: String,
-    /// The field value after all patterns have been applied.
-    scrubbed: String,
 }
 
 /// Three-tier PII redaction filter applied to each event in the pipeline.
@@ -133,7 +130,6 @@ impl RedactStage {
                     .into_owned();
                 matches.push(ScrubMatch {
                     rule: cp.name.clone(),
-                    scrubbed: current.clone(),
                 });
             }
         }
@@ -308,11 +304,11 @@ fn maybe_scrub(
     let (scrubbed, matches) = stage.scrub_string(value);
     if !matches.is_empty() {
         *field_val = Some(scrubbed.clone());
-        for m in matches {
+        for m in &matches {
             redactions.push(Redaction {
                 field: field_name.to_owned(),
                 value: scrubbed.clone(),
-                rule: m.rule,
+                rule: m.rule.clone(),
             });
         }
     }
@@ -331,11 +327,11 @@ fn scrub_envp(
         let (scrubbed, matches) = stage.scrub_string(entry);
         if !matches.is_empty() {
             *entry = scrubbed.clone();
-            for m in matches {
+            for m in &matches {
                 redactions.push(Redaction {
                     field: "exec.envp".to_owned(),
                     value: scrubbed.clone(),
-                    rule: m.rule,
+                    rule: m.rule.clone(),
                 });
             }
         }
