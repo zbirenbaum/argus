@@ -5,7 +5,6 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 
-use crate::events::Event;
 use crate::pipeline::record::Record;
 use crate::pipeline::sink::{Sink, SinkPriority};
 use crate::storage::event_log::EventLog;

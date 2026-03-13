@@ -65,7 +65,7 @@ pub async fn run(
 
     // Close the write end of the sync pipe — the ptrace thread signals the
     // tracee after attaching; we don't write to it from the async context.
-    let _ = unsafe { nix::unistd::close(spawn.sync_pipe_w) };
+    let _ = nix::unistd::close(spawn.sync_pipe_w);
 
     let (ptrace_stream, ptrace_thread) = PtraceStream::spawn(spawn.child_pid);
 

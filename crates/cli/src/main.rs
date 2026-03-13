@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Status => output::print_status(&c.status().await?),
+        Command::Health => output::print_health(&c.health().await?),
         Command::Pause => output::print_pause(&c.pause().await?),
         Command::Resume => output::print_resume(&c.resume().await?),
         Command::Log { since, path, pid, event_type, limit, json } => {
@@ -63,7 +64,14 @@ async fn main() -> Result<()> {
             let tree = c.process_tree(root, stdio, depth).await?;
             output::print_process_tree(&tree, 0);
         }
-        Command::Cat { hash } => print!("{}", c.cat(&hash).await?),
+        Command::Cat { hash, raw } => {
+            if raw {
+                use std::io::Write;
+                std::io::stdout().write_all(&c.content_raw(&hash).await?)?;
+            } else {
+                print!("{}", c.cat(&hash).await?);
+            }
+        }
         Command::Diff { before, after, from, to } => {
             if let (Some(from), Some(to)) = (from, to) {
                 output::print_tree_diff(&c.tree_diff(from, to).await?);

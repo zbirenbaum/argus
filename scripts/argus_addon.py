@@ -10,7 +10,6 @@ Usage:
 
 import base64
 import json
-import sys
 
 
 def response(flow):

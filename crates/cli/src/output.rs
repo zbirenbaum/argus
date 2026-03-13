@@ -7,8 +7,8 @@
 use std::io::{self, Write};
 
 use argus::api::types::{
-    ApproveResponse, DenyResponse, PauseResponse, PendingApprovalsResponse,
-    ResumeResponse, StatusResponse,
+    ApproveResponse, DenyResponse, HealthResponse, PauseResponse,
+    PendingApprovalsResponse, ResumeResponse, StatusResponse,
 };
 
 use crate::types::{
@@ -17,6 +17,10 @@ use crate::types::{
     RulesAppliedResponse, RulesResponse, StorageStatusResponse,
     StdioResponse, TreeDiffResponse, TreeResponse,
 };
+
+pub fn print_health(r: &HealthResponse) {
+    println!("{} agent={} events={}", r.status, r.agent_id, r.event_count);
+}
 
 pub fn print_status(r: &StatusResponse) {
     println!("Status:  {}", r.status);
@@ -71,7 +75,9 @@ pub fn print_file_history(r: &FileHistoryResponse) {
         let hash_info = match (&e.before_hash, &e.after_hash) {
             (Some(b), Some(a)) => format!("{}..{}", &b[..8.min(b.len())], &a[..8.min(a.len())]),
             (None, Some(a)) => format!("→{}", &a[..8.min(a.len())]),
-            _ => String::new(),
+            _ => e.content_hash.as_ref()
+                .map(|h| h[..8.min(h.len())].to_owned())
+                .unwrap_or_default(),
         };
         println!(
             "  [{seq}] {ty} {hash} pid={pid} {ts}",
@@ -89,6 +95,16 @@ pub fn print_stdio(r: &StdioResponse) {
     if let Some(code) = r.exit_code {
         println!("Exit code: {code}");
     }
+    if let Some(ref dest) = r.stdout_dest {
+        println!("stdout → {dest}");
+    }
+    if let Some(ref dest) = r.stderr_dest {
+        println!("stderr → {dest}");
+    }
+    if let Some(ref s) = r.stdin {
+        println!("--- stdin ---");
+        print!("{s}");
+    }
     if let Some(ref s) = r.stdout {
         print!("{s}");
     }
@@ -101,11 +117,18 @@ pub fn print_pipeline(r: &PipelineResponse) {
     println!("Shell PID {}", r.shell_pid);
     for (i, stage) in r.stages.iter().enumerate() {
         let sep = if i + 1 < r.stages.len() { " |" } else { "" };
+        let pipes = match (stage.input_pipe, stage.output_pipe) {
+            (Some(inp), Some(out)) => format!(" in={inp} out={out}"),
+            (Some(inp), None) => format!(" in={inp}"),
+            (None, Some(out)) => format!(" out={out}"),
+            (None, None) => String::new(),
+        };
         println!(
-            "  [{pid}] {bin} {argv}{sep}",
+            "  [{pid}] {bin} {argv}{pipes} ({size} bytes){sep}",
             pid = stage.pid,
             bin = stage.binary,
             argv = stage.argv.join(" "),
+            size = stage.output_size,
         );
     }
     if !r.pipes.is_empty() {
@@ -121,8 +144,10 @@ pub fn print_pipeline(r: &PipelineResponse) {
 
 pub fn print_process_tree(node: &ProcessTreeNode, depth: usize) {
     let indent = "  ".repeat(depth);
+    let via = node.connected_via.as_deref().unwrap_or("");
+    let via_suffix = if via.is_empty() { String::new() } else { format!(" via {via}") };
     println!(
-        "{indent}[{pid}] {bin} {argv}",
+        "{indent}[{pid}] {bin} {argv}{via_suffix}",
         pid = node.pid,
         bin = node.binary,
         argv = node.argv.join(" "),
@@ -131,6 +156,13 @@ pub fn print_process_tree(node: &ProcessTreeNode, depth: usize) {
         if !out.is_empty() {
             for line in out.lines().take(5) {
                 println!("{indent}  stdout: {line}");
+            }
+        }
+    }
+    if let Some(ref err) = node.stderr {
+        if !err.is_empty() {
+            for line in err.lines().take(5) {
+                println!("{indent}  stderr: {line}");
             }
         }
     }
@@ -156,7 +188,7 @@ pub fn print_tree(r: &TreeResponse) {
 pub fn print_tree_diff(r: &TreeDiffResponse) {
     println!("Diff seq {}..{}", r.from_seq, r.to_seq);
     for e in &r.added {
-        println!("  + {} ({} bytes)", e.path, e.size);
+        println!("  + {} {} ({} bytes)", e.path, &e.hash[..8.min(e.hash.len())], e.size);
     }
     for e in &r.modified {
         println!(
@@ -167,12 +199,13 @@ pub fn print_tree_diff(r: &TreeDiffResponse) {
         );
     }
     for e in &r.deleted {
-        println!("  - {} ({} bytes)", e.path, e.size);
+        println!("  - {} {} ({} bytes)", e.path, &e.hash[..8.min(e.hash.len())], e.size);
     }
 }
 
 pub fn print_restore(r: &RestoreResponse) {
     println!("Restored to seq={} ts={}", r.restored_to_seq, r.restored_to_ts);
+    println!("  tree: {}", &r.tree_hash[..12.min(r.tree_hash.len())]);
     println!(
         "  {} files, {} bytes",
         r.files_restored, r.bytes_restored
@@ -191,7 +224,7 @@ pub fn print_connections(r: &ConnectionsResponse) {
         let sni = c.sni.as_deref().unwrap_or("-");
         println!(
             "  PID {pid} fd={fd} {ty} {addr}:{port} sni={sni} \
-             {sent}/{recv} {tls} {active}",
+             {sent}/{recv} {tls} {active} since={since}",
             pid = c.pid,
             fd = c.fd,
             ty = c.conn_type,
@@ -199,6 +232,7 @@ pub fn print_connections(r: &ConnectionsResponse) {
             port = c.dest_port,
             sent = c.bytes_sent,
             recv = c.bytes_received,
+            since = &c.connected_at[..c.connected_at.len().min(19)],
         );
     }
 }
@@ -283,12 +317,14 @@ pub fn print_agents(r: &AgentsResponse) {
 pub fn print_correlations(r: &CorrelationResponse) {
     for c in &r.correlations {
         println!(
-            "  {resource}: {w_agent}@{w_seq} → {r_agent}@{r_seq} ({latency}ms)",
+            "  {resource}: {w_agent}@{w_seq}({w_ts}) → {r_agent}@{r_seq}({r_ts}) ({latency}ms)",
             resource = c.resource,
             w_agent = c.write.agent_id,
             w_seq = c.write.seq,
+            w_ts = &c.write.ts_wall[..c.write.ts_wall.len().min(19)],
             r_agent = c.read.agent_id,
             r_seq = c.read.seq,
+            r_ts = &c.read.ts_wall[..c.read.ts_wall.len().min(19)],
             latency = c.latency_ms,
         );
     }

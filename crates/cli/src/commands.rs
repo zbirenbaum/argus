@@ -9,6 +9,8 @@ use clap::Subcommand;
 pub enum Command {
     /// Show agent status.
     Status,
+    /// Check supervisor health (K8s readiness probe).
+    Health,
     /// Pause all traced processes.
     Pause,
     /// Resume all traced processes.
@@ -73,10 +75,13 @@ pub enum Command {
         depth: Option<u32>,
     },
 
-    /// Print CAS object content as text.
+    /// Print CAS object content.
     Cat {
         /// Content hash (hex SHA-256).
         hash: String,
+        /// Output raw bytes instead of UTF-8 text.
+        #[arg(long)]
+        raw: bool,
     },
 
     /// Show diff between content versions or tree snapshots.

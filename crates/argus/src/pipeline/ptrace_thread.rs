@@ -20,7 +20,7 @@ use tracing::event;
 use tracing::Level;
 
 use crate::tracer::memory::{read_bytes, read_c_string, write_bytes};
-use crate::tracer::regs::{get_regs, set_regs, set_ret};
+use crate::tracer::regs::get_regs;
 
 use super::directive::PipelineDirective;
 use super::raw_stop::{RawSyscallStop, StopType, SyscallArgs};
