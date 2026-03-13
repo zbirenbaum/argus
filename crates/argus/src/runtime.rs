@@ -267,7 +267,7 @@ impl SupervisorRuntime {
         );
 
         let tree_stage = TreeStage::new(MerkleTree::new(), self.ctx.bus.clone(), 1000);
-        let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone());
+        let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone(), self.config.enrich.clone());
 
         let recorder: Option<RawStopRecorder> = None;
 
