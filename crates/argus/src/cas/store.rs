@@ -58,6 +58,33 @@ impl LocalCas {
         self.stats.snapshot()
     }
 
+    /// Store content using a caller-supplied hash, skipping rehashing.
+    ///
+    /// Used by pipeline sinks that already hold the hash from an earlier
+    /// pipeline stage so the write path avoids a redundant BLAKE3 pass.
+    /// The dedup guarantee holds: if the object already exists the call
+    /// returns immediately without writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the atomic write to disk fails.
+    pub fn put_with_hash(
+        &self,
+        hash: ContentHash,
+        data: &[u8],
+    ) -> Result<()> {
+        let path = self.object_path(&hash);
+        // TOCTOU is acceptable here for the same reason as in `put`: the
+        // rename is idempotent for identical content, and we prefer low
+        // overhead over strict once-exactly stats.
+        if path.exists() {
+            return Ok(());
+        }
+        self.atomic_write(&path, data)?;
+        self.stats.record_add(data.len() as u64);
+        Ok(())
+    }
+
     /// Write data atomically: temp file -> fsync -> rename.
     ///
     /// Uses `NamedTempFile` in the target directory to guarantee
@@ -298,5 +325,32 @@ mod tests {
         let snap = store.detailed_stats();
         // At least 1 add, at most 8 (races allowed), but no corruption.
         assert!(snap.objects_added >= 1 && snap.objects_added <= 8);
+    }
+
+    #[test]
+    fn put_with_hash_stores_and_deduplicates() {
+        let (_dir, store) = tmp_store();
+        let data = b"caller provides hash";
+        let hash = ContentHash::from_data(data);
+
+        store.put_with_hash(hash.clone(), data).expect("first put_with_hash");
+        assert!(store.exists(&hash).expect("exists"));
+        assert_eq!(store.get(&hash).expect("get"), data);
+
+        // Second call must be idempotent — no second stats increment.
+        store.put_with_hash(hash.clone(), data).expect("second put_with_hash");
+        let snap = store.detailed_stats();
+        assert_eq!(snap.objects_added, 1);
+    }
+
+    #[test]
+    fn put_with_hash_tracks_stats() {
+        let (_dir, store) = tmp_store();
+        let data = b"stats test";
+        let hash = ContentHash::from_data(data);
+        store.put_with_hash(hash, data).expect("put_with_hash");
+        let snap = store.detailed_stats();
+        assert_eq!(snap.objects_added, 1);
+        assert_eq!(snap.bytes_added, data.len() as u64);
     }
 }
