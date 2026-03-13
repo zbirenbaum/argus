@@ -143,7 +143,7 @@ impl Cas for LocalCas {
         event!(
             name: "cas.store.added",
             tracing::Level::DEBUG,
-            cas.hash = hash.as_str(),
+            cas.hash = %hash,
             cas.size = content.len(),
             "stored new CAS object",
         );

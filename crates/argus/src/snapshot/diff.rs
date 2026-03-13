@@ -43,9 +43,9 @@ pub struct DiffEntry {
 /// sorted by path.
 pub fn diff_trees(tree_a: &MerkleTree, tree_b: &MerkleTree) -> Vec<DiffEntry> {
     let files_a: BTreeMap<PathBuf, ContentHash> =
-        tree_a.files().map(|(p, h)| (p.to_path_buf(), h.clone())).collect();
+        tree_a.files().map(|(p, h)| (p.to_path_buf(), *h)).collect();
     let files_b: BTreeMap<PathBuf, ContentHash> =
-        tree_b.files().map(|(p, h)| (p.to_path_buf(), h.clone())).collect();
+        tree_b.files().map(|(p, h)| (p.to_path_buf(), *h)).collect();
 
     let dir_a = build_dir_tree(&files_a);
     let dir_b = build_dir_tree(&files_b);
@@ -96,8 +96,8 @@ fn diff_nodes(
                 diffs.push(DiffEntry {
                     path: path.to_path_buf(),
                     kind: DiffKind::Modified,
-                    old_hash: Some(ha.clone()),
-                    new_hash: Some(hb.clone()),
+                    old_hash: Some(*ha),
+                    new_hash: Some(*hb),
                 });
             }
         }
@@ -129,8 +129,8 @@ fn collect_all(
             diffs.push(DiffEntry {
                 path: path.to_path_buf(),
                 kind,
-                old_hash: if is_old { Some(h.clone()) } else { None },
-                new_hash: if is_old { None } else { Some(h.clone()) },
+                old_hash: if is_old { Some(*h) } else { None },
+                new_hash: if is_old { None } else { Some(*h) },
             });
         }
         DirNode::Dir(children) => {

@@ -9,6 +9,7 @@
 //! durable point-in-time snapshots.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -69,7 +70,7 @@ pub struct MerkleTree {
 
 impl Clone for MerkleTree {
     fn clone(&self) -> Self {
-        let cached = self.cached_root.lock().unwrap().clone();
+        let cached = *self.cached_root.lock().unwrap();
         Self {
             files: self.files.clone(),
             cached_root: Mutex::new(cached),
@@ -142,11 +143,11 @@ impl MerkleTree {
     pub fn root_hash(&self) -> ContentHash {
         let cached = self.cached_root.lock().unwrap();
         if let Some(ref h) = *cached {
-            return h.clone();
+            return *h;
         }
         drop(cached);
         let h = compute_root(&self.files);
-        *self.cached_root.lock().unwrap() = Some(h.clone());
+        *self.cached_root.lock().unwrap() = Some(h);
         h
     }
 
@@ -261,7 +262,7 @@ fn insert_into_tree(
         [] => {}
         [name] => {
             // Clone only at the leaf where ownership is required.
-            node.insert((*name).to_owned(), DirNode::File(hash.clone()));
+            node.insert((*name).to_owned(), DirNode::File(*hash));
         }
         [dir, rest @ ..] => {
             let entry = node
@@ -278,19 +279,14 @@ fn insert_into_tree(
 pub(crate) fn hash_dir_node(children: &BTreeMap<String, DirNode>) -> ContentHash {
     let mut hasher_input = Vec::new();
     for (name, node) in children {
-        // Avoid cloning File hashes — borrow the str representation directly.
-        let dir_hash: ContentHash;
-        let child_hash_str = match node {
-            DirNode::File(h) => h.as_str(),
-            DirNode::Dir(sub) => {
-                dir_hash = hash_dir_node(sub);
-                dir_hash.as_str()
-            }
+        let child_hash = match node {
+            DirNode::File(h) => *h,
+            DirNode::Dir(sub) => hash_dir_node(sub),
         };
         // Format: "name\0hash\n" — deterministic, sorted by BTreeMap.
         hasher_input.extend_from_slice(name.as_bytes());
         hasher_input.push(0);
-        hasher_input.extend_from_slice(child_hash_str.as_bytes());
+        write!(&mut hasher_input, "{child_hash}").expect("Vec write is infallible");
         hasher_input.push(b'\n');
     }
     ContentHash::from_data(&hasher_input)
@@ -316,7 +312,7 @@ fn store_dir_node(
     let mut entries = BTreeMap::new();
     for (name, node) in children {
         let child_hash = match node {
-            DirNode::File(h) => h.clone(),
+            DirNode::File(h) => *h,
             DirNode::Dir(sub) => store_dir_node(cas, sub)?,
         };
         entries.insert(name.clone(), child_hash);
@@ -345,11 +341,11 @@ fn walk_tree_object(
                 if serde_json::from_slice::<TreeObject>(&child_data).is_ok() {
                     walk_tree_object(cas, child_hash, &child_path, files)?;
                 } else {
-                    files.insert(child_path, child_hash.clone());
+                    files.insert(child_path, *child_hash);
                 }
             }
             Err(_) => {
-                files.insert(child_path, child_hash.clone());
+                files.insert(child_path, *child_hash);
             }
         }
     }

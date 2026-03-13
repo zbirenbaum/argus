@@ -46,7 +46,7 @@ impl TreeStage {
         let hash = content_hash(event)?;
 
         let mut tree = self.tree.lock().unwrap();
-        tree.update(path, hash.clone());
+        tree.update(path, hash);
         let root = tree.root_hash();
 
         // Emit checkpoint after every N mutations.
@@ -89,9 +89,9 @@ fn mutated_path(c: &Classification) -> Option<std::path::PathBuf> {
 /// Extract the content hash from a captured event for tree storage.
 fn content_hash(event: &CapturedEvent) -> Option<ContentHash> {
     match &event.content {
-        CapturedContent::FileWrite { after_hash, .. } => after_hash.clone(),
-        CapturedContent::FileRead { content_hash, .. } => content_hash.clone(),
-        CapturedContent::FileDelete { content_hash } => content_hash.clone(),
+        CapturedContent::FileWrite { after_hash, .. } => *after_hash,
+        CapturedContent::FileRead { content_hash, .. } => *content_hash,
+        CapturedContent::FileDelete { content_hash } => *content_hash,
         _ => None,
     }
 }

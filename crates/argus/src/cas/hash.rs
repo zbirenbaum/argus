@@ -32,25 +32,22 @@ impl HashAlgorithm {
 
     /// Expected hex-encoded digest length for this algorithm.
     fn hex_len(self) -> usize {
-        match self {
-            Self::Blake3 => 64,
-            Self::Sha256 => 64,
-        }
+        // Both BLAKE3 and SHA-256 produce 32-byte (256-bit) digests,
+        // which encode to exactly 64 lowercase hex characters.
+        64
     }
 }
 
 /// Algorithm-prefixed content hash used as a CAS key.
 ///
-/// Internally stores the canonical string form `{algorithm}:{hex_digest}`.
-/// The digest portion is split into a 2-char directory prefix and the
-/// remainder for the storage path layout.
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// Stores a raw 32-byte digest alongside the algorithm tag. This keeps
+/// the type `Copy` (33 bytes, no heap allocation) while `Display` and
+/// `Serialize` produce the canonical `{algorithm}:{hex_digest}` form.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash {
     algorithm: HashAlgorithm,
-    /// Full canonical form: `blake3:abcd1234...`
-    canonical: String,
-    /// Byte offset where the hex digest begins (after `algorithm:`).
-    digest_offset: usize,
+    /// Raw digest bytes — both BLAKE3 and SHA-256 are 32 bytes.
+    digest: [u8; 32],
 }
 
 impl Serialize for ContentHash {
@@ -58,7 +55,7 @@ impl Serialize for ContentHash {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.canonical)
+        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -100,12 +97,8 @@ impl TryFrom<String> for ContentHash {
             return Err(InvalidHashError::BadCharacters);
         }
 
-        let digest_offset = algo_str.len() + 1;
-        Ok(Self {
-            algorithm,
-            canonical: s,
-            digest_offset,
-        })
+        let digest = hex_decode_32(hex).map_err(|_| InvalidHashError::BadCharacters)?;
+        Ok(Self { algorithm, digest })
     }
 }
 
@@ -134,40 +127,30 @@ impl ContentHash {
 
     /// Compute a BLAKE3 hash from raw bytes.
     pub fn blake3(data: &[u8]) -> Self {
-        let digest = blake3::hash(data);
-        let hex = digest.to_hex();
-        let algo = HashAlgorithm::Blake3;
-        let canonical = format!("{}:{hex}", algo.as_str());
-        let digest_offset = algo.as_str().len() + 1;
+        let raw = blake3::hash(data);
         Self {
-            algorithm: algo,
-            canonical,
-            digest_offset,
+            algorithm: HashAlgorithm::Blake3,
+            digest: *raw.as_bytes(),
         }
     }
 
     /// Compute a SHA-256 hash from raw bytes.
     pub fn sha256(data: &[u8]) -> Self {
-        let digest = Sha256::digest(data);
-        let hex = hex_encode(&digest);
-        let algo = HashAlgorithm::Sha256;
-        let canonical = format!("{}:{hex}", algo.as_str());
-        let digest_offset = algo.as_str().len() + 1;
+        let raw = Sha256::digest(data);
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&raw);
         Self {
-            algorithm: algo,
-            canonical,
-            digest_offset,
+            algorithm: HashAlgorithm::Sha256,
+            digest,
         }
     }
 
-    /// Full canonical string: `blake3:abcd1234...`.
-    pub fn as_str(&self) -> &str {
-        &self.canonical
-    }
-
-    /// Hex digest only, without algorithm prefix.
-    pub fn digest(&self) -> &str {
-        &self.canonical[self.digest_offset..]
+    /// Hex-encoded digest, without algorithm prefix.
+    ///
+    /// Allocates on each call; use `Display` for logging to avoid the
+    /// allocation in disabled tracing levels.
+    pub fn digest(&self) -> String {
+        hex_encode(&self.digest)
     }
 
     /// Algorithm used for this hash.
@@ -180,31 +163,32 @@ impl ContentHash {
         self.algorithm.as_str()
     }
 
-    /// First two hex characters of the digest, used as the directory prefix.
-    pub fn prefix(&self) -> &str {
-        &self.canonical[self.digest_offset..self.digest_offset + 2]
+    /// First two hex characters of the digest, used as the CAS directory prefix.
+    pub fn prefix(&self) -> String {
+        hex_encode(&self.digest[..1])
     }
 
-    /// Remaining hex characters after the 2-char prefix, used as filename.
-    pub fn suffix(&self) -> &str {
-        &self.canonical[self.digest_offset + 2..]
+    /// Remaining 62 hex characters after the 2-char prefix, used as filename.
+    pub fn suffix(&self) -> String {
+        // Encode all 32 bytes then skip the first 2 hex chars (1 byte).
+        let full = hex_encode(&self.digest);
+        full[2..].to_owned()
     }
 }
 
 impl fmt::Display for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.canonical)
+        write!(f, "{}:{}", self.algorithm.as_str(), hex_encode(&self.digest))
     }
 }
 
 impl fmt::Debug for ContentHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ContentHash({canonical})", canonical = &self.canonical)
+        write!(f, "ContentHash({}:{})", self.algorithm.as_str(), hex_encode(&self.digest))
     }
 }
 
-/// Format a byte slice as lowercase hex without allocating an
-/// intermediate `Vec`.
+/// Format a byte slice as lowercase hex.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -212,6 +196,26 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push(HEX_CHARS[(b & 0x0f) as usize]);
     }
     s
+}
+
+/// Decode exactly 64 lowercase hex chars into a 32-byte array.
+fn hex_decode_32(hex: &str) -> Result<[u8; 32], ()> {
+    let mut out = [0u8; 32];
+    let bytes = hex.as_bytes();
+    for (i, chunk) in bytes.chunks(2).enumerate() {
+        let hi = hex_val(chunk[0]).ok_or(())?;
+        let lo = hex_val(chunk[1]).ok_or(())?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
 }
 
 const HEX_CHARS: [char; 16] = [
@@ -241,7 +245,7 @@ mod tests {
     fn default_is_blake3() {
         let h = ContentHash::from_data(b"test");
         assert_eq!(h.algorithm(), HashAlgorithm::Blake3);
-        assert!(h.as_str().starts_with("blake3:"));
+        assert!(format!("{h}").starts_with("blake3:"));
     }
 
     #[test]
@@ -253,7 +257,7 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
         assert_eq!(
-            h.as_str(),
+            format!("{h}"),
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
@@ -285,9 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn display_matches_as_str() {
+    fn display_is_canonical_form() {
         let h = ContentHash::from_data(b"display test");
-        assert_eq!(format!("{h}"), h.as_str());
+        let s = format!("{h}");
+        assert!(s.starts_with("blake3:"));
+        assert_eq!(s.len(), "blake3:".len() + 64);
     }
 
     #[test]
@@ -295,7 +301,7 @@ mod tests {
         let h = ContentHash::from_data(b"debug test");
         let dbg = format!("{h:?}");
         assert!(dbg.contains("ContentHash("));
-        assert!(dbg.contains(h.as_str()));
+        assert!(dbg.contains(&format!("{h}")));
     }
 
     #[test]
@@ -359,7 +365,7 @@ mod tests {
     #[test]
     fn try_from_valid_string() {
         let h = ContentHash::from_data(b"test");
-        let s = h.as_str().to_owned();
+        let s = format!("{h}");
         let h2 = ContentHash::try_from(s).expect("valid hash");
         assert_eq!(h, h2);
     }
@@ -380,6 +386,13 @@ mod tests {
             h.digest(),
             "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
         );
+    }
+
+    #[test]
+    fn copy_semantics() {
+        let a = ContentHash::from_data(b"copy test");
+        let b = a; // copy, not move
+        assert_eq!(a, b);
     }
 }
 

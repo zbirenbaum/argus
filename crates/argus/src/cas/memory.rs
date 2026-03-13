@@ -36,7 +36,7 @@ impl Cas for MemoryCas {
 
     fn put(&self, content: &[u8]) -> Result<ContentHash> {
         let hash = ContentHash::from_data(content);
-        self.store.insert(hash.clone(), content.to_vec());
+        self.store.insert(hash, content.to_vec());
         Ok(hash)
     }
 

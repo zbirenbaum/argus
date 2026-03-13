@@ -119,13 +119,13 @@ impl KeylogWatcher {
             let raw = format!("{} {} {}", line.label, line.client_random, line.secret);
             let data = raw.into_bytes();
             let hash = ContentHash::from_data(&data);
-            bus.emit(Record::Content { hash: hash.clone(), data });
+            bus.emit(Record::Content { hash, data });
 
             event!(
                 name: "net.keylog.captured",
                 Level::DEBUG,
                 keylog.label = %line.label,
-                keylog.hash = hash.as_str(),
+                keylog.hash = %hash,
                 "captured TLS key material",
             );
 
@@ -133,7 +133,7 @@ impl KeylogWatcher {
                 pid,
                 fd,
                 sni: None,
-                keylog_line_hash: Some(hash.as_str().to_owned()),
+                keylog_line_hash: Some(hash.to_string()),
             });
         }
 

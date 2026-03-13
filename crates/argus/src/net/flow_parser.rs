@@ -130,7 +130,7 @@ fn store_headers(
     }
     let data = serde_json::to_vec(headers).context("serialize headers")?;
     let hash = emit_content(bus, data);
-    Ok(Some(hash.as_str().to_owned()))
+    Ok(Some(hash.to_string()))
 }
 
 /// Decode base64 body, emit a Content record to the bus.
@@ -152,13 +152,13 @@ fn store_body(
         .context("decode base64 body")?;
 
     let hash = emit_content(bus, decoded);
-    Ok(Some(hash.as_str().to_owned()))
+    Ok(Some(hash.to_string()))
 }
 
 /// Hash data, emit a Content record to the bus, and return the hash.
 fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
     let hash = ContentHash::from_data(&data);
-    bus.emit(Record::Content { hash: hash.clone(), data });
+    bus.emit(Record::Content { hash, data });
     hash
 }
 

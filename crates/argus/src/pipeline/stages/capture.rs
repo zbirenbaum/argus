@@ -102,7 +102,7 @@ impl CaptureStage {
         let _guard = lock.lock().await;
 
         // Use tracked in-memory hash instead of racy filesystem read.
-        let before_hash = self.file_state.get(path).map(|h| h.clone());
+        let before_hash = self.file_state.get(path).map(|h| *h);
 
         let after_hash = if level == CaptureLevel::Full {
             self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
@@ -114,8 +114,8 @@ impl CaptureStage {
         };
 
         // Update tracked state so the next write sees this write's hash.
-        if let Some(ref hash) = after_hash {
-            self.file_state.insert(path.to_path_buf(), hash.clone());
+        if let Some(hash) = after_hash {
+            self.file_state.insert(path.to_path_buf(), hash);
         }
 
         CapturedContent::FileWrite { before_hash, after_hash, size: len }
@@ -170,21 +170,21 @@ impl CaptureStage {
 fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
     if data.len() < CHUNK_THRESHOLD {
         let hash = ContentHash::from_data(&data);
-        bus.emit(Record::Content { hash: hash.clone(), data });
+        bus.emit(Record::Content { hash, data });
         return hash;
     }
 
     let mut chunk_hashes = Vec::new();
     for chunk in data.chunks(CHUNK_SIZE) {
         let ch = ContentHash::from_data(chunk);
-        bus.emit(Record::Content { hash: ch.clone(), data: chunk.to_vec() });
+        bus.emit(Record::Content { hash: ch, data: chunk.to_vec() });
         chunk_hashes.push(ch);
     }
 
     // Manifest hash is derived from the concatenated chunk hash strings.
-    let manifest_input: String = chunk_hashes.iter().map(|h| h.as_str()).collect::<Vec<_>>().join("\n");
+    let manifest_input: String = chunk_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>().join("\n");
     let manifest_hash = ContentHash::from_data(manifest_input.as_bytes());
-    bus.emit(Record::Manifest { hash: manifest_hash.clone(), chunks: chunk_hashes });
+    bus.emit(Record::Manifest { hash: manifest_hash, chunks: chunk_hashes });
     manifest_hash
 }
 
