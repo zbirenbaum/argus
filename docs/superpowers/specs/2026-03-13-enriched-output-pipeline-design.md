@@ -316,6 +316,71 @@ CapturedContent carries `Option<Vec<u8>>` through the pipeline. To bound memory:
 - Events are stamped and emitted to outputs immediately — bytes do not accumulate across events.
 - The pipeline processes one event at a time per source (ptrace loop is serial). Peak memory for enrichment is bounded by `max_inline_bytes × active_pipelines` (3 pipelines × 256KB = 768KB worst case).
 
+### Configuration defaults
+
+**Every config section is optional.** A bare `supervisor.yaml` with no `enrich`, `redact`, or `outputs` keys works out of the box — the supervisor enriches everything, redacts common secrets, and emits JSONL to stdout.
+
+```yaml
+# This is the ENTIRE default config — you get all of this by writing NOTHING:
+enrich:                               # ← section optional, all defaults below
+  enabled: true
+  max_inline_bytes: 262144            # 256KB
+  stdio_text:    { enabled: true }
+  pipe_data:     { enabled: true }
+  pty_data:      { enabled: true }
+  file_content:  { enabled: true }
+  delete_content:{ enabled: true }
+  truncate_content:{ enabled: true }
+  http_headers:  { enabled: true }
+  http_bodies:   { enabled: true }
+  exec_envp:     { enabled: true }
+
+redact:                               # ← section optional, all defaults below
+  exclude_paths:                      # Tier 1: path deny-list
+    - "**/*.env"
+    - "**/*.pem"
+    - "**/*.key"
+    - "**/credentials.json"
+    - "**/.ssh/**"
+  drop_fields:                        # Tier 2: field-level drop
+    - "http_request.headers.authorization"
+    - "http_request.headers.cookie"
+    - "http_request.headers.x-api-key"
+  scan_fields:                        # Tier 3: regex-eligible fields
+    - "http_request.headers"
+    - "http_request.body"
+    - "http_response.headers"
+    - "http_response.body"
+    - "stdio.text"
+    - "exec.envp"
+  builtins:
+    api_keys: true
+    credentials: true
+    private_keys: true
+    aws_keys: true
+  patterns: []                        # no custom patterns by default
+
+outputs:                              # ← section optional, default: stdout
+  - type: stdout
+```
+
+**Override only what you need.** Unspecified fields keep their defaults:
+
+```yaml
+# Only change: disable file content enrichment, add a custom redaction pattern
+enrich:
+  file_content:
+    enabled: false
+
+redact:
+  patterns:
+    - name: internal_id
+      regex: "INT-[A-Z0-9]{12}"
+      replacement: "[REDACTED]"
+```
+
+All other `enrich` categories remain enabled, all default `redact` rules still apply, outputs still go to stdout.
+
 ### Enrichment config
 
 Controls what captured data gets inlined into events. All categories default to enabled. Operators can disable categories or set per-category size limits.
