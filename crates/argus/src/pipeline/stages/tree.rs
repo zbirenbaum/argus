@@ -12,27 +12,26 @@ use tracing::event;
 use tracing::Level;
 
 use crate::cas::ContentHash;
-use crate::pipeline::bus::RecordBus;
 use crate::pipeline::captured::{CapturedContent, CapturedEvent};
 use crate::pipeline::classified::Classification;
-use crate::pipeline::record::Record;
+use crate::pipeline::durability::DurabilityLayer;
 use crate::snapshot::MerkleTree;
 
-/// Stage that maintains the in-memory Merkle tree and emits checkpoints.
+/// Stage that maintains the in-memory Merkle tree and persists checkpoints.
 pub struct TreeStage {
     pub tree: Mutex<MerkleTree>,
-    pub bus: RecordBus,
-    /// How many mutating events between checkpoint records.
+    pub durability: DurabilityLayer,
+    /// How many mutating events between checkpoint persists.
     pub checkpoint_interval: u64,
     pub events_since_checkpoint: AtomicU64,
 }
 
 impl TreeStage {
-    /// Create a new stage from an existing tree and record bus.
-    pub fn new(tree: MerkleTree, bus: RecordBus, checkpoint_interval: u64) -> Self {
+    /// Create a new stage from an existing tree and durability layer.
+    pub fn new(tree: MerkleTree, durability: DurabilityLayer, checkpoint_interval: u64) -> Self {
         Self {
             tree: Mutex::new(tree),
-            bus,
+            durability,
             checkpoint_interval,
             events_since_checkpoint: AtomicU64::new(0),
         }
@@ -57,19 +56,20 @@ impl TreeStage {
             "tree updated",
         );
 
-        // Emit checkpoint after every N mutations.
+        // Persist checkpoint after every N mutations.
         let count = self.events_since_checkpoint.fetch_add(1, Ordering::Relaxed) + 1;
         if count >= self.checkpoint_interval {
             self.events_since_checkpoint.store(0, Ordering::Relaxed);
             let seq = count;
             if let Ok(data) = bincode::serialize(&*tree) {
-                let cp_record = Record::Checkpoint { seq, data };
-                self.bus.emit(cp_record);
+                let hash = ContentHash::from_data(&data);
+                let _ = self.durability.persist_with_hash(hash.clone(), &data);
+                self.durability.upload_async(hash, data);
                 event!(
                     name: "tree_stage.checkpoint",
                     Level::DEBUG,
                     seq,
-                    "emitted checkpoint at event {{seq}}",
+                    "persisted checkpoint at event {{seq}}",
                 );
             }
         }

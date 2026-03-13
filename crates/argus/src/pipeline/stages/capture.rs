@@ -18,12 +18,11 @@ use tokio::sync::Mutex;
 use tracing::event;
 use tracing::Level;
 use crate::cas::ContentHash;
-use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::{CaptureLevel, CapturePolicy};
 use crate::pipeline::captured::{CapturedContent, CapturedEvent};
 use crate::pipeline::classified::{ClassifiedEvent, Classification};
+use crate::pipeline::durability::DurabilityLayer;
 use crate::pipeline::ptrace_thread::PtraceHandle;
-use crate::pipeline::record::Record;
 
 /// Minimum blob size (bytes) before chunked emission is used.
 ///
@@ -37,7 +36,7 @@ const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// Stage that captures content from traced syscalls.
 pub struct CaptureStage {
     pub handle: PtraceHandle,
-    pub bus: RecordBus,
+    pub durability: DurabilityLayer,
     pub policy: CapturePolicy,
     /// Per-path mutex that serializes concurrent writes to the same file.
     pub write_locks: DashMap<PathBuf, Mutex<()>>,
@@ -58,14 +57,14 @@ impl CaptureStage {
     /// Create a new capture stage.
     pub fn new(
         handle: PtraceHandle,
-        bus: RecordBus,
+        durability: DurabilityLayer,
         policy: CapturePolicy,
         file_state: Arc<DashMap<PathBuf, ContentHash>>,
         max_inline_bytes: usize,
     ) -> Self {
         Self {
             handle,
-            bus,
+            durability,
             policy,
             write_locks: DashMap::new(),
             file_state,
@@ -141,7 +140,7 @@ impl CaptureStage {
                 Ok(d) => {
                     self.policy.record_bytes(pid.as_raw() as u32, d.len());
                     let inline = inline_slice(&d, self.max_inline_bytes);
-                    let hash = emit_content(&self.bus, d);
+                    let hash = emit_content(&self.durability, d);
                     (Some(hash), inline)
                 }
                 Err(_) => (None, None),
@@ -177,7 +176,7 @@ impl CaptureStage {
             Ok(d) => {
                 self.policy.record_bytes(pid.as_raw() as u32, d.len());
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = emit_content(&self.bus, d);
+                let hash = emit_content(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -190,7 +189,7 @@ impl CaptureStage {
         let (content_hash, inline_data) = match self.handle.read_file(path.to_path_buf()).await {
             Ok(d) => {
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = hash_and_emit(&self.bus, d);
+                let hash = hash_and_emit(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -204,7 +203,7 @@ impl CaptureStage {
         let (before_hash, before_data) = match self.handle.read_file(path.to_path_buf()).await {
             Ok(d) => {
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = hash_and_emit(&self.bus, d);
+                let hash = hash_and_emit(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -219,7 +218,7 @@ impl CaptureStage {
                 let truncated_len = (new_len as usize).min(d.len());
                 let truncated = &d[..truncated_len];
                 let inline = inline_slice(truncated, self.max_inline_bytes);
-                let hash = emit_content(&self.bus, truncated.to_vec());
+                let hash = emit_content(&self.durability, truncated.to_vec());
                 (Some(hash), inline)
             }
             // If the file is unreadable after-truncation hash is unavailable.
@@ -239,7 +238,7 @@ impl CaptureStage {
             Ok(d) => {
                 self.policy.record_bytes(pid.as_raw() as u32, d.len());
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = emit_content(&self.bus, d);
+                let hash = emit_content(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -255,34 +254,41 @@ fn inline_slice(data: &[u8], cap: usize) -> Option<Vec<u8>> {
     if data.len() <= cap { Some(data.to_vec()) } else { None }
 }
 
-/// Emit one or more `Content` records for `data`, returning the root hash.
+/// Persist one or more content blobs via DurabilityLayer, returning the root hash.
 ///
-/// Data under `CHUNK_THRESHOLD` emits a single Content record.
-/// Larger data is chunked into `CHUNK_SIZE` pieces and a Manifest is emitted.
-fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
+/// Data under `CHUNK_THRESHOLD` is stored as a single object. Larger data is
+/// split into `CHUNK_SIZE` pieces persisted individually, with a manifest object
+/// whose hash is computed from the concatenated chunk hash strings. The manifest
+/// hash is returned so callers always have a single stable content identifier.
+fn emit_content(durability: &DurabilityLayer, data: Vec<u8>) -> ContentHash {
     if data.len() < CHUNK_THRESHOLD {
         let hash = ContentHash::from_data(&data);
-        bus.emit(Record::Content { hash, data });
+        let _ = durability.persist_with_hash(hash.clone(), &data);
+        durability.upload_async(hash.clone(), data);
         return hash;
     }
 
     let mut chunk_hashes = Vec::new();
     for chunk in data.chunks(CHUNK_SIZE) {
         let ch = ContentHash::from_data(chunk);
-        bus.emit(Record::Content { hash: ch, data: chunk.to_vec() });
+        let _ = durability.persist_with_hash(ch.clone(), chunk);
+        durability.upload_async(ch.clone(), chunk.to_vec());
         chunk_hashes.push(ch);
     }
 
-    // Manifest hash is derived from the concatenated chunk hash strings.
+    // Manifest hash is derived from the concatenated chunk hash strings so it
+    // is deterministic and content-addressable independent of upload order.
     let manifest_input: String = chunk_hashes.iter().map(|h| h.to_string()).collect::<Vec<_>>().join("\n");
     let manifest_hash = ContentHash::from_data(manifest_input.as_bytes());
-    bus.emit(Record::Manifest { hash: manifest_hash, chunks: chunk_hashes });
+    let manifest_data = serde_json::to_vec(&chunk_hashes).unwrap_or_default();
+    let _ = durability.persist_with_hash(manifest_hash.clone(), &manifest_data);
+    durability.upload_async(manifest_hash.clone(), manifest_data);
     manifest_hash
 }
 
-/// Hash and emit content, returning the hash without policy accounting.
-fn hash_and_emit(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
-    emit_content(bus, data)
+/// Hash and persist content, returning the hash; no policy accounting.
+fn hash_and_emit(durability: &DurabilityLayer, data: Vec<u8>) -> ContentHash {
+    emit_content(durability, data)
 }
 
 #[cfg(test)]

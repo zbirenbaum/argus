@@ -28,7 +28,7 @@ pub async fn run(
 ) -> Result<()> {
     let flow_path = mitmdump.as_ref().and_then(|m| m.flow_output_path().cloned());
 
-    let runtime = SupervisorRuntime::new(config.clone()).await?;
+    let mut runtime = SupervisorRuntime::new(config.clone()).await?;
 
     let shared = runtime.shared_state();
     let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(false);

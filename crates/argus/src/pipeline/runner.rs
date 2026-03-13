@@ -4,7 +4,7 @@
 //! [`PipelineRunner`] owns every pipeline stage and the [`PtraceStream`]
 //! source. It runs the main processing loop until the traced process exits,
 //! forwarding each stop through classify → rules → approval → capture →
-//! tree → stamp → bus.
+//! tree → stamp → redact → outputs (user-facing) + bus (internal sinks).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,11 +21,13 @@ use crate::events::control;
 use crate::pipeline::{PtraceStream, RawStopRecorder, RecordBus};
 use crate::pipeline::classified::Classification;
 use crate::pipeline::directive::PipelineDirective;
+use crate::pipeline::outputs::OutputList;
 use crate::pipeline::raw_stop::StopType;
 use crate::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
 };
 use crate::pipeline::stages::check_rules::RuleAction;
+use crate::pipeline::stages::redact::RedactStage;
 
 /// Owns all pipeline stages and drives the main processing loop.
 ///
@@ -41,6 +43,8 @@ pub struct PipelineRunner {
     tree: TreeStage,
     stamp: StampStage,
     bus: RecordBus,
+    outputs: OutputList,
+    redact: RedactStage,
     recorder: Option<RawStopRecorder>,
     paused: Arc<AtomicBool>,
     shared: SharedState,
@@ -61,13 +65,15 @@ impl PipelineRunner {
         tree: TreeStage,
         stamp: StampStage,
         bus: RecordBus,
+        outputs: OutputList,
+        redact: RedactStage,
         recorder: Option<RawStopRecorder>,
         paused: Arc<AtomicBool>,
         shared: SharedState,
     ) -> Self {
         Self {
             ptrace, classify, rules, approvals, capture,
-            tree, stamp, bus, recorder, paused, shared,
+            tree, stamp, bus, outputs, redact, recorder, paused, shared,
         }
     }
 
@@ -137,13 +143,15 @@ impl PipelineRunner {
                             pid: classified.pid,
                             errno: libc::EPERM,
                         });
-                        let blocked = self.stamp.stamp_blocked(
+                        let mut blocked = self.stamp.stamp_blocked(
                             classified.pid.as_raw() as u32,
                             classified.syscall_name(),
                             classified.primary_path(),
                             // description is the last use of rule_match; move instead of clone
                             rule_match.description,
                         );
+                        self.redact.redact(&mut blocked);
+                        self.outputs.emit(&blocked);
                         self.bus.emit(crate::pipeline::Record::Event(blocked));
                         continue;
                     }
@@ -229,27 +237,33 @@ impl PipelineRunner {
                 snapshot.store(self.shared.cas().as_ref()).ok()
             };
 
-            if let Some(evt) = self.stamp.stamp(captured, tree_hash) {
+            if let Some(mut evt) = self.stamp.stamp(captured, tree_hash) {
                 event!(
                     name: "pipeline.ptrace.emitted",
                     Level::DEBUG,
                     event.seq = evt.seq,
                     event.type_ = evt.payload.event_type_tag(),
-                    "event emitted to bus",
+                    "event emitted to bus and outputs",
                 );
                 // Use the CAS storage hash (not root_hash) for restore
                 // lookups since MerkleTree::load expects the CAS hash.
                 if let Some(ref th) = cas_tree_hash {
                     self.shared.insert_tree_hash(evt.seq, th.to_string());
                 }
+                // Apply redaction before delivering to user-facing outputs.
+                self.redact.redact(&mut evt);
+                // Enriched user-facing output (stdout, file, etc.).
+                self.outputs.emit(&evt);
+                // Internal sinks (event log, index, broadcast).
                 self.bus.emit(crate::pipeline::Record::Event(evt));
             }
         }
 
-        event!(name: "pipeline.ptrace.stopped", Level::INFO, "ptrace pipeline finished, shutting down bus");
-        // Flush all sinks before the runner is dropped. The runtime hands
-        // ownership of the bus to the runner via into_pipeline, so shutdown
-        // must happen here rather than in the caller.
+        event!(name: "pipeline.ptrace.stopped", Level::INFO, "ptrace pipeline finished, shutting down outputs and bus");
+        // Flush enriched outputs first, then internal sinks. The runtime hands
+        // ownership of both to the runner via into_pipeline, so shutdown must
+        // happen here rather than in the caller.
+        let _ = self.outputs.shutdown();
         self.bus.shutdown_all();
     }
 

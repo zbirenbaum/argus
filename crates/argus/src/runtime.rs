@@ -20,22 +20,25 @@ use tracing::{Level, event};
 use crate::api::state::{SharedState, new_shared_state};
 use crate::approver::Approvers;
 use crate::cas::{Cas, ContentHash, LocalCas};
-use crate::config::SupervisorConfig;
+use crate::config::{OutputConfig, SupervisorConfig};
 use crate::events::{Event, EventPayload, SequenceGenerator};
 use crate::events::snapshot::{InitialFile, InitialState};
 use crate::index::{PathIndex, PidIndex, TypeIndex};
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::CapturePolicy;
 use crate::pipeline::context::PipelineContext;
+use crate::pipeline::durability::DurabilityLayer;
+use crate::pipeline::outputs::{FileOutput, OutputList, StdoutOutput};
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
 use crate::pipeline::sink::Sink;
 use crate::pipeline::sinks::{
-    BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink, StdoutSink,
+    BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink,
 };
 use crate::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
 };
+use crate::pipeline::stages::redact::RedactStage;
 use crate::pipeline::ptrace_thread::PtraceStream;
 use crate::pipeline::replay::RawStopRecorder;
 use crate::snapshot::MerkleTree;
@@ -54,6 +57,9 @@ pub struct SupervisorRuntime {
     config: SupervisorConfig,
     ctx: PipelineContext,
     shared: SharedState,
+    durability: DurabilityLayer,
+    outputs: OutputList,
+    redact: RedactStage,
 }
 
 impl SupervisorRuntime {
@@ -77,6 +83,23 @@ impl SupervisorRuntime {
         .context("failed to initialize event log")?;
         let upload_pool = build_upload_pool(&config).await?;
 
+        // Build a DurabilityLayer for CaptureStage and TreeStage. When S3 is
+        // configured we also attach a DigestCache so upload_async skips objects
+        // that are already confirmed remote.
+        let durability_cas = LocalCas::new(cas_path.clone())
+            .context("failed to initialize durability CAS")?;
+        let digest_cache_for_durability = if upload_pool.is_some() {
+            let cache_path = data_dir.join("digest-cache.bin");
+            Some(Arc::new(Mutex::new(DigestCache::new(cache_path))))
+        } else {
+            None
+        };
+        let durability = DurabilityLayer::new(
+            durability_cas,
+            upload_pool.clone(),
+            digest_cache_for_durability,
+        );
+
         let (broadcast_tx, _) = broadcast::channel::<Event>(4096);
         let bus = build_bus(sink_cas, event_log, upload_pool, &config, broadcast_tx);
 
@@ -89,7 +112,10 @@ impl SupervisorRuntime {
         let shared = new_shared_state(config.agent_id.clone(), api_cas, bus);
         shared.store_rules(config.build_ruleset());
 
-        Ok(Self { config, ctx, shared })
+        let outputs = build_outputs(&config);
+        let redact = RedactStage::new(&config.redact);
+
+        Ok(Self { config, ctx, shared, durability, outputs, redact })
     }
 
     /// Shared state handle for the API server.
@@ -97,8 +123,8 @@ impl SupervisorRuntime {
         self.shared.clone()
     }
 
-    /// Emit the `AgentStart` control event through the bus.
-    pub fn emit_agent_start(&self) {
+    /// Emit the `AgentStart` control event through outputs and the bus.
+    pub fn emit_agent_start(&mut self) {
         let nspid = crate::config::read_nspid_pair();
 
         let payload = EventPayload::AgentStart(crate::events::control::AgentStart {
@@ -115,12 +141,14 @@ impl SupervisorRuntime {
             container: std::env::var("CONTAINER_NAME").ok(),
         });
 
-        let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        self.redact.redact(&mut evt);
+        self.outputs.emit(&evt);
         self.ctx.bus.emit(Record::Event(evt));
     }
 
     /// Walk the workspace and emit `InitialFile` + `InitialState` events.
-    pub fn emit_initial_state(&self) {
+    pub fn emit_initial_state(&mut self) {
         use std::os::unix::fs::MetadataExt;
 
         let workspace = &self.config.workspace_dir;
@@ -152,7 +180,9 @@ impl SupervisorRuntime {
                 size,
                 mode,
             });
-            let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+            let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+            self.redact.redact(&mut evt);
+            self.outputs.emit(&evt);
             self.ctx.bus.emit(Record::Event(evt));
 
             file_count += 1;
@@ -170,7 +200,9 @@ impl SupervisorRuntime {
             file_count,
             total_size,
         });
-        let evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        let mut evt = Event::new(&self.ctx.seq, self.config.agent_id.clone(), payload);
+        self.redact.redact(&mut evt);
+        self.outputs.emit(&evt);
         self.ctx.bus.emit(Record::Event(evt));
     }
 
@@ -260,13 +292,19 @@ impl SupervisorRuntime {
         let policy = CapturePolicy::default_full();
         let capture_stage = CaptureStage::new(
             handle.clone(),
-            self.ctx.bus.clone(),
+            self.durability,
             policy,
             file_state,
             self.config.enrich.max_inline_bytes,
         );
 
-        let tree_stage = TreeStage::new(MerkleTree::new(), self.ctx.bus.clone(), 1000);
+        // Build a second DurabilityLayer for TreeStage. Both share the same
+        // LocalCas root and upload pool, but each holds its own LocalCas handle
+        // (which is cheap — it is just a path wrapper with no open file handles).
+        let tree_cas = LocalCas::new(self.config.data_dir.join("cas"))
+            .expect("failed to initialize tree-stage CAS");
+        let tree_durability = DurabilityLayer::new(tree_cas, None, None);
+        let tree_stage = TreeStage::new(MerkleTree::new(), tree_durability, 1000);
         let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone(), self.config.enrich.clone());
 
         let recorder: Option<RawStopRecorder> = None;
@@ -280,6 +318,8 @@ impl SupervisorRuntime {
             tree_stage,
             stamp_stage,
             self.ctx.bus,
+            self.outputs,
+            self.redact,
             recorder,
             self.shared.pause_flag(),
             self.shared,
@@ -317,7 +357,11 @@ async fn build_upload_pool(config: &SupervisorConfig) -> Result<Option<Arc<Uploa
     Ok(Some(Arc::new(pool)))
 }
 
-/// Constructs the `RecordBus` from all configured sinks.
+/// Constructs the `RecordBus` from internal sinks only.
+///
+/// `StdoutSink` is intentionally excluded: enriched user-facing output is now
+/// handled by `OutputList` (with redaction applied) before the bus receives
+/// each event.
 fn build_bus(
     local_cas: LocalCas,
     event_log: EventLog,
@@ -326,7 +370,6 @@ fn build_bus(
     broadcast_tx: broadcast::Sender<Event>,
 ) -> RecordBus {
     let mut sinks: Vec<Arc<Mutex<dyn Sink>>> = vec![
-        Arc::new(Mutex::new(StdoutSink::new())),
         Arc::new(Mutex::new(LocalCasSink::new(local_cas))),
         Arc::new(Mutex::new(EventLogSink::new(event_log))),
         Arc::new(Mutex::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new()))),
@@ -344,6 +387,43 @@ fn build_bus(
     }
 
     RecordBus::new(sinks)
+}
+
+/// Constructs an `OutputList` from the configured output destinations.
+///
+/// `UnixSocket` and `Http` outputs are not yet implemented; they are skipped
+/// with a warning so the supervisor still starts with a partial config.
+fn build_outputs(config: &SupervisorConfig) -> OutputList {
+    let mut list = OutputList::new();
+    for output_config in &config.outputs {
+        match output_config {
+            OutputConfig::Stdout => {
+                list.push(Box::new(StdoutOutput::new()));
+            }
+            OutputConfig::File { path, max_size, max_files } => {
+                match FileOutput::new(path.clone(), *max_size, *max_files) {
+                    Ok(out) => list.push(Box::new(out)),
+                    Err(e) => {
+                        event!(
+                            name: "runtime.output.file.error",
+                            Level::WARN,
+                            output.path = %path.display(),
+                            error.message = %e,
+                            "failed to open file output {{output.path}}: {{error.message}}; skipping",
+                        );
+                    }
+                }
+            }
+            OutputConfig::UnixSocket { .. } | OutputConfig::Http { .. } => {
+                event!(
+                    name: "runtime.output.unimplemented",
+                    Level::WARN,
+                    "output type not yet implemented, skipping",
+                );
+            }
+        }
+    }
+    list
 }
 
 fn walk_dir_recursive(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
