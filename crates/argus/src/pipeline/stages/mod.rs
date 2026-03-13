@@ -1,18 +1,18 @@
 // Rust guideline compliant 2026-02-21
 //! Pipeline stages — composable transforms over the ptrace event stream.
 
-pub mod approvals;
-pub mod capture;
-pub mod check_rules;
-pub mod classify;
-pub mod sockaddr;
-pub mod stamp;
-pub mod syscall_handlers;
-pub mod tree;
+pub(crate) mod approvals;
+pub(crate) mod capture;
+pub(crate) mod check_rules;
+pub(crate) mod classify;
+pub(crate) mod sockaddr;
+pub(crate) mod stamp;
+pub(crate) mod syscall_handlers;
+pub(crate) mod tree;
 
-pub use approvals::ApprovalStage;
-pub use capture::CaptureStage;
-pub use check_rules::CheckRulesStage;
-pub use classify::ClassifyStage;
-pub use stamp::StampStage;
-pub use tree::TreeStage;
+pub(crate) use approvals::ApprovalStage;
+pub(crate) use capture::CaptureStage;
+pub(crate) use check_rules::CheckRulesStage;
+pub(crate) use classify::ClassifyStage;
+pub(crate) use stamp::StampStage;
+pub(crate) use tree::TreeStage;

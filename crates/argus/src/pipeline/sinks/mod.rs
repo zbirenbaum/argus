@@ -5,18 +5,18 @@
 //! event logging, secondary indexes, remote upload, live broadcast, and
 //! in-memory accumulation for tests.
 
-pub mod broadcast;
-pub mod event_log;
-pub mod index;
-pub mod local_cas;
-pub mod memory;
-pub mod remote_cas;
-pub mod stdout;
+pub(crate) mod broadcast;
+pub(crate) mod event_log;
+pub(crate) mod index;
+pub(crate) mod local_cas;
+pub(crate) mod memory;
+pub(crate) mod remote_cas;
+pub(crate) mod stdout;
 
-pub use broadcast::BroadcastSink;
-pub use event_log::EventLogSink;
-pub use index::IndexSink;
-pub use local_cas::LocalCasSink;
-pub use memory::MemorySink;
-pub use remote_cas::RemoteCasSink;
-pub use stdout::StdoutSink;
+pub(crate) use broadcast::BroadcastSink;
+pub(crate) use event_log::EventLogSink;
+pub(crate) use index::IndexSink;
+pub(crate) use local_cas::LocalCasSink;
+pub(crate) use memory::MemorySink;
+pub(crate) use remote_cas::RemoteCasSink;
+pub(crate) use stdout::StdoutSink;

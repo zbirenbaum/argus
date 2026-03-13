@@ -6,30 +6,32 @@
 //! stage transforms them until they become `Event` records emitted
 //! to the `RecordBus`.
 
-pub mod bus;
-pub mod capture_policy;
+pub(crate) mod bus;
+pub(crate) mod capture_policy;
 #[cfg(test)]
-pub mod mock_ptrace;
-pub mod captured;
-pub mod classified;
-pub mod directive;
-pub mod ptrace_thread;
-pub mod raw_stop;
-pub mod record;
-pub mod replay;
+pub(crate) mod mock_ptrace;
+pub(crate) mod captured;
+pub(crate) mod classified;
+pub(crate) mod directive;
+pub(crate) mod ptrace_thread;
+pub(crate) mod raw_stop;
+pub(crate) mod record;
+pub(crate) mod replay;
 pub mod runner;
-pub mod sink;
-pub mod sinks;
-pub mod stages;
+pub(crate) mod sink;
+pub(crate) mod sinks;
+pub(crate) mod stages;
 
-pub use bus::RecordBus;
-pub use capture_policy::{CaptureConfig, CaptureLevel, CapturePolicy, CaptureRule};
-pub use captured::{CapturedContent, CapturedEvent};
-pub use classified::{ClassifiedEvent, Classification, PipeDirection, PtyDataType, StdioType};
-pub use directive::PipelineDirective;
-pub use ptrace_thread::{PtraceHandle, PtraceStream};
-pub use raw_stop::{RawSyscallStop, StopType, SyscallArgs};
-pub use record::Record;
-pub use replay::RawStopRecorder;
+// Only re-export what external crates actually use.
 pub use runner::PipelineRunner;
-pub use sink::{Sink, SinkPriority};
+
+pub(crate) use bus::RecordBus;
+pub(crate) use capture_policy::{CaptureConfig, CaptureLevel, CapturePolicy, CaptureRule};
+pub(crate) use captured::{CapturedContent, CapturedEvent};
+pub(crate) use classified::{ClassifiedEvent, Classification, PipeDirection, PtyDataType, StdioType};
+pub(crate) use directive::PipelineDirective;
+pub(crate) use ptrace_thread::{PtraceHandle, PtraceStream};
+pub(crate) use raw_stop::{RawSyscallStop, StopType, SyscallArgs};
+pub(crate) use record::Record;
+pub(crate) use replay::RawStopRecorder;
+pub(crate) use sink::{Sink, SinkPriority};
