@@ -187,16 +187,26 @@ fn ptrace_thread_main(
     initial_pid: Pid,
     stop_tx: mpsc::UnboundedSender<RawSyscallStop>,
     mut directive_rx: mpsc::UnboundedReceiver<PipelineDirective>,
+    seize_ready: oneshot::Sender<Result<()>>,
 ) {
-    if let Err(e) = ptrace::seize(initial_pid, PTRACE_OPTS) {
-        event!(
-            name: "ptrace_thread.seize_failed",
-            Level::ERROR,
-            pid = initial_pid.as_raw(),
-            error.message = %e,
-            "ptrace seize of pid {{pid}} failed: {{error.message}}",
-        );
-        return;
+    match ptrace::seize(initial_pid, PTRACE_OPTS) {
+        Err(e) => {
+            event!(
+                name: "ptrace_thread.seize_failed",
+                Level::ERROR,
+                pid = initial_pid.as_raw(),
+                error.message = %e,
+                "ptrace seize of pid {{pid}} failed: {{error.message}}",
+            );
+            // Notify the caller that seize failed so it can abort.
+            let _ = seize_ready.send(Err(anyhow::anyhow!("ptrace seize failed: {e}")));
+            return;
+        }
+        Ok(()) => {
+            // Seize succeeded — the caller may now release the sync pipe
+            // and let the child process proceed.
+            let _ = seize_ready.send(Ok(()));
+        }
     }
 
     loop {
@@ -338,17 +348,22 @@ impl PtraceStream {
     }
 
     /// Spawn the ptrace thread for `child_pid` and return the stream.
-    pub fn spawn(child_pid: Pid) -> (Self, std::thread::JoinHandle<()>) {
+    ///
+    /// The returned `oneshot::Receiver<Result<()>>` fires once `PTRACE_SEIZE`
+    /// completes (or fails). The caller must await this before releasing the
+    /// child's sync pipe so the tracee cannot advance ahead of the seize.
+    pub fn spawn(child_pid: Pid) -> (Self, oneshot::Receiver<Result<()>>, std::thread::JoinHandle<()>) {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let (directive_tx, directive_rx) = mpsc::unbounded_channel();
+        let (seize_tx, seize_rx) = oneshot::channel();
 
         let handle = std::thread::Builder::new()
             .name("ptrace-loop".into())
-            .spawn(move || ptrace_thread_main(child_pid, stop_tx, directive_rx))
+            .spawn(move || ptrace_thread_main(child_pid, stop_tx, directive_rx, seize_tx))
             .expect("failed to spawn ptrace thread");
 
         let stream = Self { stop_rx, directive_tx };
-        (stream, handle)
+        (stream, seize_rx, handle)
     }
 
     /// Send a directive to the ptrace thread without awaiting a reply.

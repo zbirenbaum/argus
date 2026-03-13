@@ -219,9 +219,14 @@ impl SupervisorRuntime {
     /// Construct all pipeline stages and return the runner.
     ///
     /// Consumes `self` — the context and config move into the runner.
-    /// Call `emit_agent_start` and `emit_initial_state` before this.
-    pub fn into_pipeline(self, child_pid: Pid) -> (PipelineRunner, JoinHandle<()>) {
-        let (ptrace_stream, ptrace_thread) = PtraceStream::spawn(child_pid);
+    /// The returned `oneshot::Receiver<Result<()>>` fires once `PTRACE_SEIZE`
+    /// completes. Await it before releasing the child's sync pipe so the
+    /// child cannot execute ahead of the seize.
+    pub fn into_pipeline(
+        self,
+        child_pid: Pid,
+    ) -> (PipelineRunner, tokio::sync::oneshot::Receiver<Result<()>>, JoinHandle<()>) {
+        let (ptrace_stream, seize_rx, ptrace_thread) = PtraceStream::spawn(child_pid);
         let handle = ptrace_stream.handle();
 
         let fd_tables: Arc<DashMap<Pid, FdTable>> = Arc::new(DashMap::new());
@@ -278,7 +283,7 @@ impl SupervisorRuntime {
             self.shared,
         );
 
-        (runner, ptrace_thread)
+        (runner, seize_rx, ptrace_thread)
     }
 }
 

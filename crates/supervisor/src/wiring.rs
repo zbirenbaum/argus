@@ -49,16 +49,23 @@ pub async fn run(
 
     crate::signals::install_handler();
 
-    // Close the write end of the sync pipe — the ptrace thread signals the
-    // tracee after attaching; we don't write to it from the async context.
-    let _ = nix::unistd::close(spawn.sync_pipe_w);
-
     let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline();
     let (proxy_handle, proxy_stop) = runtime.spawn_proxy_pipeline(flow_path);
 
     runtime.emit_initial_state();
 
-    let (runner, ptrace_thread) = runtime.into_pipeline(spawn.child_pid);
+    // Spawn the pipeline (which starts the ptrace thread and calls PTRACE_SEIZE)
+    // before releasing the sync pipe. The child is still blocked on the pipe read,
+    // so seize is guaranteed to happen before the child executes any syscalls.
+    let (runner, seize_rx, ptrace_thread) = runtime.into_pipeline(spawn.child_pid);
+
+    // Wait for PTRACE_SEIZE to complete before letting the child proceed.
+    // Closing the write end of the sync pipe unblocks the child.
+    if let Ok(Err(e)) = seize_rx.await {
+        event!(Level::ERROR, error.message = %e, "ptrace seize failed, aborting");
+        return Err(e);
+    }
+    let _ = nix::unistd::close(spawn.sync_pipe_w);
 
     event!(Level::DEBUG, "wiring: entering pipeline.run()");
     runner.run().await;
