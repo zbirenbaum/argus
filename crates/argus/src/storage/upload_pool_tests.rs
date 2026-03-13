@@ -86,7 +86,7 @@ async fn submit_and_process_jobs() {
     let store = Arc::new(MockStore::new(0));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let pool = UploadPool::new(dyn_store, &config, 64);
+    let pool = UploadPool::new(dyn_store, &config);
 
     pool.submit(UploadJob::CasObject {
         hash: ContentHash::from_data(b"hello"),
@@ -112,7 +112,7 @@ async fn stats_track_uploads() {
     let store = Arc::new(MockStore::new(0));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let pool = UploadPool::new(dyn_store, &config, 64);
+    let pool = UploadPool::new(dyn_store, &config);
 
     pool.submit(UploadJob::Checkpoint {
         agent_id: "a1".into(),
@@ -135,7 +135,7 @@ async fn retry_then_succeed() {
     let store = Arc::new(MockStore::new(2));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let pool = UploadPool::new(dyn_store, &config, 64);
+    let pool = UploadPool::new(dyn_store, &config);
 
     pool.submit(UploadJob::CasObject {
         hash: ContentHash::from_data(b"retry-me"),
@@ -155,7 +155,7 @@ async fn exhaust_retries_marks_failed() {
     let store = Arc::new(MockStore::new(100));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let pool = UploadPool::new(dyn_store, &config, 64);
+    let pool = UploadPool::new(dyn_store, &config);
 
     pool.submit(UploadJob::CasObject {
         hash: ContentHash::from_data(b"doomed"),
@@ -176,7 +176,7 @@ async fn shutdown_drains_queue() {
     let store = Arc::new(MockStore::new(0));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let pool = UploadPool::new(dyn_store, &config, 64);
+    let pool = UploadPool::new(dyn_store, &config);
 
     for i in 0..10u64 {
         pool.submit(UploadJob::EventSegment {
@@ -198,7 +198,7 @@ async fn confirmations_received() {
     let store = Arc::new(MockStore::new(0));
     let dyn_store = DynObjectStore::new(Arc::clone(&store));
     let config = test_config();
-    let mut pool = UploadPool::new(dyn_store, &config, 64);
+    let mut pool = UploadPool::new(dyn_store, &config);
 
     pool.submit(UploadJob::DigestCacheSnapshot {
         agent_id: "a1".into(),

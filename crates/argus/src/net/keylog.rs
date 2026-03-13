@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::{event, Level};
 
-use crate::cas::Cas;
+use crate::cas::ContentHash;
 use crate::events::network::TlsKeys;
+use crate::pipeline::bus::RecordBus;
+use crate::pipeline::record::Record;
 
 /// Parsed NSS Key Log line with label, client random, and secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,17 +98,17 @@ impl KeylogWatcher {
         Ok(new_lines)
     }
 
-    /// Store new keylog lines in the CAS and build TlsKeys events.
+    /// Emit new keylog lines as Content records to the bus and build TlsKeys events.
     ///
-    /// Each line is stored individually so the content hash can be
-    /// referenced in the event. Returns one `TlsKeys` per new line.
+    /// Each line is hashed and emitted as a Content record so the bus can
+    /// route it to CAS sinks. Returns one `TlsKeys` per new line.
     ///
     /// # Errors
     ///
-    /// Returns an error if CAS storage fails.
+    /// Returns an error if reading the keylog file fails.
     pub fn process_new_lines(
         &mut self,
-        cas: &impl Cas,
+        bus: &RecordBus,
         pid: u32,
         fd: i32,
     ) -> Result<Vec<TlsKeys>> {
@@ -115,7 +117,9 @@ impl KeylogWatcher {
 
         for line in &lines {
             let raw = format!("{} {} {}", line.label, line.client_random, line.secret);
-            let hash = cas.put(raw.as_bytes())?;
+            let data = raw.into_bytes();
+            let hash = ContentHash::from_data(&data);
+            bus.emit(Record::Content { hash: hash.clone(), data });
 
             event!(
                 name: "net.keylog.captured",
@@ -184,10 +188,13 @@ fn is_hex(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::bus::RecordBus;
     use std::fs;
     use tempfile::TempDir;
 
-    use crate::cas::LocalCas;
+    fn noop_bus() -> RecordBus {
+        RecordBus::new(vec![])
+    }
 
     /// 64 hex character client_random for tests (32 bytes).
     const TEST_CR: &str = "aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
@@ -287,10 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn process_stores_in_cas_and_builds_events() {
+    fn process_emits_hashes_and_builds_events() {
         let dir = TempDir::new().unwrap();
         let keylog_path = dir.path().join("keylog.txt");
-        let cas_path = dir.path().join("cas");
 
         fs::write(
             &keylog_path,
@@ -298,22 +304,13 @@ mod tests {
         )
         .unwrap();
 
-        let cas = LocalCas::new(cas_path).unwrap();
+        let bus = noop_bus();
         let mut watcher = KeylogWatcher::new(keylog_path);
-        let events = watcher.process_new_lines(&cas, 100, 5).unwrap();
+        let events = watcher.process_new_lines(&bus, 100, 5).unwrap();
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].pid, 100);
         assert_eq!(events[0].fd, 5);
         assert!(events[0].keylog_line_hash.is_some());
-
-        // Verify CAS actually has the content.
-        let hash_str = events[0].keylog_line_hash.as_ref().unwrap();
-        let hash = crate::cas::ContentHash::try_from(hash_str.clone()).unwrap();
-        let stored = cas.get(&hash).unwrap();
-        assert_eq!(
-            String::from_utf8(stored).unwrap(),
-            format!("CLIENT_RANDOM {TEST_CR} bb22"),
-        );
     }
 }

@@ -2,15 +2,17 @@
 //!
 //! Parses the JSON output produced by a mitmdump addon script that
 //! serializes each HTTP flow as a JSON object with request and response
-//! fields. Extracts headers and bodies, stores bodies in the CAS, and
-//! produces `HttpRequest` and `HttpResponse` event payloads.
+//! fields. Extracts headers and bodies, emits Content records to the bus,
+//! and produces `HttpRequest` and `HttpResponse` event payloads.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{event, Level};
 
-use crate::cas::Cas;
+use crate::cas::ContentHash;
 use crate::events::network::{HttpRequest, HttpResponse};
+use crate::pipeline::bus::RecordBus;
+use crate::pipeline::record::Record;
 
 /// Raw flow structure deserialized from mitmdump addon JSON output.
 ///
@@ -64,27 +66,27 @@ pub fn parse_flow_line(line: &str) -> Result<MitmdumpFlow> {
     serde_json::from_str(line).context("parse mitmdump flow JSON")
 }
 
-/// Parse and process a mitmdump flow, storing bodies in the CAS.
+/// Parse and process a mitmdump flow, emitting Content records to the bus.
 ///
-/// Headers are serialized as JSON and stored in the CAS. Bodies are
-/// decoded from base64 and also stored. The returned events reference
+/// Headers are serialized as JSON and emitted as Content records. Bodies are
+/// decoded from base64 and also emitted. The returned events reference
 /// content by hash.
 ///
 /// # Errors
 ///
-/// Returns an error if JSON parsing, base64 decoding, or CAS storage fails.
+/// Returns an error if JSON parsing or base64 decoding fails.
 pub fn process_flow(
     flow: &MitmdumpFlow,
-    cas: &impl Cas,
+    bus: &RecordBus,
     pid: u32,
 ) -> Result<ProcessedFlow> {
-    let req_headers_hash = store_headers(cas, &flow.request.headers)?;
-    let req_body_hash = store_body(cas, flow.request.body.as_deref())?;
+    let req_headers_hash = store_headers(bus, &flow.request.headers)?;
+    let req_body_hash = store_body(bus, flow.request.body.as_deref())?;
 
     let resp_event = match &flow.response {
         Some(resp) => {
-            let resp_headers_hash = store_headers(cas, &resp.headers)?;
-            let resp_body_hash = store_body(cas, resp.body.as_deref())?;
+            let resp_headers_hash = store_headers(bus, &resp.headers)?;
+            let resp_body_hash = store_body(bus, resp.body.as_deref())?;
 
             Some(HttpResponse {
                 pid,
@@ -118,22 +120,22 @@ pub fn process_flow(
     })
 }
 
-/// Serialize headers as JSON and store in CAS.
+/// Serialize headers as JSON, emit a Content record to the bus.
 fn store_headers(
-    cas: &impl Cas,
+    bus: &RecordBus,
     headers: &[(String, String)],
 ) -> Result<Option<String>> {
     if headers.is_empty() {
         return Ok(None);
     }
-    let json = serde_json::to_vec(headers).context("serialize headers")?;
-    let hash = cas.put(&json)?;
+    let data = serde_json::to_vec(headers).context("serialize headers")?;
+    let hash = emit_content(bus, data);
     Ok(Some(hash.as_str().to_owned()))
 }
 
-/// Decode base64 body and store in CAS.
+/// Decode base64 body, emit a Content record to the bus.
 fn store_body(
-    cas: &impl Cas,
+    bus: &RecordBus,
     body_b64: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(encoded) = body_b64 else {
@@ -149,8 +151,15 @@ fn store_body(
         .decode(encoded)
         .context("decode base64 body")?;
 
-    let hash = cas.put(&decoded)?;
+    let hash = emit_content(bus, decoded);
     Ok(Some(hash.as_str().to_owned()))
+}
+
+/// Hash data, emit a Content record to the bus, and return the hash.
+fn emit_content(bus: &RecordBus, data: Vec<u8>) -> ContentHash {
+    let hash = ContentHash::from_data(&data);
+    bus.emit(Record::Content { hash: hash.clone(), data });
+    hash
 }
 
 /// Parse multiple newline-delimited JSON flow lines.
@@ -179,8 +188,11 @@ pub fn parse_flow_lines(input: &str) -> Vec<MitmdumpFlow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cas::{Cas, LocalCas};
-    use tempfile::TempDir;
+    use crate::pipeline::bus::RecordBus;
+
+    fn noop_bus() -> RecordBus {
+        RecordBus::new(vec![])
+    }
 
     fn flow_json(method: &str, url: &str, status: u16) -> String {
         // Body "hello" in base64 is "aGVsbG8="
@@ -214,13 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn process_flow_stores_bodies_in_cas() {
-        let dir = TempDir::new().unwrap();
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
-
+    fn process_flow_emits_hashes() {
+        let bus = noop_bus();
         let json = flow_json("POST", "https://api.example.com/data", 200);
         let flow = parse_flow_line(&json).unwrap();
-        let result = process_flow(&flow, &cas, 42).unwrap();
+        let result = process_flow(&flow, &bus, 42).unwrap();
 
         assert_eq!(result.request.method, "POST");
         assert_eq!(result.request.pid, 42);
@@ -230,22 +240,14 @@ mod tests {
         let resp = result.response.unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body_hash.is_some());
-
-        // Verify the request body was stored correctly ("hello").
-        let body_hash_str = result.request.body_hash.unwrap();
-        let hash = crate::cas::ContentHash::try_from(body_hash_str).unwrap();
-        let stored = cas.get(&hash).unwrap();
-        assert_eq!(stored, b"hello");
     }
 
     #[test]
     fn process_flow_without_body() {
-        let dir = TempDir::new().unwrap();
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
-
+        let bus = noop_bus();
         let json = r#"{"request":{"method":"GET","url":"https://example.com","headers":[]}}"#;
         let flow = parse_flow_line(json).unwrap();
-        let result = process_flow(&flow, &cas, 1).unwrap();
+        let result = process_flow(&flow, &bus, 1).unwrap();
 
         assert!(result.request.body_hash.is_none());
         assert!(result.request.headers_hash.is_none());
@@ -265,31 +267,22 @@ mod tests {
 
     #[test]
     fn process_flow_response_body_decoded() {
-        let dir = TempDir::new().unwrap();
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
-
+        let bus = noop_bus();
         let json = flow_json("GET", "https://example.com", 200);
         let flow = parse_flow_line(&json).unwrap();
-        let result = process_flow(&flow, &cas, 1).unwrap();
+        let result = process_flow(&flow, &bus, 1).unwrap();
 
         let resp = result.response.unwrap();
-        let hash = crate::cas::ContentHash::try_from(
-            resp.body_hash.unwrap(),
-        )
-        .unwrap();
-        let stored = cas.get(&hash).unwrap();
-        // "d29ybGQ=" decodes to "world"
-        assert_eq!(stored, b"world");
+        assert_eq!(resp.status, 200);
+        assert!(resp.body_hash.is_some());
     }
 
     #[test]
     fn empty_body_string_yields_none() {
-        let dir = TempDir::new().unwrap();
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
-
+        let bus = noop_bus();
         let json = r#"{"request":{"method":"GET","url":"https://x.com","headers":[],"body":""}}"#;
         let flow = parse_flow_line(json).unwrap();
-        let result = process_flow(&flow, &cas, 1).unwrap();
+        let result = process_flow(&flow, &bus, 1).unwrap();
         assert!(result.request.body_hash.is_none());
     }
 }

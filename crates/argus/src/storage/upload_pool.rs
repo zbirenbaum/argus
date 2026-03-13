@@ -1,13 +1,15 @@
+// Rust guideline compliant 2026-02-21
 //! Async upload pool with retry and backoff.
 //!
 //! [`UploadPool`] manages a fixed number of tokio worker tasks that
-//! consume [`UploadJob`] items from an mpsc channel, retry on
+//! consume [`UploadJob`] items from an unbounded mpsc channel, retry on
 //! transient failures with exponential backoff, and track aggregate
 //! statistics via atomic counters in [`UploadStats`].
 //!
-//! Upload confirmations are sent to an optional callback channel so
-//! that the digest cache and local buffer eviction can react to
-//! completed uploads.
+//! The job channel sender is `Send + Sync`, so clones of it can be held
+//! by any number of producers (e.g. [`RemoteCasSink`]) without a mutex.
+//! Upload confirmations are sent back on a separate channel owned by the
+//! pool; callers poll it for digest-cache and buffer-eviction callbacks.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,33 +77,37 @@ pub struct UploadConfirmation {
 }
 
 /// Async upload pool with configurable concurrency and retry.
+///
+/// The job sender is `Send + Sync`, so `RemoteCasSink` and other
+/// producers can hold a cloned sender directly without any mutex.
+/// Stats are incremented by workers on receipt, not by the sender,
+/// so all submission paths are tracked uniformly.
 #[derive(Debug)]
 pub struct UploadPool {
-    tx: mpsc::Sender<UploadJob>,
+    /// Cloneable sender — `Send + Sync`, safe to clone for producers.
+    job_tx: mpsc::UnboundedSender<UploadJob>,
     stats: Arc<UploadStats>,
     workers: Vec<JoinHandle<()>>,
-    confirm_rx: mpsc::Receiver<UploadConfirmation>,
+    /// Confirmation channel; poll to learn about completed uploads.
+    confirmation_rx: mpsc::UnboundedReceiver<UploadConfirmation>,
 }
 
 impl UploadPool {
     /// Create and start the upload pool.
     ///
     /// Spawns `config.max_concurrent` worker tasks that consume jobs
-    /// from a shared channel.
-    pub fn new(
-        store: DynObjectStore,
-        config: &UploadConfig,
-        channel_capacity: usize,
-    ) -> Self {
-        let (tx, rx) = mpsc::channel::<UploadJob>(channel_capacity);
-        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+    /// from a shared unbounded channel. Stats are tracked by workers
+    /// on job receipt so any sender path is counted.
+    pub fn new(store: DynObjectStore, config: &UploadConfig) -> Self {
+        let (job_tx, job_rx) = mpsc::unbounded_channel::<UploadJob>();
+        let job_rx = Arc::new(tokio::sync::Mutex::new(job_rx));
         let stats = Arc::new(UploadStats::default());
-        let (confirm_tx, confirm_rx) = mpsc::channel(channel_capacity);
+        let (confirm_tx, confirmation_rx) = mpsc::unbounded_channel();
 
         let mut workers = Vec::with_capacity(config.max_concurrent as usize);
 
         for worker_id in 0..config.max_concurrent {
-            let rx = Arc::clone(&rx);
+            let job_rx = Arc::clone(&job_rx);
             let store = store.clone();
             let stats = Arc::clone(&stats);
             let max_attempts = config.max_attempts;
@@ -110,7 +116,7 @@ impl UploadPool {
 
             let handle = tokio::spawn(async move {
                 worker_loop(
-                    worker_id, rx, store, stats,
+                    worker_id, job_rx, store, stats,
                     max_attempts, backoff_base, confirm_tx,
                 )
                 .await;
@@ -118,24 +124,26 @@ impl UploadPool {
             workers.push(handle);
         }
 
-        Self { tx, stats, workers, confirm_rx }
+        Self { job_tx, stats, workers, confirmation_rx }
     }
 
-    /// Submit a job for async upload.
+    /// Clone the job sender for use by `RemoteCasSink` or other producers.
     ///
-    /// Returns immediately. The job will be picked up by a worker task.
+    /// The returned sender is `Send + Sync` — no mutex or lock required.
+    /// Stats are tracked by workers on receipt, so all senders are counted.
+    pub fn job_sender(&self) -> mpsc::UnboundedSender<UploadJob> {
+        self.job_tx.clone()
+    }
+
+    /// Submit a job for async upload via the pool's own sender.
     ///
     /// # Errors
     ///
-    /// Returns an error if the pool has been shut down.
+    /// Returns an error only if all workers have exited (channel closed).
     pub fn submit(&self, job: UploadJob) -> Result<()> {
-        self.stats.pending.fetch_add(1, Ordering::Relaxed);
-        self.tx
-            .try_send(job)
-            .map_err(|e| {
-                self.stats.pending.fetch_sub(1, Ordering::Relaxed);
-                anyhow::anyhow!("upload pool channel error: {e}")
-            })
+        self.job_tx
+            .send(job)
+            .map_err(|e| anyhow::anyhow!("upload pool shut down: {e}"))
     }
 
     /// Read-only access to the stats counters.
@@ -147,8 +155,8 @@ impl UploadPool {
     ///
     /// Callers can poll this to learn about completed uploads for
     /// local buffer eviction and digest cache bookkeeping.
-    pub fn confirmations(&mut self) -> &mut mpsc::Receiver<UploadConfirmation> {
-        &mut self.confirm_rx
+    pub fn confirmations(&mut self) -> &mut mpsc::UnboundedReceiver<UploadConfirmation> {
+        &mut self.confirmation_rx
     }
 
     /// Drain the queue and wait for all workers to finish.
@@ -161,7 +169,7 @@ impl UploadPool {
     ///
     /// Returns an error if any worker panicked.
     pub async fn shutdown(self) -> Result<Arc<UploadStats>> {
-        drop(self.tx);
+        drop(self.job_tx);
         for (i, handle) in self.workers.into_iter().enumerate() {
             handle
                 .await
@@ -173,19 +181,22 @@ impl UploadPool {
 
 async fn worker_loop(
     worker_id: u32,
-    rx: Arc<tokio::sync::Mutex<mpsc::Receiver<UploadJob>>>,
+    job_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<UploadJob>>>,
     store: DynObjectStore,
     stats: Arc<UploadStats>,
     max_attempts: u32,
     backoff_base: Duration,
-    confirm_tx: mpsc::Sender<UploadConfirmation>,
+    confirm_tx: mpsc::UnboundedSender<UploadConfirmation>,
 ) {
     loop {
         let job = {
-            let mut rx = rx.lock().await;
+            let mut rx = job_rx.lock().await;
             rx.recv().await
         };
         let Some(job) = job else { break };
+
+        // Track pending here so every submission path (submit, job_sender clone) is counted.
+        stats.pending.fetch_add(1, Ordering::Relaxed);
 
         let key = job.s3_key();
         let byte_count = job.data().len() as u64;
@@ -203,7 +214,6 @@ async fn worker_loop(
             stats.bytes_uploaded.fetch_add(byte_count, Ordering::Relaxed);
             if confirm_tx
                 .send(UploadConfirmation { key, bytes: byte_count })
-                .await
                 .is_err()
             {
                 event!(

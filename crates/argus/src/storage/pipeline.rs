@@ -60,11 +60,7 @@ impl StoragePipeline {
         )
         .context("create event log")?;
 
-        let upload_pool = UploadPool::new(
-            store,
-            &config.upload,
-            256,
-        );
+        let upload_pool = UploadPool::new(store, &config.upload);
 
         let digest_cache = DigestCache::load_or_default(
             &config.digest_cache.path,

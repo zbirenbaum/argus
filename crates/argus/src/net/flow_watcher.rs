@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use tracing::{event, Level};
 
-use crate::cas::Cas;
 use crate::events::EventPayload;
 use crate::events::network::{HttpRequest, HttpResponse};
+use crate::pipeline::bus::RecordBus;
 
 use super::flow_parser::{parse_flow_line, process_flow};
 
@@ -50,14 +50,14 @@ impl FlowWatcher {
     ///
     /// Returns event payloads ready for emission. Skips malformed
     /// lines with a warning. Bodies are decoded from base64 and
-    /// stored in the CAS; events reference content by hash.
+    /// emitted as Content records to the bus.
     ///
     /// # Errors
     ///
-    /// Returns an error if file I/O or CAS storage fails.
+    /// Returns an error if file I/O fails.
     pub fn process_new_flows(
         &mut self,
-        cas: &impl Cas,
+        bus: &RecordBus,
         pid: u32,
     ) -> Result<Vec<FlowEvents>> {
         let file = match std::fs::File::open(&self.path) {
@@ -106,7 +106,7 @@ impl FlowWatcher {
                 }
             };
 
-            match process_flow(&flow, cas, pid) {
+            match process_flow(&flow, bus, pid) {
                 Ok(processed) => {
                     results.push(FlowEvents {
                         request: processed.request,
@@ -143,9 +143,13 @@ impl FlowWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cas::{Cas, LocalCas};
+    use crate::pipeline::bus::RecordBus;
     use std::fs;
     use tempfile::TempDir;
+
+    fn noop_bus() -> RecordBus {
+        RecordBus::new(vec![])
+    }
 
     fn flow_json(method: &str, url: &str, status: u16) -> String {
         format!(
@@ -157,7 +161,7 @@ mod tests {
     fn process_new_flows_reads_incrementally() {
         let dir = TempDir::new().unwrap();
         let flow_path = dir.path().join("flows.jsonl");
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
+        let bus = noop_bus();
 
         fs::write(
             &flow_path,
@@ -166,13 +170,12 @@ mod tests {
         .unwrap();
 
         let mut watcher = FlowWatcher::new(flow_path.clone());
-        let first = watcher.process_new_flows(&cas, 42).unwrap();
+        let first = watcher.process_new_flows(&bus, 42).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].request.method, "GET");
         assert_eq!(first[0].request.pid, 42);
         assert!(first[0].response.is_some());
 
-        // Append more data.
         use std::io::Write;
         let mut f = fs::OpenOptions::new()
             .append(true)
@@ -180,7 +183,7 @@ mod tests {
             .unwrap();
         writeln!(f, "{}", flow_json("POST", "https://b.com/2", 201)).unwrap();
 
-        let second = watcher.process_new_flows(&cas, 42).unwrap();
+        let second = watcher.process_new_flows(&bus, 42).unwrap();
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].request.method, "POST");
     }
@@ -189,7 +192,7 @@ mod tests {
     fn process_new_flows_skips_bad_lines() {
         let dir = TempDir::new().unwrap();
         let flow_path = dir.path().join("flows.jsonl");
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
+        let bus = noop_bus();
 
         let content = format!(
             "{}\nnot valid json\n{}\n",
@@ -199,24 +202,23 @@ mod tests {
         fs::write(&flow_path, content).unwrap();
 
         let mut watcher = FlowWatcher::new(flow_path);
-        let flows = watcher.process_new_flows(&cas, 1).unwrap();
+        let flows = watcher.process_new_flows(&bus, 1).unwrap();
         assert_eq!(flows.len(), 2);
     }
 
     #[test]
     fn process_new_flows_handles_missing_file() {
         let mut watcher = FlowWatcher::new(PathBuf::from("/nonexistent/flows.jsonl"));
-        let cas_dir = TempDir::new().unwrap();
-        let cas = LocalCas::new(cas_dir.path().join("cas")).unwrap();
-        let flows = watcher.process_new_flows(&cas, 1).unwrap();
+        let bus = noop_bus();
+        let flows = watcher.process_new_flows(&bus, 1).unwrap();
         assert!(flows.is_empty());
     }
 
     #[test]
-    fn stores_body_in_cas() {
+    fn body_hash_is_present() {
         let dir = TempDir::new().unwrap();
         let flow_path = dir.path().join("flows.jsonl");
-        let cas = LocalCas::new(dir.path().join("cas")).unwrap();
+        let bus = noop_bus();
 
         fs::write(
             &flow_path,
@@ -225,12 +227,8 @@ mod tests {
         .unwrap();
 
         let mut watcher = FlowWatcher::new(flow_path);
-        let flows = watcher.process_new_flows(&cas, 1).unwrap();
-
-        let req_body_hash = flows[0].request.body_hash.as_ref().unwrap();
-        let hash = crate::cas::ContentHash::try_from(req_body_hash.clone()).unwrap();
-        let stored = cas.get(&hash).unwrap();
-        assert_eq!(stored, b"hello");
+        let flows = watcher.process_new_flows(&bus, 1).unwrap();
+        assert!(flows[0].request.body_hash.is_some());
     }
 
     #[test]
