@@ -1,40 +1,25 @@
 // Rust guideline compliant 2026-02-21
 //! Argus supervisor PID 1 entrypoint.
 //!
-//! Parses CLI arguments, loads configuration, initializes all subsystems
-//! (CA generation, mitmdump proxy, event writer), spawns the traced agent
-//! process, and enters the ptrace loop.
+//! Parses CLI arguments, loads configuration, initializes TLS/proxy
+//! subsystems, then delegates async startup to [`wiring::run`].
 
-mod event_sink;
-mod event_writer;
-mod pipeline_sink;
 mod signals;
 mod startup;
-mod stdout_sink;
 mod tls_watcher;
+mod wiring;
 
 use std::fs;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
-use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
-use argus::api;
-use argus::api::state::new_shared_state;
-use argus::cas::LocalCas;
 use argus::config::SupervisorConfig;
-use argus::events::{Event, EventPayload, SequenceGenerator};
 use argus::net;
-use argus::storage::{DynObjectStore, S3Client, StoragePipeline};
-use argus::tracer::TracerLoop;
-
-use crate::event_sink::EventSink;
-use crate::pipeline_sink::PipelineSink;
-use crate::stdout_sink::StdoutSink;
 
 /// Argus supervisor -- ptrace-based filesystem versioning.
 #[derive(Debug, Parser)]
@@ -79,17 +64,15 @@ fn main() -> Result<()> {
     let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
     let flow_output = config.data_dir.join("flows.jsonl");
-
     let addon = net::AddonConfig {
         script: Some(addon_script),
         output_file: Some(flow_output),
     };
-
     let proxy_mode = config.tls.proxy_mode;
 
     // In off mode, skip mitmdump entirely — only SSLKEYLOGFILE captures keys.
     let upstream = config.tls.upstream_verify();
-    let mut mitmdump = if proxy_mode == argus::config::ProxyMode::Off {
+    let mitmdump = if proxy_mode == argus::config::ProxyMode::Off {
         event!(
             name: "supervisor.mitmdump.off",
             Level::INFO,
@@ -97,8 +80,7 @@ fn main() -> Result<()> {
         );
         None
     } else {
-        // mitmdump is optional; log a warning if it fails to start but
-        // continue so the supervisor works without mitmproxy installed.
+        // mitmdump is optional — log a warning and continue if unavailable.
         match net::start_mitmdump_with_flow_capture(
             &ca_paths,
             config.tls.mitm_proxy_port,
@@ -106,191 +88,28 @@ fn main() -> Result<()> {
             &upstream,
             proxy_mode,
         ) {
-        Ok(handle) => Some(handle),
-        Err(e) => {
-            event!(
-                name: "supervisor.mitmdump.skip",
-                Level::WARN,
-                error.message = %e,
-                "mitmdump unavailable, no TLS interception: {{error.message}}",
-            );
-            None
-        }
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                event!(
+                    name: "supervisor.mitmdump.skip",
+                    Level::WARN,
+                    error.message = %e,
+                    "mitmdump unavailable, no TLS interception: {{error.message}}",
+                );
+                None
+            }
         }
     };
 
-    let cas_path = config.data_dir.join("cas");
-    let cas = LocalCas::new(cas_path.clone())
-        .context("failed to initialize CAS store")?;
+    // Tokio runtime for the pipeline, API server, and S3 upload pool.
+    // 4 worker threads balance ptrace-loop overhead against async I/O concurrency.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
 
-    // Second CAS handle for the API Bridge (same directory, safe
-    // because CAS is append-only with content-addressed dedup).
-    let api_cas: std::sync::Arc<dyn argus::cas::Cas> = std::sync::Arc::new(
-        LocalCas::new(cas_path.clone()).context("failed to initialize API CAS handle")?,
-    );
-
-    let (event_tx, event_rx) = mpsc::channel::<Event>();
-    let tracer_seq = SequenceGenerator::default();
-    // Separate sequence space so TLS watcher sequences never collide
-    // with tracer sequences while both generators are lock-free.
-    let tls_seq = SequenceGenerator::new(1_000_000);
-
-    let (sinks, _storage_rt) = build_sinks(&config)?;
-    let writer_handle = event_writer::spawn(event_rx, sinks);
-
-    emit_agent_start(&event_tx, &config, &tracer_seq);
-
-    let tls_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let tls_cas = LocalCas::new(cas_path.clone())
-        .context("failed to initialize TLS watcher CAS handle")?;
-    let flow_path = mitmdump.as_ref().and_then(|m| m.flow_output_path().cloned());
-    let tls_watcher_handle = tls_watcher::spawn(
-        config.tls.keylog_path.clone(),
-        flow_path,
-        tls_cas,
-        event_tx.clone(),
-        tls_seq,
-        config.agent_id.clone(),
-        tls_stop.clone(),
-    );
-
-    // Build lock-free bridge for API server + tracer.
-    let shared = new_shared_state(config.agent_id.clone(), api_cas);
-    shared.store_rules(config.build_ruleset());
-    let rules_handle = shared.rules_handle();
-
-    // Spawn the API server on a background tokio runtime.
-    let listen_addr = config.listen_addr;
-    let api_shared = shared.clone();
-    let (api_shutdown_tx, api_shutdown_rx) = tokio::sync::watch::channel(false);
-    let api_thread = std::thread::Builder::new()
-        .name("api-server".into())
-        .spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for API server");
-            rt.block_on(async {
-                if let Err(e) = api::serve(api_shared, listen_addr, api_shutdown_rx).await {
-                    event!(
-                        name: "supervisor.api.error",
-                        Level::ERROR,
-                        error.message = %e,
-                        "API server failed: {{error.message}}",
-                    );
-                }
-            });
-        })
-        .context("failed to spawn API server thread")?;
-
-    event!(
-        name: "supervisor.api.started",
-        Level::INFO,
-        listen.addr = %listen_addr,
-        "API server listening on {{listen.addr}}",
-    );
-
-    // Forward API-originated events (pause, resume, approvals) to the
-    // main event channel so they appear in the JSONL output.
-    let api_event_tx = event_tx.clone();
-    let mut api_event_rx = shared.subscribe_events();
-    let bridge_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let bridge_stop_flag = bridge_stop.clone();
-    let api_event_bridge = std::thread::Builder::new()
-        .name("api-event-bridge".into())
-        .spawn(move || {
-            use tokio::sync::broadcast::error::TryRecvError;
-            loop {
-                if bridge_stop_flag.load(std::sync::atomic::Ordering::Acquire) {
-                    break;
-                }
-                match api_event_rx.try_recv() {
-                    Ok(evt) => {
-                        if api_event_tx.send(evt).is_err() {
-                            break;
-                        }
-                    }
-                    Err(TryRecvError::Empty) => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Err(TryRecvError::Closed) => break,
-                    Err(TryRecvError::Lagged(_)) => continue,
-                }
-            }
-        })
-        .context("failed to spawn API event bridge thread")?;
-
-    let spawn = startup::spawn_agent(
-        &config.agent_command,
-        &agent_env,
-        &config.workspace_dir,
-        config.run_as.as_ref(),
-    )?;
-
-    // Drain agent stdout/stderr to supervisor's stderr so stdout
-    // stays clean JSONL. Ptrace already captures stdio content.
-    let stdout_drain = spawn_drain_thread("stdout", spawn.stdout_r);
-    let stderr_drain = spawn_drain_thread("stderr", spawn.stderr_r);
-
-    signals::install_handler();
-
-    let mut tracer = TracerLoop::new(
-        config.agent_id.clone(),
-        event_tx,
-        tracer_seq,
-        cas,
-    )
-    .with_workspace(config.workspace_dir.clone())
-    .with_rules(rules_handle)
-    .with_shared_state(shared)
-    .with_proxy(proxy_mode, config.tls.mitm_proxy_port);
-    event!(Level::DEBUG, "main: entering tracer.run()");
-    tracer.run(spawn.child_pid, spawn.sync_pipe_w)?;
-    event!(Level::DEBUG, "main: tracer.run() returned");
-
-    event!(
-        name: "supervisor.shutdown",
-        Level::DEBUG,
-        "shutdown: tracer.run() returned",
-    );
-
-    // Stop TLS watcher first so it can drain final data before
-    // mitmdump exits and the flow file stops being written.
-    event!(Level::DEBUG, "shutdown: stopping tls-watcher");
-    tls_stop.store(true, std::sync::atomic::Ordering::Release);
-    let _ = tls_watcher_handle.join();
-    event!(Level::DEBUG, "shutdown: tls-watcher stopped");
-
-    if let Some(ref mut m) = mitmdump {
-        event!(Level::DEBUG, "shutdown: stopping mitmdump");
-        let _ = m.stop();
-        event!(Level::DEBUG, "shutdown: mitmdump stopped");
-    }
-
-    event!(Level::DEBUG, "shutdown: signalling bridge stop");
-    bridge_stop.store(true, std::sync::atomic::Ordering::Release);
-    event!(Level::DEBUG, "shutdown: joining bridge thread");
-    let _ = api_event_bridge.join();
-    event!(Level::DEBUG, "shutdown: bridge thread joined");
-
-    event!(Level::DEBUG, "shutdown: dropping tracer");
-    drop(tracer);
-    event!(Level::DEBUG, "shutdown: joining writer thread");
-    let sinks = writer_handle.join().expect("event writer thread panicked");
-    event!(Level::DEBUG, "shutdown: writer thread joined");
-
-    // Drain the upload pool so all events reach S3 before exit.
-    shutdown_pipeline_sinks(sinks);
-
-    event!(Level::DEBUG, "shutdown: joining stdout drain");
-    let _ = stdout_drain.join();
-    event!(Level::DEBUG, "shutdown: joining stderr drain");
-    let _ = stderr_drain.join();
-    event!(Level::DEBUG, "shutdown: stopping API server");
-    let _ = api_shutdown_tx.send(true);
-    event!(Level::DEBUG, "shutdown: joining API server thread");
-    let _ = api_thread.join();
-    event!(Level::DEBUG, "shutdown: all threads joined");
+    rt.block_on(wiring::run(config, agent_env, mitmdump))?;
 
     Ok(())
 }
@@ -298,8 +117,8 @@ fn main() -> Result<()> {
 /// Forwards data from an agent pipe to supervisor stderr.
 ///
 /// Agent stdout/stderr are piped so they don't mix with JSONL on
-/// stdout. This thread just drains the pipe to stderr.
-fn spawn_drain_thread(
+/// stdout. This thread drains the pipe to stderr.
+pub(crate) fn spawn_drain_thread(
     name: &str,
     pipe_fd: OwnedFd,
 ) -> std::thread::JoinHandle<()> {
@@ -357,132 +176,6 @@ fn load_config(cli: &Cli) -> Result<SupervisorConfig> {
     config.agent_command = cli.command.clone();
 
     Ok(config)
-}
-
-/// Emits the `AgentStart` control event.
-fn emit_agent_start(
-    tx: &mpsc::Sender<Event>,
-    config: &SupervisorConfig,
-    seq_gen: &SequenceGenerator,
-) {
-    let nspid = argus::config::read_nspid_pair();
-
-    let payload = EventPayload::AgentStart(argus::events::control::AgentStart {
-        agent_id: config.agent_id.clone(),
-        supervisor_pid_host: nspid.map(|(h, _)| h),
-        supervisor_pid_ns: nspid.map(|(_, n)| n),
-        config_summary: format!(
-            "data_dir={}, workspace={}",
-            config.data_dir.display(),
-            config.workspace_dir.display(),
-        ),
-        node: std::env::var("NODE_NAME").ok(),
-        pod: std::env::var("POD_NAME").ok(),
-        container: std::env::var("CONTAINER_NAME").ok(),
-    });
-
-    let evt = Event::new(seq_gen, config.agent_id.clone(), payload);
-
-    if let Err(e) = tx.send(evt) {
-        event!(
-            name: "supervisor.event.send_error",
-            Level::ERROR,
-            error.message = %e,
-            "failed to send AgentStart event: {{error.message}}",
-        );
-    }
-}
-
-/// Build all event sinks: always stdout, plus S3 pipeline when configured.
-///
-/// Returns the sink list and an optional tokio runtime that must stay
-/// alive for the upload pool's background tasks.
-fn build_sinks(
-    config: &SupervisorConfig,
-) -> Result<(Vec<Box<dyn EventSink>>, Option<tokio::runtime::Runtime>)> {
-    let mut sinks: Vec<Box<dyn EventSink>> = vec![Box::new(StdoutSink::new())];
-    let mut rt = None;
-
-    if let Some(ref s3_config) = config.storage.s3 {
-        // The upload pool calls tokio::spawn, so we need a multi-thread
-        // runtime that stays alive for the process lifetime.
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .context("tokio runtime for storage pipeline")?;
-
-        // Enter the runtime so tokio::spawn works during construction.
-        let _guard = runtime.enter();
-
-        let s3_client = runtime
-            .block_on(S3Client::new(s3_config))
-            .context("failed to create S3 client")?;
-
-        let dyn_store = DynObjectStore::new(s3_client);
-        let pipeline = StoragePipeline::new(
-            &config.storage,
-            config.agent_id.clone(),
-            dyn_store,
-            config.durability.default,
-        )
-        .context("failed to create storage pipeline")?;
-
-        event!(
-            name: "supervisor.storage.s3",
-            Level::INFO,
-            s3.bucket = %s3_config.bucket,
-            s3.endpoint = s3_config.endpoint.as_deref().unwrap_or("default"),
-            "storage pipeline initialized with S3 backend",
-        );
-
-        sinks.push(Box::new(PipelineSink::new(pipeline)));
-        rt = Some(runtime);
-    } else {
-        event!(
-            name: "supervisor.storage.local_only",
-            Level::INFO,
-            "no S3 config, running in local-only mode",
-        );
-    }
-
-    Ok((sinks, rt))
-}
-
-/// Extract any `PipelineSink` from the returned sinks and shut it down.
-fn shutdown_pipeline_sinks(sinks: Vec<Box<dyn EventSink>>) {
-    for sink in sinks {
-        // Downcast to PipelineSink to access the async shutdown.
-        let any_sink: Box<dyn std::any::Any> = sink.into_any();
-        if let Ok(ps) = any_sink.downcast::<PipelineSink>() {
-            event!(Level::DEBUG, "shutdown: finalizing storage pipeline");
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build tokio runtime for pipeline shutdown");
-            match rt.block_on(ps.into_pipeline().shutdown()) {
-                Ok(stats) => {
-                    event!(
-                        name: "supervisor.pipeline.shutdown",
-                        Level::INFO,
-                        uploaded = stats.uploaded,
-                        failed = stats.failed,
-                        bytes = stats.bytes_uploaded,
-                        "storage pipeline: uploaded={}, failed={}, bytes={}",
-                        stats.uploaded, stats.failed, stats.bytes_uploaded,
-                    );
-                }
-                Err(e) => {
-                    event!(
-                        name: "supervisor.pipeline.error",
-                        Level::ERROR,
-                        error.message = %e,
-                        "storage pipeline shutdown failed: {{error.message}}",
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -558,27 +251,6 @@ mod tests {
         assert_eq!(config.agent_id, "yaml-agent");
         assert_eq!(config.data_dir, PathBuf::from("/custom/data"));
         assert_eq!(config.workspace_dir, PathBuf::from("/custom/ws"));
-    }
-
-    #[test]
-    fn emit_agent_start_sends_event() {
-        let (tx, rx) = mpsc::channel();
-        let seq_gen = SequenceGenerator::default();
-        let config = SupervisorConfig {
-            agent_id: "start-test".into(),
-            agent_command: vec!["echo".into()],
-            ..SupervisorConfig::default()
-        };
-        emit_agent_start(&tx, &config, &seq_gen);
-        let evt = rx.recv().unwrap();
-        assert_eq!(evt.agent_id, "start-test");
-        match &evt.payload {
-            EventPayload::AgentStart(s) => {
-                assert_eq!(s.agent_id, "start-test");
-                assert!(s.config_summary.contains("data_dir"));
-            }
-            other => panic!("expected AgentStart, got {other:?}"),
-        }
     }
 
     /// Tracing can only be initialized once per process.

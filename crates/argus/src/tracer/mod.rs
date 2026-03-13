@@ -1,15 +1,12 @@
 // Rust guideline compliant 2026-02-21
-//! Ptrace loop, seccomp BPF, and syscall handlers.
+//! Ptrace utilities: seccomp BPF, memory reading, register access, and
+//! syscall number constants.
+//!
+//! The trace loop itself has moved to `argus::pipeline`; this module
+//! retains the low-level building blocks used by pipeline stages.
 
-pub mod content_capture;
-pub mod handlers;
 pub mod memory;
 pub mod pending;
-pub mod process_events;
 pub mod regs;
 pub mod seccomp;
 pub mod syscall_nr;
-pub mod trace_loop;
-
-#[doc(inline)]
-pub use trace_loop::TracerLoop;
