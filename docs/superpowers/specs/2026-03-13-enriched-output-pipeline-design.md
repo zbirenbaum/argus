@@ -414,6 +414,46 @@ Built-in patterns cover:
 
 **Redaction applies to all inline content fields**: `text`, `data`, `body`, `headers`, `before_data`, `after_data`. Content hashes are never affected — they reflect the original unredacted content (which is safely in CAS, access-controlled separately).
 
+### Redaction audit trail
+
+Every redaction is logged for auditability. The redaction stage emits a structured `tracing` event for each match, recording **what was redacted** without logging the redacted value itself:
+
+```rust
+tracing::info!(
+    name: "redact.applied",
+    event_seq = event.seq,
+    field = "http_request.headers",
+    rule = "api_keys",
+    matches = 1,
+    "redaction applied",
+);
+```
+
+Fields logged per redaction:
+- `event_seq`: sequence number of the event being scrubbed
+- `field`: which event field was affected (`text`, `data`, `body`, `headers`, `before_data`, `after_data`)
+- `rule`: name of the pattern that matched (`api_keys`, `credentials`, `private_keys`, `aws_keys`, or custom pattern name)
+- `matches`: number of replacements made in this field
+- `action`: `"scrubbed"` for pattern matches, `"stripped"` for path exclusions, `"nullified"` for field exclusions
+
+For path exclusions, a single log entry records that all inline content was stripped:
+
+```rust
+tracing::info!(
+    name: "redact.path_excluded",
+    event_seq = event.seq,
+    path = %event_path,
+    rule = "exclude_paths",
+    action = "stripped",
+    "inline content stripped by path exclusion",
+);
+```
+
+This audit trail is invaluable for:
+- **Debugging**: "Why is this field empty?" → check redaction logs
+- **Compliance**: prove that sensitive data was caught and scrubbed
+- **Tuning**: identify false positives from overly broad patterns
+
 ## Output Configuration
 
 ### Config schema

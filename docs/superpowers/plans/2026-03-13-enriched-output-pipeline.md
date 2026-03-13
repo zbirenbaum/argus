@@ -935,9 +935,17 @@ struct CompiledPattern {
 
 Key methods:
 - `new(config: RedactConfig) -> Self` — compile all regexes (builtins + custom)
-- `scrub_string(&self, input: &str) -> String` — apply all patterns
-- `redact(&self, event: &mut Event)` — walk event payload fields, apply scrubbing
+- `scrub_string(&self, input: &str) -> Vec<RedactMatch>` — apply all patterns, return list of matches with rule name + count
+- `scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String` — scrub + emit tracing audit events
+- `redact(&self, event: &mut Event)` — walk event payload fields, apply scrubbing with audit logging
 - `should_exclude_path(&self, path: &str) -> bool` — check path exclusion
+
+```rust
+struct RedactMatch {
+    rule: String,
+    count: usize,
+}
+```
 
 Built-in patterns to compile:
 - API keys: `sk-ant-[A-Za-z0-9_-]+`, `sk-[A-Za-z0-9_-]{20,}`, `Bearer\s+[A-Za-z0-9_.-]+`
@@ -953,54 +961,99 @@ Built-in patterns to compile:
 - `path_exclusion_strips_inline`: event with path matching `**/*.env` has inline data stripped
 - `field_exclusion_nullifies`: `exclude_fields: ["http_request.headers"]` nullifies headers
 - `leaves_hash_intact`: verify content_hash is never modified
+- `audit_log_emitted_on_redaction`: use `tracing_test::internal::logs_contain` or a subscriber capture to verify `redact.applied` event is emitted with correct `rule`, `field`, and `matches` values
+- `audit_log_emitted_on_path_exclusion`: verify `redact.path_excluded` event emitted when path matches
 
 - [ ] **Step 4: Implement redact method on Event**
 
 The `redact` method matches on `EventPayload` variants and applies `scrub_string` to each inline content field:
 
 ```rust
+/// Scrub a string field and emit audit log entries for each rule that matched.
+fn scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String {
+    let mut result = input.to_owned();
+    for pattern in &self.patterns {
+        let count = pattern.regex.find_iter(&result).count();
+        if count > 0 {
+            result = pattern.regex.replace_all(&result, &*pattern.replacement).into_owned();
+            tracing::info!(
+                name: "redact.applied",
+                event_seq,
+                field,
+                rule = %pattern.name,
+                matches = count,
+                action = "scrubbed",
+                "redaction applied",
+            );
+        }
+    }
+    result
+}
+
 pub fn redact(&self, event: &mut Event) {
+    let seq = event.seq;
     match &mut event.payload {
         EventPayload::Stdio(ref mut s) => {
             if let Some(path) = self.event_path(event) {
-                if self.should_exclude_path(&path) { s.text = None; return; }
+                if self.should_exclude_path(&path) {
+                    tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %path, action = "stripped");
+                    s.text = None; return;
+                }
             }
-            if let Some(ref mut t) = s.text { *t = self.scrub_string(t); }
+            if let Some(ref mut t) = s.text { *t = self.scrub_and_log(seq, "text", t); }
         }
         EventPayload::PipeData(ref mut p) => {
-            if let Some(ref mut t) = p.text { *t = self.scrub_string(t); }
+            if let Some(ref mut t) = p.text { *t = self.scrub_and_log(seq, "text", t); }
         }
         EventPayload::PtyData(ref mut p) => {
-            if let Some(ref mut t) = p.text { *t = self.scrub_string(t); }
+            if let Some(ref mut t) = p.text { *t = self.scrub_and_log(seq, "text", t); }
         }
         EventPayload::Write(ref mut w) => {
-            if self.should_exclude_path(&w.path) { w.data = None; return; }
-            if let Some(ref mut d) = w.data { *d = self.scrub_string(d); }
+            if self.should_exclude_path(&w.path) {
+                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %w.path, action = "stripped");
+                w.data = None; return;
+            }
+            if let Some(ref mut d) = w.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Read(ref mut r) => {
-            if self.should_exclude_path(&r.path) { r.data = None; return; }
-            if let Some(ref mut d) = r.data { *d = self.scrub_string(d); }
+            if self.should_exclude_path(&r.path) {
+                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %r.path, action = "stripped");
+                r.data = None; return;
+            }
+            if let Some(ref mut d) = r.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Unlink(ref mut u) => {
-            if self.should_exclude_path(&u.path) { u.data = None; return; }
-            if let Some(ref mut d) = u.data { *d = self.scrub_string(d); }
+            if self.should_exclude_path(&u.path) {
+                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %u.path, action = "stripped");
+                u.data = None; return;
+            }
+            if let Some(ref mut d) = u.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Truncate(ref mut t) => {
-            if self.should_exclude_path(&t.path) { t.before_data = None; t.after_data = None; return; }
-            if let Some(ref mut d) = t.before_data { *d = self.scrub_string(d); }
-            if let Some(ref mut d) = t.after_data { *d = self.scrub_string(d); }
+            if self.should_exclude_path(&t.path) {
+                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %t.path, action = "stripped");
+                t.before_data = None; t.after_data = None; return;
+            }
+            if let Some(ref mut d) = t.before_data { *d = self.scrub_and_log(seq, "before_data", d); }
+            if let Some(ref mut d) = t.after_data { *d = self.scrub_and_log(seq, "after_data", d); }
         }
         EventPayload::HttpRequest(ref mut h) => {
-            if self.is_field_excluded("http_request.headers") { h.headers = None; }
-            if let Some(ref mut hd) = h.headers { *hd = self.scrub_string(hd); }
-            if let Some(ref mut b) = h.body { *b = self.scrub_string(b); }
+            if self.is_field_excluded("http_request.headers") {
+                tracing::info!(name: "redact.field_excluded", event_seq = seq, field = "http_request.headers", action = "nullified");
+                h.headers = None;
+            }
+            if let Some(ref mut hd) = h.headers { *hd = self.scrub_and_log(seq, "headers", hd); }
+            if let Some(ref mut b) = h.body { *b = self.scrub_and_log(seq, "body", b); }
         }
         EventPayload::HttpResponse(ref mut h) => {
-            if self.is_field_excluded("http_response.headers") { h.headers = None; }
-            if let Some(ref mut hd) = h.headers { *hd = self.scrub_string(hd); }
-            if let Some(ref mut b) = h.body { *b = self.scrub_string(b); }
+            if self.is_field_excluded("http_response.headers") {
+                tracing::info!(name: "redact.field_excluded", event_seq = seq, field = "http_response.headers", action = "nullified");
+                h.headers = None;
+            }
+            if let Some(ref mut hd) = h.headers { *hd = self.scrub_and_log(seq, "headers", hd); }
+            if let Some(ref mut b) = h.body { *b = self.scrub_and_log(seq, "body", b); }
         }
-        _ => {} // variants without inline content (exec, fork, etc.)
+        _ => {}
     }
 }
 
@@ -1009,7 +1062,16 @@ fn is_field_excluded(&self, field: &str) -> bool {
 }
 ```
 
-Note: `regex` crate may need adding to `Cargo.toml` and `glob` crate for path matching.
+Note: `regex` and `glob` crates may need adding to `Cargo.toml`.
+
+The `CompiledPattern` struct needs a `name` field for audit logging:
+```rust
+struct CompiledPattern {
+    name: String,
+    regex: Regex,
+    replacement: String,
+}
+```
 
 - [ ] **Step 5: Build and test**
 
