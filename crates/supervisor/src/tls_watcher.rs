@@ -7,16 +7,15 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use tracing::{event, Level};
 
-use argus::cas::LocalCas;
 use argus::events::{Event, EventPayload, SequenceGenerator};
 use argus::net::{FlowWatcher, KeylogWatcher};
+use argus::pipeline::{Record, RecordBus};
 
 /// How often the watcher polls for new keylog lines and flow data.
 /// Fast enough to capture most TLS sessions before the agent exits,
@@ -30,8 +29,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 pub fn spawn(
     keylog_path: PathBuf,
     flow_output: Option<PathBuf>,
-    cas: LocalCas,
-    event_tx: Sender<Event>,
+    bus: RecordBus,
     seq_gen: SequenceGenerator,
     agent_id: String,
     stop: Arc<AtomicBool>,
@@ -39,7 +37,7 @@ pub fn spawn(
     thread::Builder::new()
         .name("tls-watcher".into())
         .spawn(move || {
-            run(keylog_path, flow_output, cas, event_tx, seq_gen, agent_id, stop);
+            run(keylog_path, flow_output, bus, seq_gen, agent_id, stop);
         })
         .expect("failed to spawn tls-watcher thread")
 }
@@ -48,8 +46,7 @@ pub fn spawn(
 fn run(
     keylog_path: PathBuf,
     flow_output: Option<PathBuf>,
-    cas: LocalCas,
-    event_tx: Sender<Event>,
+    bus: RecordBus,
     seq_gen: SequenceGenerator,
     agent_id: String,
     stop: Arc<AtomicBool>,
@@ -68,10 +65,10 @@ fn run(
             break;
         }
 
-        poll_keylog(&mut keylog, &cas, &event_tx, &seq_gen, &agent_id);
+        poll_keylog(&mut keylog, &bus, &seq_gen, &agent_id);
 
         if let Some(ref mut fw) = flow {
-            poll_flows(fw, &cas, &event_tx, &seq_gen, &agent_id);
+            poll_flows(fw, &bus, &seq_gen, &agent_id);
         }
 
         thread::sleep(POLL_INTERVAL);
@@ -79,9 +76,9 @@ fn run(
 
     // Final drain — capture anything written between the last poll
     // and the stop signal.
-    poll_keylog(&mut keylog, &cas, &event_tx, &seq_gen, &agent_id);
+    poll_keylog(&mut keylog, &bus, &seq_gen, &agent_id);
     if let Some(ref mut fw) = flow {
-        poll_flows(fw, &cas, &event_tx, &seq_gen, &agent_id);
+        poll_flows(fw, &bus, &seq_gen, &agent_id);
     }
 
     event!(
@@ -91,15 +88,16 @@ fn run(
     );
 }
 
-/// Reads new keylog lines and emits `TlsKeys` events.
+/// Reads new keylog lines and emits `TlsKeys` events via the bus.
 fn poll_keylog(
     watcher: &mut KeylogWatcher,
-    cas: &LocalCas,
-    tx: &Sender<Event>,
+    bus: &RecordBus,
     seq_gen: &SequenceGenerator,
     agent_id: &str,
 ) {
-    match watcher.process_new_lines(cas, 0, -1) {
+    // pid=0, fd=-1 because keylog lines come from the SSLKEYLOGFILE env var,
+    // not from a specific traced process fd at poll time.
+    match watcher.process_new_lines_bus(bus, 0, -1) {
         Ok(tls_events) => {
             for tls in tls_events {
                 let evt = Event::new(
@@ -107,9 +105,7 @@ fn poll_keylog(
                     agent_id.to_owned(),
                     EventPayload::TlsKeys(tls),
                 );
-                if tx.send(evt).is_err() {
-                    return;
-                }
+                bus.emit(Record::Event(evt));
             }
         }
         Err(e) => {
@@ -123,15 +119,14 @@ fn poll_keylog(
     }
 }
 
-/// Reads new flows and emits `HttpRequest`/`HttpResponse` events.
+/// Reads new flows and emits `HttpRequest`/`HttpResponse` events via the bus.
 fn poll_flows(
     watcher: &mut FlowWatcher,
-    cas: &LocalCas,
-    tx: &Sender<Event>,
+    bus: &RecordBus,
     seq_gen: &SequenceGenerator,
     agent_id: &str,
 ) {
-    match watcher.process_new_flows(cas, 0) {
+    match watcher.process_new_flows_bus(bus, 0) {
         Ok(flows) => {
             for payload in FlowWatcher::into_event_payloads(flows) {
                 let evt = Event::new(
@@ -139,9 +134,7 @@ fn poll_flows(
                     agent_id.to_owned(),
                     payload,
                 );
-                if tx.send(evt).is_err() {
-                    return;
-                }
+                bus.emit(Record::Event(evt));
             }
         }
         Err(e) => {

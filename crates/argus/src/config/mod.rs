@@ -8,11 +8,13 @@
 //! [`SupervisorConfig::default`] for sensible defaults suitable for local
 //! development.
 
+mod capture;
 mod durability;
 mod pause_rules;
 mod storage;
 mod tls;
 
+pub use capture::{CaptureConfig, CapturePathConfig};
 pub use durability::{DurabilityConfig, DurabilityMode, DurabilityOverride};
 pub use pause_rules::{
     MatchKind, PauseAction, PauseMatchKind, PauseRule, Rule, RuleDecision, RuleSet,
@@ -85,6 +87,14 @@ pub struct SupervisorConfig {
     /// Rules that pause syscalls for operator approval.
     #[serde(default)]
     pub pause_before: Vec<PauseRule>,
+
+    /// Content capture policy — which paths get full content vs metadata-only vs ignored.
+    #[serde(default)]
+    pub capture: CaptureConfig,
+
+    /// When true, record raw ptrace stops to raw_stops.jsonl for offline replay.
+    #[serde(default)]
+    pub record_raw_stops: bool,
 }
 
 /// UID/GID to drop to before exec'ing the agent process.
@@ -110,6 +120,8 @@ impl Default for SupervisorConfig {
             run_as: None,
             block: Vec::new(),
             pause_before: Vec::new(),
+            capture: CaptureConfig::default(),
+            record_raw_stops: false,
         }
     }
 }

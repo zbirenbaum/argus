@@ -262,6 +262,25 @@ impl EventPayload {
         }
     }
 
+    /// Returns true if this event mutates the filesystem state.
+    ///
+    /// Used by TreeStage to decide whether to update the Merkle tree.
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            EventPayload::Write(_)
+                | EventPayload::Rename(_)
+                | EventPayload::Unlink(_)
+                | EventPayload::Mkdir(_)
+                | EventPayload::Rmdir(_)
+                | EventPayload::Chmod(_)
+                | EventPayload::Truncate(_)
+                | EventPayload::Link(_)
+                | EventPayload::Symlink(_)
+                | EventPayload::InitialFile(_)
+        )
+    }
+
     /// Returns filesystem paths referenced by this event.
     ///
     /// Most events return zero or one path. `Rename` returns both
