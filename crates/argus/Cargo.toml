@@ -28,6 +28,7 @@ aws-smithy-http-client = { version = "1", features = ["default-client", "rustls-
 rustls.workspace = true
 serde_yaml = "0.9"
 glob = "0.3"
+regex = "1"
 arc-swap = "1"
 humantime-serde = "1"
 bytesize = { version = "2", features = ["serde"] }

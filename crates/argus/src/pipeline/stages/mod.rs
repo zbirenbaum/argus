@@ -5,6 +5,7 @@ pub(crate) mod approvals;
 pub(crate) mod capture;
 pub(crate) mod check_rules;
 pub(crate) mod classify;
+pub(crate) mod redact;
 pub(crate) mod sockaddr;
 pub(crate) mod stamp;
 pub(crate) mod syscall_handlers;
