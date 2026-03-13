@@ -39,7 +39,11 @@ pub struct CaptureStage {
     durability: DurabilityLayer,
     policy: CapturePolicy,
     /// Per-path mutex that serializes concurrent writes to the same file.
-    write_locks: DashMap<PathBuf, Mutex<()>>,
+    ///
+    /// Wrapped in `Arc` so we can clone the handle and release the DashMap
+    /// shard lock before awaiting the inner mutex (avoids holding a shard
+    /// lock across an async suspension point).
+    write_locks: DashMap<PathBuf, Arc<Mutex<()>>>,
     /// Tracked file content hashes shared with `ClassifyStage`.
     ///
     /// Used instead of filesystem reads for `before_hash` to avoid
@@ -128,8 +132,12 @@ impl CaptureStage {
         }
 
         // Acquire per-path lock to serialize concurrent writes for hash
-        // chain correctness. Hold through before_hash read → after_hash emit.
-        let lock = self.write_locks.entry(path.to_path_buf()).or_insert_with(|| Mutex::new(()));
+        // chain correctness. Clone the Arc to release the DashMap shard lock
+        // before awaiting — holding a shard lock across .await is a deadlock risk.
+        let lock = self.write_locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
         let _guard = lock.lock().await;
 
         // Use tracked in-memory hash instead of racy filesystem read.
