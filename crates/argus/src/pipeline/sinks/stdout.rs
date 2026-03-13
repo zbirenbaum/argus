@@ -59,7 +59,8 @@ impl Sink for StdoutSink {
         let json =
             serde_json::to_string(&event).with_context(|| format!("serialize event seq={}", event.seq))?;
         let mut out = self.out.lock().expect("stdout sink mutex poisoned");
-        writeln!(out, "{json}").context("write event to stdout")
+        writeln!(out, "{json}").context("write event to stdout")?;
+        out.flush().context("flush stdout after event")
     }
 
     fn flush(&self) -> Result<()> {

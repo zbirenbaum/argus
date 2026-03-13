@@ -13,8 +13,14 @@ use tokio::sync::oneshot;
 
 /// An instruction from a pipeline stage to the ptrace thread.
 pub enum PipelineDirective {
-    /// Resume the tracee via `ptrace::syscall`.
-    Resume { pid: Pid },
+    /// Resume the tracee.
+    ///
+    /// When `trace_exit` is true the tracee is resumed with
+    /// `ptrace::syscall` so the next syscall-exit stop is delivered.
+    /// When false, `ptrace::cont` is used and only SECCOMP / ptrace
+    /// event stops fire — avoiding per-syscall overhead on threads
+    /// that do not have a pending entry awaiting exit correlation.
+    Resume { pid: Pid, trace_exit: bool },
 
     /// Read raw bytes from tracee memory.
     ReadMemory {
@@ -60,7 +66,9 @@ pub enum PipelineDirective {
 impl std::fmt::Debug for PipelineDirective {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Resume { pid } => write!(f, "Resume({pid})"),
+            Self::Resume { pid, trace_exit } => {
+                write!(f, "Resume({pid}, trace_exit={trace_exit})")
+            }
             Self::ReadMemory { pid, addr, len, .. } => {
                 write!(f, "ReadMemory({pid}, {addr:#x}, {len})")
             }

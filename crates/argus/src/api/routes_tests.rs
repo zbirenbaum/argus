@@ -3,6 +3,7 @@ use crate::api::build_router;
 use crate::api::state::new_shared_state;
 use crate::cas::MemoryCas;
 use crate::events::EventPayload;
+use crate::pipeline::RecordBus;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
@@ -14,12 +15,16 @@ fn test_cas() -> Arc<dyn crate::cas::Cas> {
     Arc::new(MemoryCas::new())
 }
 
+fn test_bus() -> RecordBus {
+    RecordBus::new(vec![])
+}
+
 fn test_router() -> Router {
-    build_router(new_shared_state("test-agent".into(), test_cas()))
+    build_router(new_shared_state("test-agent".into(), test_cas(), test_bus()))
 }
 
 fn test_router_with_state() -> (Router, SharedState) {
-    let state = new_shared_state("test-agent".into(), test_cas());
+    let state = new_shared_state("test-agent".into(), test_cas(), test_bus());
     let router = build_router(state.clone());
     (router, state)
 }
@@ -29,7 +34,7 @@ fn test_router_with_events() -> (
     SharedState,
     tokio::sync::broadcast::Receiver<crate::events::Event>,
 ) {
-    let state = new_shared_state("test-agent".into(), test_cas());
+    let state = new_shared_state("test-agent".into(), test_cas(), test_bus());
     let rx = state.subscribe_events();
     let router = build_router(state.clone());
     (router, state, rx)

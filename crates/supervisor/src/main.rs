@@ -61,7 +61,6 @@ fn main() -> Result<()> {
         .context("failed to write embedded addon script")?;
 
     let ca_paths = net::generate_ca(&config.tls.ca_dir)?;
-    let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
     let flow_output = config.data_dir.join("flows.jsonl");
     let addon = net::AddonConfig {
@@ -96,10 +95,17 @@ fn main() -> Result<()> {
                     error.message = %e,
                     "mitmdump unavailable, no TLS interception: {{error.message}}",
                 );
+                // Downgrade to Off so HTTPS_PROXY isn't set for a
+                // non-existent proxy.
+                config.tls.proxy_mode = argus::config::ProxyMode::Off;
                 None
             }
         }
     };
+
+    // Build agent env AFTER mitmdump resolution so proxy_mode reflects
+    // actual availability.
+    let agent_env = net::agent_env_vars(&config.tls, &ca_paths);
 
     // Tokio runtime for the pipeline, API server, and S3 upload pool.
     // 4 worker threads balance ptrace-loop overhead against async I/O concurrency.

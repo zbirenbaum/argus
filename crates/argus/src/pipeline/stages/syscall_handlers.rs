@@ -17,7 +17,7 @@ use crate::pipeline::classified::{
 };
 use crate::pipeline::raw_stop::SyscallArgs;
 
-use super::classify::ClassifyStage;
+use super::classify::{ClassifyStage, PendingEntry};
 use super::sockaddr::{encode_sockaddr, is_tls_port, parse_sockaddr};
 
 /// Dispatch a syscall entry stop to the appropriate handler.
@@ -59,7 +59,7 @@ async fn handle_entry_aarch64(
         libc::SYS_renameat | libc::SYS_renameat2 => handle_renameat(stage, pid, args).await,
         libc::SYS_unlinkat => handle_unlinkat(stage, pid, args).await,
         libc::SYS_mkdirat => handle_mkdirat(stage, pid, args).await,
-        libc::SYS_pipe2 => Classification::Passthrough, // handled at exit
+        libc::SYS_pipe2 => handle_pipe(stage, pid, args),
         libc::SYS_dup => handle_dup(stage, pid, args, false),
         libc::SYS_dup3 => handle_dup(stage, pid, args, true),
         libc::SYS_socket => handle_socket(stage, pid, args),
@@ -95,9 +95,9 @@ async fn handle_entry_x86_64(
         libc::SYS_mkdir => handle_mkdir_1arg(stage, pid, args).await,
         libc::SYS_mkdirat => handle_mkdirat(stage, pid, args).await,
         libc::SYS_rmdir => handle_rmdir_1arg(stage, pid, args).await,
-        libc::SYS_pipe | libc::SYS_pipe2 => Classification::Passthrough,
-        libc::SYS_dup | libc::SYS_dup2 => handle_dup(stage, pid, args, false),
-        libc::SYS_dup3 => handle_dup(stage, pid, args, true),
+        libc::SYS_pipe | libc::SYS_pipe2 => handle_pipe(stage, pid, args),
+        libc::SYS_dup => handle_dup(stage, pid, args, false),
+        libc::SYS_dup2 | libc::SYS_dup3 => handle_dup(stage, pid, args, true),
         libc::SYS_socket => handle_socket(stage, pid, args),
         libc::SYS_connect => handle_connect(stage, pid, args).await,
         libc::SYS_accept | libc::SYS_accept4 => handle_accept(stage, pid, args).await,
@@ -132,7 +132,10 @@ async fn handle_openat(
     };
     let flags = args.arg2 as i32;
     let mode = args.arg3 as u32;
-    Classification::FileOpen { path, flags, mode }
+    // Defer to exit — we need the return value (new fd) to populate
+    // the fd table. The exit handler updates state and returns Passthrough.
+    stage.pending.insert(pid, PendingEntry::Openat { path, flags, mode });
+    Classification::Passthrough
 }
 
 fn handle_close(stage: &ClassifyStage, pid: Pid, args: SyscallArgs) -> Classification {
@@ -288,30 +291,43 @@ async fn handle_rmdir_1arg(
     }
 }
 
+fn handle_pipe(
+    stage: &ClassifyStage,
+    pid: Pid,
+    args: SyscallArgs,
+) -> Classification {
+    // pipe2(pipefd, flags) — arg0 is the address of int[2] in tracee memory.
+    // Defer to exit — we need the kernel to fill the array before reading.
+    let pipe_array_addr = args.arg0 as usize;
+    stage.pending.insert(pid, PendingEntry::Pipe { pipe_array_addr });
+    Classification::Passthrough
+}
+
 fn handle_dup(
     stage: &ClassifyStage,
     pid: Pid,
     args: SyscallArgs,
-    _has_flags: bool,
+    has_newfd: bool,
 ) -> Classification {
     let old_fd = args.arg0 as i32;
-    let new_fd = args.arg1 as i32;
-    if let Some(mut table) = stage.fd_tables.get_mut(&pid) {
-        table.dup(old_fd, new_fd);
-    }
-    Classification::FdDup { old_fd, new_fd }
+    // dup() has no second arg (kernel chooses fd); dup2/dup3 specify new_fd.
+    let new_fd = if has_newfd { Some(args.arg1 as i32) } else { None };
+    // Defer to exit — we need the return value to confirm success and
+    // (for dup) to learn the kernel-chosen fd number.
+    stage.pending.insert(pid, PendingEntry::Dup { old_fd, new_fd });
+    Classification::Passthrough
 }
 
 fn handle_socket(
-    _stage: &ClassifyStage,
-    _pid: Pid,
+    stage: &ClassifyStage,
+    pid: Pid,
     args: SyscallArgs,
 ) -> Classification {
     let domain = args.arg0 as i32;
     let sock_type = args.arg1 as i32;
-    // fd is unknown at entry; will be filled at exit.
-    // Emit as NetSocket with fd=-1 as a placeholder.
-    Classification::NetSocket { domain, sock_type, fd: -1 }
+    // Defer to exit — the return value is the new fd number.
+    stage.pending.insert(pid, PendingEntry::Socket { domain, sock_type });
+    Classification::Passthrough
 }
 
 async fn handle_connect(

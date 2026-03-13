@@ -78,10 +78,15 @@ record() {
 
 cleanup_workspace() {
     # Kill any stale supervisor to free port 9090.
-    if curl -sf --max-time 1 http://127.0.0.1:9090/agent/status >/dev/null 2>&1; then
-        pkill -9 -x supervisor 2>/dev/null || true
-        sleep 0.3
-    fi
+    pkill -9 -x supervisor 2>/dev/null || true
+    # Wait for port to be released so the next supervisor can bind.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if ! curl -sf --max-time 0.2 http://127.0.0.1:9090/agent/status >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.1
+    done
+    sleep 0.2
     rm -f /tmp/argus-test-workspace/test.txt /tmp/argus-test-workspace/shared.txt /tmp/argus-test-workspace/tool-output.txt
     rm -f /tmp/tool.py /tmp/concurrent_write
 }
@@ -919,6 +924,7 @@ echo "Arch: $ARCH"
 echo ""
 
 for t in "${TESTS[@]}"; do
+    cleanup_workspace
     case "$t" in
         1)  test_1 ;;
         2)  test_2 ;;

@@ -55,7 +55,10 @@ pub async fn serve(
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let socket = tokio::net::TcpSocket::new_v4()?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    let listener = socket.listen(1024)?;
     tracing::info!(
         listen.addr = %addr,
         "API server listening on {{listen.addr}}"
@@ -74,6 +77,7 @@ mod tests {
     use super::*;
     use crate::api::state::new_shared_state;
     use crate::cas::MemoryCas;
+    use crate::pipeline::RecordBus;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
@@ -84,9 +88,13 @@ mod tests {
         Arc::new(MemoryCas::new())
     }
 
+    fn test_bus() -> RecordBus {
+        RecordBus::new(vec![])
+    }
+
     #[tokio::test]
     async fn router_serves_health() {
-        let state = new_shared_state("integration".into(), test_cas());
+        let state = new_shared_state("integration".into(), test_cas(), test_bus());
         let app = build_router(state);
         let req = Request::builder()
             .method("GET")
@@ -102,7 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_pause_resume_cycle() {
-        let state = new_shared_state("cycle".into(), test_cas());
+        let state = new_shared_state("cycle".into(), test_cas(), test_bus());
         let app = build_router(state);
 
         let req = Request::builder()

@@ -18,6 +18,8 @@ use crate::api::types::PendingApprovalEntry;
 use crate::cas::Cas;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
+use crate::pipeline::RecordBus;
+use crate::pipeline::record::Record;
 use crate::snapshot::MerkleTree;
 
 /// Broadcast channel capacity for API event subscribers.
@@ -33,7 +35,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 pub struct Bridge {
     agent_id: String,
     started_at: Instant,
-    paused: AtomicBool,
+    paused: Arc<AtomicBool>,
     rules: Arc<ArcSwap<RuleSet>>,
     pending_approvals: DashMap<String, PendingApprovalEntry>,
     seq_gen: SequenceGenerator,
@@ -44,6 +46,8 @@ pub struct Bridge {
     cas: Arc<dyn Cas>,
     /// Maps event seq → tree_hash for point-in-time restore lookups.
     tree_hashes: DashMap<u64, String>,
+    /// Pipeline bus for emitting API-originated events to all sinks.
+    bus: RecordBus,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -59,12 +63,12 @@ impl std::fmt::Debug for Bridge {
 
 impl Bridge {
     /// Creates a new bridge with the given CAS backend.
-    pub fn new(agent_id: String, cas: Arc<dyn Cas>) -> Self {
+    pub fn new(agent_id: String, cas: Arc<dyn Cas>, bus: RecordBus) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             agent_id,
             started_at: Instant::now(),
-            paused: AtomicBool::new(false),
+            paused: Arc::new(AtomicBool::new(false)),
             rules: Arc::new(ArcSwap::from_pointee(RuleSet::default())),
             pending_approvals: DashMap::new(),
             seq_gen: SequenceGenerator::default(),
@@ -72,6 +76,7 @@ impl Bridge {
             tree: ArcSwap::from_pointee(MerkleTree::new()),
             cas,
             tree_hashes: DashMap::new(),
+            bus,
         }
     }
 
@@ -108,6 +113,7 @@ impl Bridge {
     /// the event with no allocation.
     pub fn emit(&self, payload: EventPayload) {
         let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
+        self.bus.emit(Record::Event(evt.clone()));
         let _ = self.event_tx.send(evt);
     }
 
@@ -126,6 +132,11 @@ impl Bridge {
         self.paused
             .compare_exchange(!paused, paused, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    /// Shared handle to the pause flag for the pipeline runner.
+    pub fn pause_flag(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
     }
 
     /// The configured agent identifier.
@@ -199,8 +210,8 @@ impl Bridge {
 pub type SharedState = Arc<Bridge>;
 
 /// Creates a new shared bridge handle.
-pub fn new_shared_state(agent_id: String, cas: Arc<dyn Cas>) -> SharedState {
-    Arc::new(Bridge::new(agent_id, cas))
+pub fn new_shared_state(agent_id: String, cas: Arc<dyn Cas>, bus: RecordBus) -> SharedState {
+    Arc::new(Bridge::new(agent_id, cas, bus))
 }
 
 /// Delivers an approval decision through the oneshot channel.
@@ -230,16 +241,20 @@ mod tests {
         Arc::new(MemoryCas::new())
     }
 
+    fn test_bus() -> RecordBus {
+        RecordBus::new(vec![])
+    }
+
     #[test]
     fn new_state_is_running() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         assert!(!bridge.is_paused());
         assert_eq!(bridge.agent_id(), "test");
     }
 
     #[test]
     fn set_paused_returns_whether_changed() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         assert!(bridge.set_paused(true));
         assert!(!bridge.set_paused(true));
         assert!(bridge.set_paused(false));
@@ -248,7 +263,7 @@ mod tests {
 
     #[test]
     fn insert_and_remove_pending() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         let entry = PendingApprovalEntry {
             action_id: "a1".into(),
             pid: 42,
@@ -270,13 +285,13 @@ mod tests {
 
     #[test]
     fn remove_nonexistent_returns_none() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         assert!(bridge.remove_pending("nope").is_none());
     }
 
     #[test]
     fn resolve_approval_delivers_decision() {
-        let shared = new_shared_state("test".into(), test_cas());
+        let shared = new_shared_state("test".into(), test_cas(), test_bus());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
 
         shared.insert_pending(PendingApprovalEntry {
@@ -299,19 +314,19 @@ mod tests {
 
     #[test]
     fn resolve_nonexistent_returns_none() {
-        let shared = new_shared_state("test".into(), test_cas());
+        let shared = new_shared_state("test".into(), test_cas(), test_bus());
         assert!(resolve_approval(&shared, "nope", ApprovalDecision::Deny).is_none());
     }
 
     #[test]
     fn uptime_is_positive() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         assert!(bridge.uptime_seconds() >= 0.0);
     }
 
     #[test]
     fn shared_state_across_threads() {
-        let shared = new_shared_state("threaded".into(), test_cas());
+        let shared = new_shared_state("threaded".into(), test_cas(), test_bus());
         let handle = {
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
@@ -324,7 +339,7 @@ mod tests {
 
     #[test]
     fn emit_with_no_subscribers_does_not_panic() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         bridge.emit(EventPayload::AgentPause(crate::events::control::AgentPause {
             reason: "test".into(),
             stopped_pids: Vec::new(),
@@ -333,7 +348,7 @@ mod tests {
 
     #[test]
     fn subscribe_receives_events() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         let mut rx = bridge.subscribe_events();
         bridge.emit(EventPayload::AgentPause(crate::events::control::AgentPause {
             reason: "test".into(),
@@ -345,7 +360,7 @@ mod tests {
 
     #[test]
     fn store_and_load_tree() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         let mut tree = MerkleTree::new();
         tree.update(
             std::path::PathBuf::from("a.txt"),
@@ -359,7 +374,7 @@ mod tests {
 
     #[test]
     fn insert_and_get_tree_hash() {
-        let bridge = Bridge::new("test".into(), test_cas());
+        let bridge = Bridge::new("test".into(), test_cas(), test_bus());
         bridge.insert_tree_hash(42, "abc123".into());
         assert_eq!(bridge.get_tree_hash(42), Some("abc123".into()));
         assert_eq!(bridge.get_tree_hash(99), None);

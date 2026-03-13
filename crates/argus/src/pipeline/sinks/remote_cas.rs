@@ -1,55 +1,49 @@
 // Rust guideline compliant 2026-02-21
 //! Async sink that submits content objects to the remote upload pool.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
 
 use crate::cas::ContentHash;
 use crate::pipeline::record::Record;
 use crate::pipeline::sink::{Sink, SinkPriority};
 use crate::storage::digest_cache::DigestCache;
 use crate::storage::upload_job::UploadJob;
+use crate::storage::upload_pool::UploadPool;
 
 /// Async sink that submits CAS objects to the remote upload pool.
 ///
-/// Holds a cloned `UnboundedSender` from `UploadPool::job_sender()`.
-/// `UnboundedSender` is `Send + Sync`, so this sink satisfies the
-/// `Sink: Sync` bound with no mutex on the submission path.
+/// Holds a shared reference to the `UploadPool` and submits jobs
+/// via `pool.submit()`. The pool's internal channel is `Send + Sync`,
+/// so this sink satisfies the `Sink: Sync` bound without a mutex on
+/// the submission path.
 ///
 /// The digest cache is consulted before each submission to skip objects
 /// that are already known to exist remotely. Events are silently ignored.
 #[derive(Debug)]
 pub struct RemoteCasSink {
-    job_tx: mpsc::UnboundedSender<UploadJob>,
-    digest_cache: Arc<Mutex<DigestCache>>,
+    upload_pool: Arc<UploadPool>,
+    digest_cache: Arc<DigestCache>,
     agent_id: String,
 }
 
 impl RemoteCasSink {
-    /// Creates a new sink with a cloned job sender from the upload pool.
-    ///
-    /// Use `UploadPool::job_sender()` to obtain the sender.
+    /// Creates a new sink backed by the given upload pool and digest cache.
     pub fn new(
-        job_tx: mpsc::UnboundedSender<UploadJob>,
-        digest_cache: Arc<Mutex<DigestCache>>,
+        upload_pool: Arc<UploadPool>,
+        digest_cache: Arc<DigestCache>,
         agent_id: String,
     ) -> Self {
-        Self { job_tx, digest_cache, agent_id }
+        Self { upload_pool, digest_cache, agent_id }
     }
 
     fn is_cached(&self, hash: &ContentHash) -> bool {
-        self.digest_cache
-            .lock()
-            .expect("digest cache mutex poisoned")
-            .contains(hash)
+        self.digest_cache.contains(hash)
     }
 
     fn submit(&self, job: UploadJob) -> Result<()> {
-        self.job_tx
-            .send(job)
-            .map_err(|e| anyhow::anyhow!("upload pool shut down: {e}"))
+        self.upload_pool.submit(job)
     }
 }
 

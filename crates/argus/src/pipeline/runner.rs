@@ -6,15 +6,22 @@
 //! forwarding each stop through classify → rules → approval → capture →
 //! tree → stamp → bus.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use futures::StreamExt;
 
+use crate::api::routes::submit_pending_approval;
+use crate::api::state::SharedState;
+use crate::events::{ApprovalDecision, EventPayload};
+use crate::events::control;
 use crate::pipeline::{PtraceStream, RawStopRecorder, RecordBus};
-
+use crate::pipeline::classified::Classification;
+use crate::pipeline::directive::PipelineDirective;
 use crate::pipeline::stages::{
     ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
 };
-use crate::pipeline::classified::Classification;
-use crate::pipeline::directive::PipelineDirective;
+use crate::pipeline::stages::check_rules::RuleAction;
 
 /// Owns all pipeline stages and drives the main processing loop.
 ///
@@ -40,6 +47,10 @@ pub struct PipelineRunner {
     pub bus: RecordBus,
     /// Optional raw-stop recorder for debugging and replay.
     pub recorder: Option<RawStopRecorder>,
+    /// Shared pause flag set by the API server.
+    pub paused: Arc<AtomicBool>,
+    /// Bridge to the API server for pending approvals.
+    pub shared: SharedState,
 }
 
 impl PipelineRunner {
@@ -53,50 +64,115 @@ impl PipelineRunner {
                 rec.record(&stop);
             }
 
+            // While paused, don't deliver any directives — the tracee
+            // stays frozen because the ptrace thread is waiting for a
+            // Resume/InjectError that we withhold.
+            self.wait_if_paused().await;
+
             let classified = self.classify.classify(stop).await;
 
             // Passthrough stops need no further processing; resume immediately
-            // to minimize latency on the hot path.
+            // to minimize latency on the hot path. Use ptrace::syscall only
+            // when a pending entry exists (openat, dup, socket, pipe) so the
+            // exit stop is delivered for fd-table correlation. Otherwise use
+            // ptrace::cont to avoid per-syscall overhead on all threads.
             if matches!(classified.classification, Classification::Passthrough) {
+                let trace_exit = self.classify.pending.contains_key(&classified.pid);
                 self.ptrace.directive(PipelineDirective::Resume {
                     pid: classified.pid,
+                    trace_exit,
                 });
                 continue;
             }
 
             if let Some(rule_match) = self.rules.check_block(&classified) {
-                self.ptrace.directive(PipelineDirective::InjectError {
-                    pid: classified.pid,
-                    // EPERM is the standard error for policy-blocked operations;
-                    // matches what seccomp SECCOMP_RET_ERRNO would return.
-                    errno: libc::EPERM,
-                });
-                let blocked = self.stamp.stamp_blocked(
-                    classified.pid.as_raw() as u32,
-                    classified.syscall_name(),
-                    classified.primary_path(),
-                    rule_match.description.clone(),
-                );
-                self.bus.emit(crate::pipeline::Record::Event(blocked));
-                continue;
-            }
+                match rule_match.action {
+                    RuleAction::Block => {
+                        self.ptrace.directive(PipelineDirective::InjectError {
+                            pid: classified.pid,
+                            errno: libc::EPERM,
+                        });
+                        let blocked = self.stamp.stamp_blocked(
+                            classified.pid.as_raw() as u32,
+                            classified.syscall_name(),
+                            classified.primary_path(),
+                            rule_match.description.clone(),
+                        );
+                        self.bus.emit(crate::pipeline::Record::Event(blocked));
+                        continue;
+                    }
+                    RuleAction::Pause => {
+                        let pid_raw = classified.pid.as_raw() as u32;
+                        let syscall = classified.syscall_name();
+                        let path = classified.primary_path();
 
-            if self.rules.needs_approval(&classified)
-                && !self.approvals.process(&classified)
-            {
-                // ApprovalStage already sent InjectError for denied requests.
-                continue;
+                        self.shared.emit(EventPayload::PendingApproval(
+                            control::PendingApproval {
+                                pid: pid_raw,
+                                syscall: syscall.clone(),
+                                path: path.clone(),
+                                binary: None,
+                                rule_name: rule_match.description.clone(),
+                            },
+                        ));
+
+                        let (_action_id, rx) = submit_pending_approval(
+                            &self.shared,
+                            pid_raw,
+                            format!("pid:{pid_raw}"),
+                            syscall.clone(),
+                            path.clone(),
+                            rule_match.description.clone(),
+                        );
+
+                        // Block until the API delivers a decision.
+                        // The API handler emits ApprovalGranted/ApprovalDenied
+                        // events, so the runner only needs to act on the verdict.
+                        let decision = rx.await.unwrap_or(ApprovalDecision::Deny);
+
+                        if decision == ApprovalDecision::Deny {
+                            self.ptrace.directive(PipelineDirective::InjectError {
+                                pid: classified.pid,
+                                errno: libc::EPERM,
+                            });
+                            continue;
+                        }
+                        // Approved — fall through to capture/tree/stamp.
+                    }
+                }
             }
 
             let captured = self.capture.capture(classified).await;
             self.ptrace.directive(PipelineDirective::Resume {
                 pid: captured.pid,
+                trace_exit: false,
             });
 
             let tree_hash = self.tree.update(&captured);
+
+            // Sync tree snapshot to SharedState and persist to CAS so
+            // the /tree and /restore endpoints can serve it.
+            let cas_tree_hash = {
+                let snapshot = self.tree.tree.lock().unwrap();
+                self.shared.store_tree(Arc::new(snapshot.clone()));
+                snapshot.store(self.shared.cas().as_ref()).ok()
+            };
+
             if let Some(event) = self.stamp.stamp(captured, tree_hash) {
+                // Use the CAS storage hash (not root_hash) for restore
+                // lookups since MerkleTree::load expects the CAS hash.
+                if let Some(ref th) = cas_tree_hash {
+                    self.shared.insert_tree_hash(event.seq, th.to_string());
+                }
                 self.bus.emit(crate::pipeline::Record::Event(event));
             }
+        }
+    }
+
+    /// Spin-wait while the pause flag is set, yielding to the runtime.
+    async fn wait_if_paused(&self) {
+        while self.paused.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 }

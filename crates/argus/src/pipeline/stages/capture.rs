@@ -6,6 +6,7 @@
 //! reads the buf_addr memory directly. Large blobs are split into chunks.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use nix::unistd::Pid;
@@ -34,16 +35,28 @@ pub struct CaptureStage {
     pub policy: CapturePolicy,
     /// Per-path mutex that serializes concurrent writes to the same file.
     pub write_locks: DashMap<PathBuf, Mutex<()>>,
+    /// Tracked file content hashes shared with `ClassifyStage`.
+    ///
+    /// Used instead of filesystem reads for `before_hash` to avoid
+    /// races between resuming a previous write and reading the file
+    /// for the next write's `before_hash`.
+    pub file_state: Arc<DashMap<PathBuf, ContentHash>>,
 }
 
 impl CaptureStage {
     /// Create a new capture stage.
-    pub fn new(handle: PtraceHandle, bus: RecordBus, policy: CapturePolicy) -> Self {
+    pub fn new(
+        handle: PtraceHandle,
+        bus: RecordBus,
+        policy: CapturePolicy,
+        file_state: Arc<DashMap<PathBuf, ContentHash>>,
+    ) -> Self {
         Self {
             handle,
             bus,
             policy,
             write_locks: DashMap::new(),
+            file_state,
         }
     }
 
@@ -83,8 +96,13 @@ impl CaptureStage {
             return CapturedContent::None;
         }
 
-        // Hash the file content before the write executes.
-        let before_hash = self.handle.read_file(path.clone()).await.ok().map(|d| hash_and_emit(&self.bus, d));
+        // Acquire per-path lock to serialize concurrent writes for hash
+        // chain correctness. Hold through before_hash read → after_hash emit.
+        let lock = self.write_locks.entry(path.clone()).or_insert_with(|| Mutex::new(()));
+        let _guard = lock.lock().await;
+
+        // Use tracked in-memory hash instead of racy filesystem read.
+        let before_hash = self.file_state.get(path).map(|h| h.clone());
 
         let after_hash = if level == CaptureLevel::Full {
             self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
@@ -94,6 +112,11 @@ impl CaptureStage {
         } else {
             None
         };
+
+        // Update tracked state so the next write sees this write's hash.
+        if let Some(ref hash) = after_hash {
+            self.file_state.insert(path.clone(), hash.clone());
+        }
 
         CapturedContent::FileWrite { before_hash, after_hash, size: len }
     }

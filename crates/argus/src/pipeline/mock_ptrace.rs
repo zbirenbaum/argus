@@ -163,13 +163,13 @@ mod tests {
 
         // Resume each stop manually so the driver can proceed.
         let s1 = stream.next().await.expect("stop 1");
-        stream.directive(PipelineDirective::Resume { pid: s1.pid });
+        stream.directive(PipelineDirective::Resume { pid: s1.pid, trace_exit: false });
 
         let s2 = stream.next().await.expect("stop 2");
-        stream.directive(PipelineDirective::Resume { pid: s2.pid });
+        stream.directive(PipelineDirective::Resume { pid: s2.pid, trace_exit: false });
 
         let s3 = stream.next().await.expect("stop 3");
-        stream.directive(PipelineDirective::Resume { pid: s3.pid });
+        stream.directive(PipelineDirective::Resume { pid: s3.pid, trace_exit: false });
 
         assert!(stream.next().await.is_none(), "stream should end");
 
@@ -189,7 +189,7 @@ mod tests {
         // Consume the stop, issue a ReadMemory, then resume.
         let _stop = stream.next().await.expect("stop");
         let data = handle.read_memory(pid, 0x1000, 5).await.expect("read_memory");
-        stream.directive(PipelineDirective::Resume { pid });
+        stream.directive(PipelineDirective::Resume { pid, trace_exit: false });
 
         assert_eq!(data, b"hello");
         // Drain the stream so the background task finishes.

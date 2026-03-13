@@ -31,7 +31,7 @@ use argus::index::{PathIndex, PidIndex, TypeIndex};
 use argus::pipeline::capture_policy::CapturePolicy;
 use argus::snapshot::MerkleTree;
 use argus::state::{FdTable, PipeRegistry, PtyRegistry};
-use argus::storage::{DynObjectStore, DigestCache, EventLog, S3Client, UploadPool};
+use argus::storage::{DigestCache, DynObjectStore, EventLog, S3Client, UploadPool};
 
 use crate::startup;
 use crate::tls_watcher;
@@ -47,10 +47,10 @@ pub async fn run(
     mut mitmdump: Option<net::MitmdumpHandle>,
 ) -> Result<()> {
     let flow_path = mitmdump.as_ref().and_then(|m| m.flow_output_path().cloned());
-    let (local_cas, bus, seq_gen, tls_handle, tls_stop) =
+    let (bus, seq_gen, tls_handle, tls_stop) =
         init_storage_and_bus(&config, flow_path).await?;
 
-    let (shared, api_shutdown_tx) = init_api_server(&config).await?;
+    let (shared, api_shutdown_tx) = init_api_server(&config, bus.clone()).await?;
 
     let spawn = startup::spawn_agent(
         &config.agent_command,
@@ -69,9 +69,10 @@ pub async fn run(
 
     let (ptrace_stream, ptrace_thread) = PtraceStream::spawn(spawn.child_pid);
 
+    emit_initial_state(&bus, &seq_gen, &config);
+
     let runner = build_runner(
         ptrace_stream,
-        local_cas,
         bus.clone(),
         shared,
         seq_gen,
@@ -94,7 +95,6 @@ async fn init_storage_and_bus(
     config: &SupervisorConfig,
     flow_path: Option<std::path::PathBuf>,
 ) -> Result<(
-    Arc<LocalCas>,
     RecordBus,
     SequenceGenerator,
     std::thread::JoinHandle<()>,
@@ -103,9 +103,8 @@ async fn init_storage_and_bus(
     let data_dir = &config.data_dir;
     let cas_path = data_dir.join("cas");
 
-    let local_cas = Arc::new(
-        LocalCas::new(cas_path.clone()).context("failed to initialize CAS store")?,
-    );
+    // The sink owns its own LocalCas — cheap to construct (just holds a path).
+    let sink_cas = LocalCas::new(cas_path.clone()).context("failed to initialize sink CAS")?;
     let event_log = EventLog::new(
         config.agent_id.clone(),
         data_dir.join("events"),
@@ -116,7 +115,7 @@ async fn init_storage_and_bus(
 
     let (broadcast_tx, _) = broadcast::channel::<Event>(4096);
     let bus = build_bus(
-        local_cas.clone(),
+        sink_cas,
         event_log,
         upload_pool,
         config,
@@ -139,7 +138,7 @@ async fn init_storage_and_bus(
         tls_stop.clone(),
     );
 
-    Ok((local_cas, bus, seq_gen, tls_handle, tls_stop))
+    Ok((bus, seq_gen, tls_handle, tls_stop))
 }
 
 /// Initializes shared API state and spawns the API server task.
@@ -148,12 +147,13 @@ async fn init_storage_and_bus(
 /// `true` on `api_shutdown_tx` during shutdown to stop the server.
 async fn init_api_server(
     config: &SupervisorConfig,
+    bus: RecordBus,
 ) -> Result<(SharedState, tokio::sync::watch::Sender<bool>)> {
     let cas_path = config.data_dir.join("cas");
     let api_cas: Arc<dyn argus::cas::Cas> = Arc::new(
         LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
     );
-    let shared = new_shared_state(config.agent_id.clone(), api_cas);
+    let shared = new_shared_state(config.agent_id.clone(), api_cas, bus);
     shared.store_rules(config.build_ruleset());
 
     let listen_addr = config.listen_addr;
@@ -183,7 +183,6 @@ async fn init_api_server(
 /// Constructs all pipeline stages and returns the assembled [`PipelineRunner`].
 fn build_runner(
     ptrace_stream: PtraceStream,
-    local_cas: Arc<LocalCas>,
     bus: RecordBus,
     shared: SharedState,
     seq_gen: SequenceGenerator,
@@ -205,6 +204,11 @@ fn build_runner(
         config.tls.mitm_proxy_port,
     );
 
+    // Shared file content hashes: ClassifyStage sets empty hash on O_TRUNC,
+    // CaptureStage reads before_hash and updates after_hash. Avoids racy
+    // filesystem reads between concurrent writes.
+    let file_state = Arc::new(DashMap::new());
+
     let classify = ClassifyStage::new(
         handle.clone(),
         fd_tables,
@@ -212,12 +216,13 @@ fn build_runner(
         pty_registry,
         transparent_mode,
         proxy_addr,
+        file_state.clone(),
     );
     let rules_stage = CheckRulesStage::new(shared.rules_handle());
     let approvals = ApprovalStage::new(Approvers::new());
 
     let policy = CapturePolicy::default_full();
-    let capture_stage = CaptureStage::new(handle.clone(), bus.clone(), policy);
+    let capture_stage = CaptureStage::new(handle.clone(), bus.clone(), policy, file_state);
 
     let tree_stage = TreeStage::new(MerkleTree::new(), bus.clone(), 1000);
     let stamp_stage = StampStage::new(seq_gen, config.agent_id.clone());
@@ -234,6 +239,8 @@ fn build_runner(
         stamp: stamp_stage,
         bus,
         recorder,
+        paused: shared.pause_flag(),
+        shared,
     }
 }
 
@@ -297,7 +304,7 @@ async fn build_upload_pool(config: &SupervisorConfig) -> Result<Option<Arc<Uploa
 
 /// Constructs the [`RecordBus`] from all configured sinks.
 pub fn build_bus(
-    local_cas: Arc<LocalCas>,
+    local_cas: LocalCas,
     event_log: EventLog,
     upload_pool: Option<Arc<UploadPool>>,
     config: &SupervisorConfig,
@@ -313,15 +320,92 @@ pub fn build_bus(
 
     if let Some(pool) = upload_pool {
         let cache_path = config.data_dir.join("digest-cache.bin");
-        let digest_cache = Arc::new(Mutex::new(DigestCache::new(cache_path)));
+        let digest_cache = Arc::new(DigestCache::new(cache_path));
         sinks.push(Arc::new(RemoteCasSink::new(
-            pool.job_sender(),
+            pool,
             digest_cache,
             config.agent_id.clone(),
         )));
     }
 
     RecordBus::new(sinks)
+}
+
+/// Walks the workspace directory and emits `InitialFile` + `InitialState` events.
+fn emit_initial_state(
+    bus: &RecordBus,
+    seq_gen: &SequenceGenerator,
+    config: &SupervisorConfig,
+) {
+    use argus::cas::ContentHash;
+    use argus::events::snapshot::{InitialFile, InitialState};
+    use std::os::unix::fs::MetadataExt;
+
+    let workspace = &config.workspace_dir;
+    let mut file_count: u64 = 0;
+    let mut total_size: u64 = 0;
+    let mut tree = MerkleTree::new();
+
+    walk_dir_recursive(workspace, &mut |path: &std::path::Path| {
+        let meta = match path.metadata() {
+            Ok(m) if m.is_file() => m,
+            _ => return,
+        };
+
+        let size = meta.len();
+        let mode = meta.mode();
+
+        let hash = match std::fs::read(path) {
+            Ok(data) => ContentHash::from_data(&data),
+            Err(_) => return,
+        };
+
+        let content_hash = hash.to_string();
+        tree.update(path.to_path_buf(), hash);
+
+        let payload = EventPayload::InitialFile(InitialFile {
+            pid: 0,
+            path: path.to_string_lossy().into(),
+            content_hash,
+            size,
+            mode,
+        });
+        let evt = Event::new(seq_gen, config.agent_id.clone(), payload);
+        bus.emit(argus::pipeline::Record::Event(evt));
+
+        file_count += 1;
+        total_size += size;
+    });
+
+    let tree_hash = if file_count > 0 {
+        Some(tree.root_hash().to_string())
+    } else {
+        None
+    };
+
+    let payload = EventPayload::InitialState(InitialState {
+        tree_hash,
+        file_count,
+        total_size,
+    });
+    let evt = Event::new(seq_gen, config.agent_id.clone(), payload);
+    bus.emit(argus::pipeline::Record::Event(evt));
+}
+
+/// Recursively visit all files under `dir`.
+fn walk_dir_recursive(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_dir_recursive(&path, cb);
+        } else {
+            cb(&path);
+        }
+    }
 }
 
 /// Emits the `AgentStart` control event through the bus.

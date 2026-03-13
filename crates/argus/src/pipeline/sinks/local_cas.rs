@@ -1,8 +1,6 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that stores content, manifests, and checkpoints in the local CAS.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 
 use crate::cas::LocalCas;
@@ -17,12 +15,12 @@ use crate::pipeline::sink::{Sink, SinkPriority};
 /// are human-readable and can be verified without a custom binary parser.
 #[derive(Debug)]
 pub struct LocalCasSink {
-    cas: Arc<LocalCas>,
+    cas: LocalCas,
 }
 
 impl LocalCasSink {
     /// Creates a new sink backed by the given CAS store.
-    pub fn new(cas: Arc<LocalCas>) -> Self {
+    pub fn new(cas: LocalCas) -> Self {
         Self { cas }
     }
 }
@@ -79,10 +77,8 @@ mod tests {
 
     fn make_sink() -> (tempfile::TempDir, LocalCasSink) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cas = Arc::new(
-            LocalCas::new(dir.path().join("cas")).expect("LocalCas::new"),
-        );
-        (dir, LocalCasSink::new(Arc::clone(&cas)))
+        let cas = LocalCas::new(dir.path().join("cas")).expect("LocalCas::new");
+        (dir, LocalCasSink::new(cas))
     }
 
     #[test]
@@ -92,10 +88,7 @@ mod tests {
         let hash = ContentHash::from_data(&data);
         let record = Record::Content { hash: hash.clone(), data };
         sink.write(record).expect("write");
-        // Confirm the object landed by constructing a fresh CAS view on the
-        // same root directory — verifying the file actually persisted.
-        let cas: Arc<LocalCas> = Arc::clone(&sink.cas);
-        assert!(cas.exists(&hash).expect("exists"));
+        assert!(sink.cas.exists(&hash).expect("exists"));
     }
 
     #[test]

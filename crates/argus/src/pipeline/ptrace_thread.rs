@@ -43,13 +43,18 @@ const PTRACE_OPTS: ptrace::Options = ptrace::Options::from_bits_truncate(
 fn translate_wait_status(status: WaitStatus) -> RawSyscallStop {
     match status {
         WaitStatus::PtraceSyscall(pid) => {
-            // Syscall-exit stop (SIGTRAP|0x80). We don't have registers
-            // here — the classify stage re-reads them via directive.
+            // Syscall-exit stop (SIGTRAP|0x80). Read registers to get
+            // the syscall number and return value for exit correlation.
+            let (nr, ret) = {
+                use crate::tracer::regs::{get_regs, syscall_nr, syscall_ret};
+                let r = get_regs(pid).unwrap_or_default();
+                (syscall_nr(&r), syscall_ret(&r) as i64)
+            };
             RawSyscallStop {
                 pid,
                 stop_type: StopType::SyscallExit {
-                    syscall_nr: 0,
-                    return_value: 0,
+                    syscall_nr: nr,
+                    return_value: ret,
                 },
             }
         }
@@ -127,8 +132,17 @@ fn translate_wait_status(status: WaitStatus) -> RawSyscallStop {
 /// Returns `true` if the tracee was resumed by this function.
 fn execute_directive(directive: PipelineDirective) -> bool {
     match directive {
-        PipelineDirective::Resume { pid } => {
-            let _ = ptrace::syscall(pid, None);
+        PipelineDirective::Resume { pid, trace_exit } => {
+            if trace_exit {
+                // Stop at the next syscall-exit boundary so the pipeline
+                // can read the return value for entry→exit correlation.
+                let _ = ptrace::syscall(pid, None);
+            } else {
+                // Continue until the next SECCOMP or ptrace event stop.
+                // Avoids per-syscall overhead for threads with no pending
+                // entry awaiting exit correlation.
+                let _ = ptrace::cont(pid, None);
+            }
             true
         }
         PipelineDirective::ReadMemory { pid, addr, len, reply } => {
@@ -147,12 +161,13 @@ fn execute_directive(directive: PipelineDirective) -> bool {
             let _ = reply.send(std::fs::read(&path).map_err(anyhow::Error::from));
             false
         }
-        PipelineDirective::InjectError { pid, errno } => {
-            if let Ok(mut r) = get_regs(pid) {
-                set_ret(&mut r, (-(errno as i64)) as u64);
-                let _ = set_regs(pid, &r);
-            }
-            let _ = ptrace::syscall(pid, None);
+        PipelineDirective::InjectError { pid, errno: _ } => {
+            // At a seccomp entry stop the syscall hasn't run yet. Invalidate
+            // the syscall number so the kernel skips execution and returns
+            // -ENOSYS to the tracee. Using cont avoids extra entry/exit stops.
+            use crate::tracer::regs::set_syscall_nr;
+            let _ = set_syscall_nr(pid, -1);
+            let _ = ptrace::cont(pid, None);
             true
         }
         PipelineDirective::ResolveFd { pid, fd, reply } => {
