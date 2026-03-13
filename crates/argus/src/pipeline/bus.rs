@@ -64,6 +64,13 @@ impl RecordBus {
     /// the remaining sinks. A poisoned mutex causes the sink to be
     /// skipped and an error to be logged.
     pub fn emit(&self, record: Record) {
+        event!(
+            name: "bus.emit",
+            Level::TRACE,
+            blocking_count = self.blocking.len(),
+            async_count = self.async_sinks.len(),
+            "delivering record to sinks",
+        );
         for sink in &self.blocking {
             let mut guard = match sink.lock() {
                 Ok(g) => g,

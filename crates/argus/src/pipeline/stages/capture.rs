@@ -11,6 +11,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use nix::unistd::Pid;
 use tokio::sync::Mutex;
+use tracing::event;
+use tracing::Level;
 use crate::cas::ContentHash;
 use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::{CaptureLevel, CapturePolicy};
@@ -63,6 +65,14 @@ impl CaptureStage {
     /// Capture content for a classified event and return the enriched result.
     pub async fn capture(&self, event: ClassifiedEvent) -> CapturedEvent {
         let pid = event.pid;
+        let cls_name = event.syscall_name();
+        event!(
+            name: "pipeline.capture.start",
+            Level::DEBUG,
+            pid = pid.as_raw(),
+            classification = cls_name.as_str(),
+            "starting content capture",
+        );
         let content = match &event.classification {
             Classification::FileWrite { path, buf_addr, len, .. } => {
                 self.capture_write(pid, path, *buf_addr, *len).await
@@ -92,6 +102,14 @@ impl CaptureStage {
         len: usize,
     ) -> CapturedContent {
         let level = self.policy.level(path, pid.as_raw() as u32, len);
+        event!(
+            name: "pipeline.capture.write",
+            Level::DEBUG,
+            pid = pid.as_raw(),
+            path = %path.display(),
+            len,
+            "capturing write content",
+        );
         if level == CaptureLevel::Ignore {
             return CapturedContent::None;
         }

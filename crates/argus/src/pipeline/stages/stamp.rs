@@ -7,6 +7,9 @@
 
 use std::sync::Arc;
 
+use tracing::event;
+use tracing::Level;
+
 use crate::cas::ContentHash;
 use crate::events::envelope::{Event, EventPayload, SequenceGenerator, timestamp_pair};
 use crate::events::{file as ef, io as eio, network as en, process as ep};
@@ -30,7 +33,16 @@ impl StampStage {
         let pid = captured.pid.as_raw() as u32;
         let tree_str = tree_hash.map(|h| h.to_string());
         let payload = to_payload(pid, captured.classification, captured.content, tree_str)?;
-        Some(self.make_event(payload))
+        let evt = self.make_event(payload);
+        event!(
+            name: "pipeline.stamp",
+            Level::DEBUG,
+            event.seq = evt.seq,
+            event.type_ = evt.payload.event_type_tag(),
+            pid,
+            "stamped event",
+        );
+        Some(evt)
     }
 
     /// Build a `Blocked` event for a rule-blocked syscall.

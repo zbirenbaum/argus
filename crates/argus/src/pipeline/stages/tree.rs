@@ -45,9 +45,17 @@ impl TreeStage {
         let path = mutated_path(&event.classification)?;
         let hash = content_hash(event)?;
 
+        let path_display = path.display().to_string();
         let mut tree = self.tree.lock().unwrap();
         tree.update(path, hash);
         let root = tree.root_hash();
+        event!(
+            name: "pipeline.tree.update",
+            Level::DEBUG,
+            path = path_display,
+            root_hash = %root,
+            "tree updated",
+        );
 
         // Emit checkpoint after every N mutations.
         let count = self.events_since_checkpoint.fetch_add(1, Ordering::Relaxed) + 1;

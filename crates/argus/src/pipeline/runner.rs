@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::StreamExt;
 
+use tracing::event;
+use tracing::Level;
+
 use crate::api::routes::submit_pending_approval;
 use crate::api::state::SharedState;
 use crate::events::{ApprovalDecision, EventPayload};
@@ -72,6 +75,7 @@ impl PipelineRunner {
     /// Consumes `self`; the caller should proceed with shutdown after this
     /// returns.
     pub async fn run(mut self) {
+        event!(name: "pipeline.ptrace.started", Level::INFO, "ptrace pipeline running");
         while let Some(stop) = self.ptrace.next().await {
             if let Some(ref mut rec) = self.recorder {
                 rec.record(&stop);
@@ -83,6 +87,15 @@ impl PipelineRunner {
             self.wait_if_paused().await;
 
             let classified = self.classify.classify(stop).await;
+            let pid_raw = classified.pid.as_raw();
+            let cls_name = classified.syscall_name();
+            event!(
+                name: "pipeline.ptrace.classified",
+                Level::DEBUG,
+                pid = pid_raw,
+                classification = cls_name.as_str(),
+                "classified syscall stop",
+            );
 
             // Passthrough stops need no further processing; resume immediately
             // to minimize latency on the hot path. Use ptrace::syscall only
@@ -91,6 +104,12 @@ impl PipelineRunner {
             // ptrace::cont to avoid per-syscall overhead on all threads.
             if matches!(classified.classification, Classification::Passthrough) {
                 let trace_exit = self.classify.pending.contains_key(&classified.pid);
+                event!(
+                    name: "pipeline.ptrace.passthrough",
+                    Level::TRACE,
+                    pid = pid_raw,
+                    "passthrough, resuming immediately",
+                );
                 self.ptrace.directive(PipelineDirective::Resume {
                     pid: classified.pid,
                     trace_exit,
@@ -161,12 +180,28 @@ impl PipelineRunner {
             }
 
             let captured = self.capture.capture(classified).await;
+            let has_content = !matches!(captured.content, crate::pipeline::captured::CapturedContent::None);
+            event!(
+                name: "pipeline.ptrace.captured",
+                Level::DEBUG,
+                pid = captured.pid.as_raw(),
+                has_content,
+                "content capture complete",
+            );
             self.ptrace.directive(PipelineDirective::Resume {
                 pid: captured.pid,
                 trace_exit: false,
             });
 
             let tree_hash = self.tree.update(&captured);
+            let has_tree_hash = tree_hash.is_some();
+            event!(
+                name: "pipeline.ptrace.tree_updated",
+                Level::DEBUG,
+                pid = captured.pid.as_raw(),
+                has_tree_hash,
+                "tree stage complete",
+            );
 
             // Sync tree snapshot to SharedState and persist to CAS so
             // the /tree and /restore endpoints can serve it.
@@ -180,16 +215,24 @@ impl PipelineRunner {
                 snapshot.store(self.shared.cas().as_ref()).ok()
             };
 
-            if let Some(event) = self.stamp.stamp(captured, tree_hash) {
+            if let Some(evt) = self.stamp.stamp(captured, tree_hash) {
+                event!(
+                    name: "pipeline.ptrace.emitted",
+                    Level::DEBUG,
+                    event.seq = evt.seq,
+                    event.type_ = evt.payload.event_type_tag(),
+                    "event emitted to bus",
+                );
                 // Use the CAS storage hash (not root_hash) for restore
                 // lookups since MerkleTree::load expects the CAS hash.
                 if let Some(ref th) = cas_tree_hash {
-                    self.shared.insert_tree_hash(event.seq, th.to_string());
+                    self.shared.insert_tree_hash(evt.seq, th.to_string());
                 }
-                self.bus.emit(crate::pipeline::Record::Event(event));
+                self.bus.emit(crate::pipeline::Record::Event(evt));
             }
         }
 
+        event!(name: "pipeline.ptrace.stopped", Level::INFO, "ptrace pipeline finished, shutting down bus");
         // Flush all sinks before the runner is dropped. The runtime hands
         // ownership of the bus to the runner via into_pipeline, so shutdown
         // must happen here rather than in the caller.
