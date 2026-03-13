@@ -34,6 +34,7 @@ bytesize = { version = "2", features = ["serde"] }
 bincode = "1"
 fastrand = "2"
 bytes = "1"
+futures = "0.3"
 # Used in cas/store.rs for atomic writes (not just tests).
 tempfile = "3"
 base64 = "0.22"

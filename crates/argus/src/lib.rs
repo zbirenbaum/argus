@@ -9,3 +9,4 @@ pub mod snapshot;
 pub mod index;
 pub mod net;
 pub mod api;
+pub mod pipeline;
