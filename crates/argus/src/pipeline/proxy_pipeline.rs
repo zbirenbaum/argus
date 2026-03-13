@@ -86,14 +86,18 @@ fn poll_once(watcher: &mut FlowWatcher, ctx: &PipelineContext) {
                     event.type_ = evt.payload.event_type_tag(),
                     "proxy pipeline emitting event {{event.seq}} {{event.type_}}",
                 );
-                if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(Record::Event(evt)) {
+                let record = Record::Event(evt);
+                if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(record.clone()) {
+                    if let Some(ref overflow) = ctx.overflow {
+                        overflow.push(&record);
+                    }
                     for (sink_name, err) in &failures {
                         event!(
                             name: "pipeline.emit.required_sink_failed",
                             Level::ERROR,
                             sink.name = sink_name.as_str(),
                             error.message = %err,
-                            "required sink failed on proxy path, event may be lost",
+                            "required sink failed on proxy path, buffered in overflow queue",
                         );
                     }
                 }
@@ -128,6 +132,7 @@ mod tests {
             Arc::new(SequenceGenerator::new(0)),
             RecordBus::new(vec![]),
             "test-agent".into(),
+            None,
         )
     }
 

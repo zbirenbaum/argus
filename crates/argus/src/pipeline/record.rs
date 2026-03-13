@@ -1,11 +1,13 @@
 // Rust guideline compliant 2026-02-21
 //! The `Record` type — the unit of data flowing into sinks.
 
+use serde::{Deserialize, Serialize};
+
 use crate::cas::ContentHash;
 use crate::events::Event;
 
 /// A unit written to the record bus and forwarded to all sinks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Record {
     /// A structured supervisor event.
     Event(Event),

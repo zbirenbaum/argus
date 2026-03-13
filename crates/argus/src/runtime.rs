@@ -301,6 +301,54 @@ impl SupervisorRuntime {
         Ok(Some((handle, stop)))
     }
 
+    /// Spawn a background thread that periodically drains the overflow queue.
+    ///
+    /// Returns `None` when no overflow queue is configured. Otherwise returns
+    /// `Some((join_handle, stop_flag))`. Set `stop_flag` and join during
+    /// shutdown to ensure a final drain is performed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS fails to create the thread.
+    pub fn spawn_overflow_flush_thread(
+        &self,
+    ) -> Result<Option<(JoinHandle<()>, Arc<AtomicBool>)>> {
+        let Some(ref overflow) = self.ctx.overflow else {
+            return Ok(None);
+        };
+        let overflow = overflow.clone();
+        let bus = self.ctx.bus.clone();
+        let retry_ms = self.config.overflow.retry_interval_ms;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        let handle = thread::Builder::new()
+            .name("overflow-flush".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering;
+                loop {
+                    if stop_clone.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let n = overflow.flush_to_bus(&bus);
+                    if n > 0 {
+                        event!(
+                            name: "pipeline.overflow.flushed",
+                            Level::INFO,
+                            records.count = n,
+                            "overflow flush drained {{records.count}} records",
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(retry_ms));
+                }
+                // Final drain on shutdown.
+                overflow.flush_to_bus(&bus);
+            })
+            .context("failed to spawn overflow flush thread")?;
+
+        Ok(Some((handle, stop)))
+    }
+
     /// Construct all pipeline stages and return the runner.
     ///
     /// Consumes `self` — the context and config move into the runner.

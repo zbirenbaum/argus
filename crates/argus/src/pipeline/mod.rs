@@ -7,6 +7,7 @@
 //! to the `RecordBus`.
 
 pub(crate) mod emit_result;
+pub(crate) mod overflow;
 pub(crate) mod durability;
 pub(crate) mod bus;
 pub(crate) mod capture_policy;

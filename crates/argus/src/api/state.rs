@@ -78,7 +78,7 @@ impl Bridge {
     }
 
     /// Creates a new bridge with an optional overflow queue.
-    pub fn with_overflow(
+    pub(crate) fn with_overflow(
         agent_id: CompactString,
         cas: Arc<dyn Cas>,
         bus: RecordBus,
@@ -267,7 +267,7 @@ pub fn new_shared_state(agent_id: CompactString, cas: Arc<dyn Cas>, bus: RecordB
 }
 
 /// Creates a new shared bridge handle with an overflow queue.
-pub fn new_shared_state_with_overflow(
+pub(crate) fn new_shared_state_with_overflow(
     agent_id: CompactString,
     cas: Arc<dyn Cas>,
     bus: RecordBus,

@@ -11,6 +11,7 @@ use compact_str::CompactString;
 
 use crate::events::SequenceGenerator;
 use crate::pipeline::bus::RecordBus;
+use crate::pipeline::overflow::OverflowQueue;
 
 /// Resources shared across all pipeline variants.
 ///
@@ -24,12 +25,21 @@ pub struct PipelineContext {
     pub(crate) bus: RecordBus,
     /// Identifier stamped onto every emitted event.
     pub(crate) agent_id: CompactString,
+    /// Overflow queue for non-ptrace paths that cannot freeze the tracee.
+    ///
+    /// `None` when the overflow feature is disabled (e.g. data_dir missing).
+    pub(crate) overflow: Option<Arc<OverflowQueue>>,
 }
 
 impl PipelineContext {
     /// Create a new pipeline context.
-    pub(crate) fn new(seq: Arc<SequenceGenerator>, bus: RecordBus, agent_id: CompactString) -> Self {
-        Self { seq, bus, agent_id }
+    pub(crate) fn new(
+        seq: Arc<SequenceGenerator>,
+        bus: RecordBus,
+        agent_id: CompactString,
+        overflow: Option<Arc<OverflowQueue>>,
+    ) -> Self {
+        Self { seq, bus, agent_id, overflow }
     }
 }
 
@@ -47,5 +57,16 @@ mod tests {
         let second = cloned_seq.next_seq();
         // Both callers on the same Arc see strictly increasing values.
         assert!(second > first);
+    }
+
+    #[test]
+    fn overflow_none_by_default_in_tests() {
+        let ctx = PipelineContext::new(
+            Arc::new(SequenceGenerator::new(0)),
+            RecordBus::new(vec![]),
+            "test-agent".into(),
+            None,
+        );
+        assert!(ctx.overflow.is_none());
     }
 }

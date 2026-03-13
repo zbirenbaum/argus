@@ -119,6 +119,10 @@ pub struct SupervisorConfig {
     /// Merkle tree batched finalization and checkpoint tuning.
     #[serde(default)]
     pub tree: TreeConfig,
+
+    /// SQLite overflow queue for non-ptrace pipeline threads.
+    #[serde(default)]
+    pub overflow: OverflowConfig,
 }
 
 /// UID/GID to drop to before exec'ing the agent process.
@@ -127,6 +131,42 @@ pub struct RunAs {
     pub uid: u32,
     #[serde(default)]
     pub gid: Option<u32>,
+}
+
+/// SQLite overflow queue configuration for non-ptrace pipeline threads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OverflowConfig {
+    /// Max records buffered in memory before spilling to SQLite.
+    #[serde(default = "default_overflow_memory_limit")]
+    pub memory_limit: usize,
+    /// Initial retry drain interval in milliseconds.
+    #[serde(default = "default_overflow_retry_ms")]
+    pub retry_interval_ms: u64,
+    /// Maximum retry interval in milliseconds after backoff.
+    #[serde(default = "default_overflow_max_retry_ms")]
+    pub max_retry_interval_ms: u64,
+}
+
+fn default_overflow_memory_limit() -> usize {
+    1024
+}
+
+fn default_overflow_retry_ms() -> u64 {
+    1000
+}
+
+fn default_overflow_max_retry_ms() -> u64 {
+    60_000
+}
+
+impl Default for OverflowConfig {
+    fn default() -> Self {
+        Self {
+            memory_limit: default_overflow_memory_limit(),
+            retry_interval_ms: default_overflow_retry_ms(),
+            max_retry_interval_ms: default_overflow_max_retry_ms(),
+        }
+    }
 }
 
 impl Default for SupervisorConfig {
@@ -150,6 +190,7 @@ impl Default for SupervisorConfig {
             redact: RedactConfig::default(),
             outputs: default_outputs(),
             tree: TreeConfig::default(),
+            overflow: OverflowConfig::default(),
         }
     }
 }

@@ -74,14 +74,18 @@ fn poll_once(watcher: &mut KeylogWatcher, ctx: &PipelineContext) {
                     event.seq = evt.seq,
                     "keylog pipeline emitting TlsKeys event {{event.seq}}",
                 );
-                if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(Record::Event(evt)) {
+                let record = Record::Event(evt);
+                if let EmitResult::RequiredFailed(failures) = ctx.bus.emit(record.clone()) {
+                    if let Some(ref overflow) = ctx.overflow {
+                        overflow.push(&record);
+                    }
                     for (sink_name, err) in &failures {
                         event!(
                             name: "pipeline.emit.required_sink_failed",
                             Level::ERROR,
                             sink.name = sink_name.as_str(),
                             error.message = %err,
-                            "required sink failed on keylog path, event may be lost",
+                            "required sink failed on keylog path, buffered in overflow queue",
                         );
                     }
                 }
@@ -116,6 +120,7 @@ mod tests {
             Arc::new(SequenceGenerator::new(0)),
             RecordBus::new(vec![]),
             "test-agent".into(),
+            None,
         )
     }
 

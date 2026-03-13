@@ -260,11 +260,16 @@ impl OverflowQueue {
 
 /// Deserialize and emit a single serialized record to the bus.
 ///
-/// Returns `Some(1)` on successful emit, `None` on deserialize failure.
+/// Returns `Some(1)` when the record was deserialized and forwarded to
+/// the bus (regardless of whether required sinks accepted it), or `None`
+/// when deserialization fails. Emit failures are logged by the bus itself.
 fn emit_bytes(bus: &RecordBus, bytes: &[u8]) -> Option<usize> {
     match serde_json::from_slice::<Record>(bytes) {
         Ok(record) => {
-            bus.emit(record);
+            // Emit result is intentionally ignored here: persistent sink
+            // failures during drain are logged by callers and the bus. We
+            // remove the row regardless to prevent unbounded db growth.
+            let _ = bus.emit(record);
             Some(1)
         }
         Err(e) => {
