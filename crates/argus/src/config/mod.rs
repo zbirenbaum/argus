@@ -19,7 +19,7 @@ mod tls;
 
 pub use capture::{CaptureConfig, CapturePathConfig};
 pub use durability::{DurabilityConfig, DurabilityMode, DurabilityOverride};
-pub use enrich::{CategoryConfig, EnrichConfig};
+pub use enrich::{Category, CategoryConfig, EnrichConfig};
 pub use output::OutputConfig;
 pub use pause_rules::{
     MatchKind, PauseAction, PauseMatchKind, PauseRule, Rule, RuleDecision, RuleSet,

@@ -10,6 +10,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::enrich::default_true;
+
 /// Whether built-in redaction rule sets are active.
 ///
 /// Each flag enables a curated set of patterns for a common credential
@@ -144,10 +146,6 @@ fn default_scan_fields() -> Vec<String> {
         "stdio.text".into(),
         "exec.envp".into(),
     ]
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_redacted_token() -> String {
