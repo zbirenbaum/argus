@@ -108,6 +108,7 @@ mod tests {
             ts_wall: String::new(),
             agent_id: String::new(),
             vclock: None,
+            redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {
                 agent_id: String::new(),
                 supervisor_pid_host: None,

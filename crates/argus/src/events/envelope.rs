@@ -92,6 +92,22 @@ impl EventPayload {
     }
 }
 
+/// A single redaction applied to an event field.
+///
+/// Attached to the event envelope so consumers can see exactly what was
+/// scrubbed and why, without exposing the full original value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Redaction {
+    /// Dot-path of the redacted field (e.g. `"http_request.headers"`).
+    pub field: String,
+
+    /// The value after redaction, with sensitive portions masked.
+    pub value: String,
+
+    /// Name of the rule that triggered this redaction.
+    pub rule: String,
+}
+
 /// Immutable event record emitted by the supervisor.
 ///
 /// Contains dual timestamps for local ordering and cross-agent correlation,
@@ -104,6 +120,9 @@ pub struct Event {
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vclock: Option<HashMap<String, u64>>,
+    /// Fields that were redacted during pipeline processing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<Redaction>,
     #[serde(flatten)]
     pub payload: EventPayload,
 }
@@ -319,6 +338,7 @@ impl Event {
             ts_wall,
             agent_id,
             vclock: None,
+            redactions: Vec::new(),
             payload,
         }
     }

@@ -92,6 +92,7 @@ mod tests {
             ts_wall: "2026-01-01T00:00:00Z".to_owned(),
             agent_id: "test-agent".to_owned(),
             vclock: None,
+            redactions: Vec::new(),
             payload: EventPayload::AgentStart(AgentStart {
                 agent_id: "test-agent".to_owned(),
                 supervisor_pid_host: None,

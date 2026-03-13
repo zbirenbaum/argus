@@ -276,6 +276,53 @@ pub struct HttpResponse {
 }
 ```
 
+### Event envelope — redaction audit trail
+
+When the redaction stage scrubs a field, it appends a `Redaction` entry to the event envelope. This makes it trivially easy to see *what* was redacted, the *masked value* (sensitive portions replaced), and *which rule* triggered it — without exposing the original secret.
+
+```rust
+pub struct Redaction {
+    pub field: String,    // dot-path of the redacted field
+    pub value: String,    // value after masking (e.g. "Authorization: sk_api_******")
+    pub rule: String,     // name of the rule that matched
+}
+
+pub struct Event {
+    pub seq: u64,
+    pub ts_monotonic: u64,
+    pub ts_wall: String,
+    pub agent_id: String,
+    pub vclock: Option<HashMap<String, u64>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redactions: Vec<Redaction>,
+    #[serde(flatten)]
+    pub payload: EventPayload,
+}
+```
+
+Example output when a redaction fires:
+
+```json
+{
+  "seq": 42,
+  "ts_wall": "2026-03-13T10:00:00Z",
+  "agent_id": "agent-1",
+  "type": "http_request",
+  "method": "POST",
+  "url": "https://api.example.com/v1/chat",
+  "headers": "Authorization: [REDACTED]",
+  "redactions": [
+    {
+      "field": "http_request.headers",
+      "value": "Authorization: sk_api_******",
+      "rule": "api_keys"
+    }
+  ]
+}
+```
+
+When no redactions occur, the `redactions` field is omitted entirely — zero noise for clean events.
+
 ### Enrichment Catalog
 
 Every piece of data the supervisor has access to, documented for future per-category opt-out and size-based handling.

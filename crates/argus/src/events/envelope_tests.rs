@@ -328,3 +328,43 @@ fn all_variants_round_trip() {
         assert_eq!(event.payload, back.payload);
     }
 }
+
+#[test]
+fn redactions_omitted_when_empty() {
+    let seq_gen = SequenceGenerator::default();
+    let event = Event::new(
+        &seq_gen,
+        "a".into(),
+        EventPayload::Fork(process::Fork { parent_pid: 1, child_pid: 2 }),
+    );
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(!json.contains("redactions"));
+}
+
+#[test]
+fn redactions_round_trip() {
+    let seq_gen = SequenceGenerator::default();
+    let mut event = Event::new(
+        &seq_gen,
+        "a".into(),
+        EventPayload::Fork(process::Fork { parent_pid: 1, child_pid: 2 }),
+    );
+    event.redactions.push(Redaction {
+        field: "http_request.headers".to_owned(),
+        value: "Authorization: sk_api_******".to_owned(),
+        rule: "api_keys".to_owned(),
+    });
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"redactions\""));
+    assert!(json.contains("sk_api_******"));
+    assert!(json.contains("api_keys"));
+    let back: Event = serde_json::from_str(&json).unwrap();
+    assert_eq!(event.redactions, back.redactions);
+}
+
+#[test]
+fn redactions_deserialize_from_missing() {
+    let json = r#"{"seq":0,"ts_monotonic":0,"ts_wall":"t","agent_id":"a","type":"fork","parent_pid":1,"child_pid":2}"#;
+    let event: Event = serde_json::from_str(json).unwrap();
+    assert!(event.redactions.is_empty());
+}

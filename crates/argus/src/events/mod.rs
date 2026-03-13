@@ -20,4 +20,4 @@ pub mod snapshot;
 #[doc(inline)]
 pub use control::ApprovalDecision;
 #[doc(inline)]
-pub use envelope::{Event, EventPayload, SequenceGenerator};
+pub use envelope::{Event, EventPayload, Redaction, SequenceGenerator};

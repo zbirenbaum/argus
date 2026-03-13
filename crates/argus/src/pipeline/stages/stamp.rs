@@ -71,6 +71,7 @@ impl StampStage {
             ts_wall,
             agent_id: self.agent_id.clone(),
             vclock: None,
+            redactions: Vec::new(),
             payload,
         }
     }
