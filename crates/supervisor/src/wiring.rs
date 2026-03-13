@@ -83,7 +83,7 @@ pub async fn run(
     runner.run().await;
     event!(Level::DEBUG, "wiring: pipeline.run() returned, beginning shutdown");
 
-    shutdown(tls_stop, tls_handle, mitmdump.as_mut(), &bus, ptrace_thread, api_shutdown_tx)?;
+    shutdown(tls_stop, tls_handle, mitmdump.as_mut(), ptrace_thread, api_shutdown_tx)?;
 
     Ok(())
 }
@@ -229,19 +229,19 @@ fn build_runner(
     // Raw stop recording is opt-in; no config field exposes it yet.
     let recorder: Option<RawStopRecorder> = None;
 
-    PipelineRunner {
-        ptrace: ptrace_stream,
+    PipelineRunner::new(
+        ptrace_stream,
         classify,
-        rules: rules_stage,
+        rules_stage,
         approvals,
-        capture: capture_stage,
-        tree: tree_stage,
-        stamp: stamp_stage,
+        capture_stage,
+        tree_stage,
+        stamp_stage,
         bus,
         recorder,
-        paused: shared.pause_flag(),
+        shared.pause_flag(),
         shared,
-    }
+    )
 }
 
 /// Shuts down all subsystems in dependency order.
@@ -249,7 +249,6 @@ fn shutdown(
     tls_stop: Arc<std::sync::atomic::AtomicBool>,
     tls_handle: std::thread::JoinHandle<()>,
     mitmdump: Option<&mut net::MitmdumpHandle>,
-    bus: &RecordBus,
     ptrace_thread: std::thread::JoinHandle<()>,
     api_shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
@@ -266,7 +265,8 @@ fn shutdown(
         event!(Level::DEBUG, "shutdown: mitmdump stopped");
     }
 
-    bus.shutdown_all();
+    // Bus is shut down inside PipelineRunner::run() after the pipeline
+    // loop exits, before the runner is dropped.
     let _ = api_shutdown_tx.send(true);
     ptrace_thread.join().ok();
 

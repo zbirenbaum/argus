@@ -25,35 +25,48 @@ use crate::pipeline::stages::check_rules::RuleAction;
 
 /// Owns all pipeline stages and drives the main processing loop.
 ///
-/// Construct via field initialization, then call [`PipelineRunner::run`].
+/// Construct via [`PipelineRunner::new`], then call [`PipelineRunner::run`].
 /// The runner blocks until [`PtraceStream`] signals that the traced process
 /// has exited and yields no more stops.
 pub struct PipelineRunner {
-    /// Source of raw ptrace stops.
-    pub ptrace: PtraceStream,
-    /// Classifies stops into semantic operations.
-    pub classify: ClassifyStage,
-    /// Evaluates block and pause-before rules.
-    pub rules: CheckRulesStage,
-    /// Sends pause-before actions to the operator for approval.
-    pub approvals: ApprovalStage,
-    /// Reads content from tracee memory and CAS.
-    pub capture: CaptureStage,
-    /// Applies Merkle tree updates and produces tree hashes.
-    pub tree: TreeStage,
-    /// Assigns sequence numbers, timestamps, and agent ID.
-    pub stamp: StampStage,
-    /// Fans completed events out to all registered sinks.
-    pub bus: RecordBus,
-    /// Optional raw-stop recorder for debugging and replay.
-    pub recorder: Option<RawStopRecorder>,
-    /// Shared pause flag set by the API server.
-    pub paused: Arc<AtomicBool>,
-    /// Bridge to the API server for pending approvals.
-    pub shared: SharedState,
+    ptrace: PtraceStream,
+    classify: ClassifyStage,
+    rules: CheckRulesStage,
+    approvals: ApprovalStage,
+    capture: CaptureStage,
+    tree: TreeStage,
+    stamp: StampStage,
+    bus: RecordBus,
+    recorder: Option<RawStopRecorder>,
+    paused: Arc<AtomicBool>,
+    shared: SharedState,
 }
 
 impl PipelineRunner {
+    /// Construct a new pipeline runner with the given stages and bus.
+    ///
+    /// Called by `SupervisorRuntime::into_pipeline`; not part of the
+    /// public API.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        ptrace: PtraceStream,
+        classify: ClassifyStage,
+        rules: CheckRulesStage,
+        approvals: ApprovalStage,
+        capture: CaptureStage,
+        tree: TreeStage,
+        stamp: StampStage,
+        bus: RecordBus,
+        recorder: Option<RawStopRecorder>,
+        paused: Arc<AtomicBool>,
+        shared: SharedState,
+    ) -> Self {
+        Self {
+            ptrace, classify, rules, approvals, capture,
+            tree, stamp, bus, recorder, paused, shared,
+        }
+    }
+
     /// Run the pipeline until the traced process exits.
     ///
     /// Consumes `self`; the caller should proceed with shutdown after this
@@ -176,6 +189,11 @@ impl PipelineRunner {
                 self.bus.emit(crate::pipeline::Record::Event(event));
             }
         }
+
+        // Flush all sinks before the runner is dropped. The runtime hands
+        // ownership of the bus to the runner via into_pipeline, so shutdown
+        // must happen here rather than in the caller.
+        self.bus.shutdown_all();
     }
 
     /// Spin-wait while the pause flag is set, yielding to the runtime.
