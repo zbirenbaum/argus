@@ -205,12 +205,19 @@ fn ptrace_thread_main(
             break;
         }
 
-        // Block until the pipeline sends back a directive.
-        match directive_rx.blocking_recv() {
-            Some(directive) => {
-                execute_directive(directive);
+        // Process directives until one resumes the tracee. A single stop
+        // may require multiple non-resuming directives (e.g. several
+        // ReadString calls to collect syscall arguments) before the
+        // pipeline finally sends a Resume or InjectError.
+        loop {
+            match directive_rx.blocking_recv() {
+                Some(directive) => {
+                    if execute_directive(directive) {
+                        break; // tracee resumed, go back to waitpid
+                    }
+                }
+                None => return, // pipeline dropped, exit thread
             }
-            None => break,
         }
     }
 }
