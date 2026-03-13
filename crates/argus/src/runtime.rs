@@ -245,7 +245,11 @@ impl SupervisorRuntime {
     ///
     /// Returns `(join_handle, stop_flag)`. Set `stop_flag` to `true` and
     /// join the handle during shutdown to drain final TLS key data.
-    pub fn spawn_keylog_pipeline(&self) -> (JoinHandle<()>, Arc<AtomicBool>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS fails to create the thread.
+    pub fn spawn_keylog_pipeline(&self) -> Result<(JoinHandle<()>, Arc<AtomicBool>)> {
         let keylog_path = self.config.tls.keylog_path.clone();
         let ctx = self.ctx.clone();
         let stop = Arc::new(AtomicBool::new(false));
@@ -256,20 +260,26 @@ impl SupervisorRuntime {
             .spawn(move || {
                 crate::pipeline::keylog_pipeline::run(keylog_path, ctx, stop_clone, TLS_POLL_INTERVAL);
             })
-            .expect("failed to spawn keylog pipeline thread");
+            .context("failed to spawn keylog pipeline thread")?;
 
-        (handle, stop)
+        Ok((handle, stop))
     }
 
     /// Spawn the proxy pipeline thread if a flow path is configured.
     ///
-    /// Returns `None` when no flow path is provided (mitmdump not running).
-    /// Otherwise returns `(join_handle, stop_flag)`.
+    /// Returns `Ok(None)` when no flow path is provided (mitmdump not running).
+    /// Otherwise returns `Ok(Some((join_handle, stop_flag)))`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS fails to create the thread.
     pub fn spawn_proxy_pipeline(
         &self,
         flow_path: Option<PathBuf>,
-    ) -> Option<(JoinHandle<()>, Arc<AtomicBool>)> {
-        let path = flow_path?;
+    ) -> Result<Option<(JoinHandle<()>, Arc<AtomicBool>)>> {
+        let Some(path) = flow_path else {
+            return Ok(None);
+        };
         let ctx = self.ctx.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = stop.clone();
@@ -279,9 +289,9 @@ impl SupervisorRuntime {
             .spawn(move || {
                 crate::pipeline::proxy_pipeline::run(Some(path), ctx, stop_clone, TLS_POLL_INTERVAL);
             })
-            .expect("failed to spawn proxy pipeline thread");
+            .context("failed to spawn proxy pipeline thread")?;
 
-        Some((handle, stop))
+        Ok(Some((handle, stop)))
     }
 
     /// Construct all pipeline stages and return the runner.
@@ -290,11 +300,15 @@ impl SupervisorRuntime {
     /// The returned `oneshot::Receiver<Result<()>>` fires once `PTRACE_SEIZE`
     /// completes. Await it before releasing the child's sync pipe so the
     /// child cannot execute ahead of the seize.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ptrace thread or tree-stage CAS fails to initialize.
     pub fn into_pipeline(
         self,
         child_pid: Pid,
-    ) -> (PipelineRunner, tokio::sync::oneshot::Receiver<Result<()>>, JoinHandle<()>) {
-        let (ptrace_stream, seize_rx, ptrace_thread) = PtraceStream::spawn(child_pid);
+    ) -> Result<(PipelineRunner, tokio::sync::oneshot::Receiver<Result<()>>, JoinHandle<()>)> {
+        let (ptrace_stream, seize_rx, ptrace_thread) = PtraceStream::spawn(child_pid)?;
         let handle = ptrace_stream.handle();
 
         let fd_tables: Arc<DashMap<Pid, FdTable>> = Arc::new(DashMap::new());
@@ -337,7 +351,7 @@ impl SupervisorRuntime {
         // LocalCas root and upload pool, but each holds its own LocalCas handle
         // (which is cheap — it is just a path wrapper with no open file handles).
         let tree_cas = LocalCas::new(self.config.data_dir.join("cas"))
-            .expect("failed to initialize tree-stage CAS");
+            .context("failed to initialize tree-stage CAS")?;
         let tree_durability = DurabilityLayer::new(tree_cas, self.upload_pool, None);
         let tree_stage = TreeStage::new(MerkleTree::new(), tree_durability, 1000);
         let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.ctx.agent_id.clone(), self.config.enrich.clone());
@@ -360,7 +374,7 @@ impl SupervisorRuntime {
             self.shared,
         );
 
-        (runner, seize_rx, ptrace_thread)
+        Ok((runner, seize_rx, ptrace_thread))
     }
 }
 

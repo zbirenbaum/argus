@@ -49,15 +49,15 @@ pub async fn run(
 
     crate::signals::install_handler();
 
-    let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline();
-    let proxy = runtime.spawn_proxy_pipeline(flow_path);
+    let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline()?;
+    let proxy = runtime.spawn_proxy_pipeline(flow_path)?;
 
     runtime.emit_initial_state();
 
     // Spawn the pipeline (which starts the ptrace thread and calls PTRACE_SEIZE)
     // before releasing the sync pipe. The child is still blocked on the pipe read,
     // so seize is guaranteed to happen before the child executes any syscalls.
-    let (runner, seize_rx, ptrace_thread) = runtime.into_pipeline(spawn.child_pid);
+    let (runner, seize_rx, ptrace_thread) = runtime.into_pipeline(spawn.child_pid)?;
 
     // Wait for PTRACE_SEIZE to complete before letting the child proceed.
     // Closing the write end of the sync pipe unblocks the child.

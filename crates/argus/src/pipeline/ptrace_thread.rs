@@ -439,7 +439,11 @@ impl PtraceStream {
     /// The returned `oneshot::Receiver<Result<()>>` fires once `PTRACE_SEIZE`
     /// completes (or fails). The caller must await this before releasing the
     /// child's sync pipe so the tracee cannot advance ahead of the seize.
-    pub fn spawn(child_pid: Pid) -> (Self, oneshot::Receiver<Result<()>>, std::thread::JoinHandle<()>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS fails to create the ptrace thread.
+    pub fn spawn(child_pid: Pid) -> Result<(Self, oneshot::Receiver<Result<()>>, std::thread::JoinHandle<()>)> {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let (directive_tx, directive_rx) = mpsc::unbounded_channel();
         let (seize_tx, seize_rx) = oneshot::channel();
@@ -447,10 +451,10 @@ impl PtraceStream {
         let handle = std::thread::Builder::new()
             .name("ptrace-loop".into())
             .spawn(move || ptrace_thread_main(child_pid, stop_tx, directive_rx, seize_tx))
-            .expect("failed to spawn ptrace thread");
+            .map_err(|e| anyhow::anyhow!("failed to spawn ptrace thread: {e}"))?;
 
         let stream = Self { stop_rx, directive_tx };
-        (stream, seize_rx, handle)
+        Ok((stream, seize_rx, handle))
     }
 
     /// Send a directive to the ptrace thread without awaiting a reply.
