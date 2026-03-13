@@ -58,6 +58,7 @@ pub struct SupervisorRuntime {
     ctx: PipelineContext,
     shared: SharedState,
     durability: DurabilityLayer,
+    upload_pool: Option<Arc<UploadPool>>,
     outputs: OutputList,
     redact: RedactStage,
 }
@@ -101,7 +102,7 @@ impl SupervisorRuntime {
         );
 
         let (broadcast_tx, _) = broadcast::channel::<Event>(4096);
-        let bus = build_bus(sink_cas, event_log, upload_pool, &config, broadcast_tx);
+        let bus = build_bus(sink_cas, event_log, upload_pool.clone(), &config, broadcast_tx);
 
         let seq = Arc::new(SequenceGenerator::default());
         let ctx = PipelineContext::new(seq, bus.clone(), config.agent_id.clone());
@@ -115,7 +116,7 @@ impl SupervisorRuntime {
         let outputs = build_outputs(&config);
         let redact = RedactStage::new(&config.redact);
 
-        Ok(Self { config, ctx, shared, durability, outputs, redact })
+        Ok(Self { config, ctx, shared, durability, upload_pool, outputs, redact })
     }
 
     /// Shared state handle for the API server.
@@ -303,7 +304,7 @@ impl SupervisorRuntime {
         // (which is cheap — it is just a path wrapper with no open file handles).
         let tree_cas = LocalCas::new(self.config.data_dir.join("cas"))
             .expect("failed to initialize tree-stage CAS");
-        let tree_durability = DurabilityLayer::new(tree_cas, None, None);
+        let tree_durability = DurabilityLayer::new(tree_cas, self.upload_pool, None);
         let tree_stage = TreeStage::new(MerkleTree::new(), tree_durability, 1000);
         let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.config.agent_id.clone(), self.config.enrich.clone());
 

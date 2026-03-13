@@ -189,7 +189,7 @@ impl CaptureStage {
         let (content_hash, inline_data) = match self.handle.read_file(path.to_path_buf()).await {
             Ok(d) => {
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = hash_and_emit(&self.durability, d);
+                let hash = emit_content(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -203,7 +203,7 @@ impl CaptureStage {
         let (before_hash, before_data) = match self.handle.read_file(path.to_path_buf()).await {
             Ok(d) => {
                 let inline = inline_slice(&d, self.max_inline_bytes);
-                let hash = hash_and_emit(&self.durability, d);
+                let hash = emit_content(&self.durability, d);
                 (Some(hash), inline)
             }
             Err(_) => (None, None),
@@ -284,11 +284,6 @@ fn emit_content(durability: &DurabilityLayer, data: Vec<u8>) -> ContentHash {
     let _ = durability.persist_with_hash(manifest_hash.clone(), &manifest_data);
     durability.upload_async(manifest_hash.clone(), manifest_data);
     manifest_hash
-}
-
-/// Hash and persist content, returning the hash; no policy accounting.
-fn hash_and_emit(durability: &DurabilityLayer, data: Vec<u8>) -> ContentHash {
-    emit_content(durability, data)
 }
 
 #[cfg(test)]
