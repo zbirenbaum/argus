@@ -9,7 +9,6 @@ pub mod digest_cache;
 pub mod event_log;
 pub mod local_buffer;
 pub mod object_store_dyn;
-pub mod pipeline;
 pub mod s3;
 pub mod upload_job;
 pub mod upload_pool;
@@ -21,8 +20,6 @@ pub use event_log::EventLog;
 pub use local_buffer::LocalBuffer;
 #[doc(inline)]
 pub use object_store_dyn::DynObjectStore;
-#[doc(inline)]
-pub use pipeline::StoragePipeline;
 #[doc(inline)]
 pub use s3::{ObjectStore, S3Client};
 #[doc(inline)]
