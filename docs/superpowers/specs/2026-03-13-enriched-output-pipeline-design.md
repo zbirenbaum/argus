@@ -368,24 +368,35 @@ enrich:
 
 The supervisor scrubs sensitive data from inline content before it reaches outputs. This is not optional — redaction runs regardless of whether Vector is downstream. Sensitive data should never leave the supervisor process.
 
+Redaction is expensive (regex). The design uses a **three-tier pipeline** so that cheap operations eliminate work for expensive ones:
+
+```
+Tier 1: Path deny-list       O(1) glob match → strip all inline content (hash retained)
+Tier 2: Field-level drop     O(1) set lookup → null entire fields
+Tier 3: Value-level scrub    Regex scan → replace matches in remaining fields
+```
+
+Only fields that survive Tiers 1-2 reach the regex engine. Most events (file I/O on non-sensitive paths, stdio) skip regex entirely.
+
+#### Which fields get regex-scanned
+
+Not every field warrants regex. The `scan_fields` config controls which event fields are eligible for Tier 3 value scrubbing. Fields not in this list pass through untouched after Tiers 1-2.
+
+Default scan targets (fields likely to contain PII/secrets):
+- `http_request.headers`, `http_request.body` — auth tokens, API keys in headers/bodies
+- `http_response.headers`, `http_response.body` — leaked credentials in responses
+- `stdio.text` — agent terminal output may echo secrets
+- `exec.envp` — environment variables often carry secrets
+
+Fields that default to **no scan** (low PII probability, high volume):
+- `file.data` — bulk file content; path deny-list handles `.env`/`.pem`/`.key` files
+- `pipe.text`, `pty.text` — internal IPC, rarely contains secrets directly
+
+Operators can override both directions — add fields to scan or remove defaults.
+
 ```yaml
 redact:
-  # Built-in patterns (enabled by default)
-  builtins:
-    api_keys: true                  # sk-ant-*, sk-*, Bearer *, x-api-key values
-    credentials: true               # password=, secret=, token= in query strings/headers
-    private_keys: true              # -----BEGIN * PRIVATE KEY-----
-
-  # Custom patterns
-  patterns:
-    - name: internal_tokens
-      regex: "ghp_[A-Za-z0-9_]{36}"
-      replacement: "[REDACTED]"
-    - name: ssn
-      regex: "\\d{3}-\\d{2}-\\d{4}"
-      replacement: "[REDACTED]"
-
-  # Paths to never inline (always hash-only, regardless of enrich config)
+  # Tier 1: Path deny-list — strip all inline content for matching paths
   exclude_paths:
     - "**/*.env"
     - "**/*.pem"
@@ -393,61 +404,101 @@ redact:
     - "**/credentials.json"
     - "**/.ssh/**"
 
-  # Fields to scrub entirely (set to null in output)
-  exclude_fields:
-    - "http_request.headers"        # drop all HTTP headers
+  # Tier 2: Field-level drop — null entire fields unconditionally
+  drop_fields:
+    - "http_request.headers.authorization"
+    - "http_request.headers.cookie"
+    - "http_request.headers.x-api-key"
     # - "exec.envp"                 # uncomment to drop all env vars
+
+  # Tier 3: Value-level scrub — regex scan on eligible fields only
+  scan_fields:                       # which fields get regex treatment
+    - "http_request.headers"
+    - "http_request.body"
+    - "http_response.headers"
+    - "http_response.body"
+    - "stdio.text"
+    - "exec.envp"
+    # - "file.data"                  # uncomment to also scan file content
+
+  # Built-in patterns (enabled by default, applied in Tier 3)
+  builtins:
+    api_keys: true                  # sk-ant-*, sk-*, Bearer *, x-api-key values
+    credentials: true               # password=, secret=, token= in query strings/headers
+    private_keys: true              # -----BEGIN * PRIVATE KEY-----
+    aws_keys: true                  # AKIA* access key IDs
+
+  # Custom patterns (applied in Tier 3 alongside builtins)
+  patterns:
+    - name: github_token
+      regex: "ghp_[A-Za-z0-9_]{36}"
+      replacement: "[REDACTED]"
+    - name: ssn
+      regex: "\\d{3}-\\d{2}-\\d{4}"
+      replacement: "***-**-\\1"     # mask all but last 4
+    - name: card_number
+      regex: "\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?(\\d{4})\\b"
+      replacement: "****-****-****-\\1"
 ```
 
-**Redaction pipeline** (runs inside stamp stage, after enrichment, before output):
+#### Redaction pipeline execution order
 
-1. **Path exclusion**: if the event's path matches `exclude_paths`, inline content is stripped (hash retained).
-2. **Field exclusion**: listed fields are set to null in the event.
-3. **Pattern scrubbing**: regex patterns are applied to all inline string content. Matches are replaced with the `replacement` string (default: `[REDACTED]`).
-4. **Built-in patterns**: common secret formats are detected and scrubbed. These run last so custom patterns can override.
+1. **Tier 1 — Path exclusion** (O(1) glob match): if the event's file path matches `exclude_paths`, all inline content fields are set to `None`. Hash retained. No further processing.
 
-Built-in patterns cover:
-- API keys: `sk-ant-api03-*`, `sk-*`, `Bearer *`, `x-api-key: *` header values
-- Credentials: `password=*`, `secret=*`, `token=*` in URL query strings and form bodies
-- Private keys: PEM-encoded private key blocks
-- AWS keys: `AKIA*` access key IDs
+2. **Tier 2 — Field drop** (O(1) set lookup): fields listed in `drop_fields` are set to `None`. Supports dotted paths for sub-field targeting (e.g., `http_request.headers.authorization` drops only the authorization header, not all headers). Plain field names (e.g., `http_request.headers`) drop the entire field.
 
-**Redaction applies to all inline content fields**: `text`, `data`, `body`, `headers`, `before_data`, `after_data`. Content hashes are never affected — they reflect the original unredacted content (which is safely in CAS, access-controlled separately).
+3. **Tier 3 — Value scrub** (regex): only fields listed in `scan_fields` that are still non-null after Tiers 1-2 are regex-scanned. Built-in patterns run first, then custom patterns. Each match is replaced with the pattern's `replacement` string (default: `[REDACTED]`).
+
+#### Built-in patterns
+
+| Name | Regex | Targets |
+|-|-|-|
+| `api_keys` | `sk-ant-[A-Za-z0-9_-]+`, `sk-[A-Za-z0-9_-]{20,}`, `Bearer\s+[A-Za-z0-9_.-]+` | API tokens |
+| `credentials` | `(?i)(password\|secret\|token\|api_key)\s*[=:]\s*\S+` | Key-value credentials |
+| `private_keys` | `-----BEGIN\s+\S+\s+PRIVATE KEY-----[\s\S]*?-----END\s+\S+\s+PRIVATE KEY-----` | PEM blocks |
+| `aws_keys` | `AKIA[A-Z0-9]{16}` | AWS access key IDs |
+
+#### Content hashes are never affected
+
+Hashes reflect the original unredacted content (safely in CAS, access-controlled separately). Redaction only touches inline string fields.
 
 ### Redaction audit trail
 
-Every redaction is logged for auditability. The redaction stage emits a structured `tracing` event for each match, recording **what was redacted** without logging the redacted value itself:
+Every redaction action is logged for auditability. The redaction stage emits structured `tracing` events recording **what was redacted** without logging the redacted value itself.
 
 ```rust
+// Tier 3 value scrub
 tracing::info!(
-    name: "redact.applied",
+    name: "redact.scrubbed",
     event_seq = event.seq,
     field = "http_request.headers",
     rule = "api_keys",
     matches = 1,
-    "redaction applied",
+    "value redaction applied",
 );
-```
 
-Fields logged per redaction:
-- `event_seq`: sequence number of the event being scrubbed
-- `field`: which event field was affected (`text`, `data`, `body`, `headers`, `before_data`, `after_data`)
-- `rule`: name of the pattern that matched (`api_keys`, `credentials`, `private_keys`, `aws_keys`, or custom pattern name)
-- `matches`: number of replacements made in this field
-- `action`: `"scrubbed"` for pattern matches, `"stripped"` for path exclusions, `"nullified"` for field exclusions
-
-For path exclusions, a single log entry records that all inline content was stripped:
-
-```rust
+// Tier 1 path exclusion
 tracing::info!(
     name: "redact.path_excluded",
     event_seq = event.seq,
     path = %event_path,
-    rule = "exclude_paths",
-    action = "stripped",
     "inline content stripped by path exclusion",
 );
+
+// Tier 2 field drop
+tracing::info!(
+    name: "redact.field_dropped",
+    event_seq = event.seq,
+    field = "http_request.headers.authorization",
+    "field dropped by deny list",
+);
 ```
+
+Fields logged per audit entry:
+- `event_seq`: sequence number of the event
+- `field`: which field was affected
+- `rule`: pattern name (Tier 3 only)
+- `matches`: number of replacements (Tier 3 only)
 
 This audit trail is invaluable for:
 - **Debugging**: "Why is this field empty?" → check redaction logs

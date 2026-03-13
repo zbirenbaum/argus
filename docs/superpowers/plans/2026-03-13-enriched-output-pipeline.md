@@ -366,6 +366,34 @@ Create `crates/argus/src/config/redact.rs`:
 
 ```rust
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+/// Tier 1: Path deny-list — strip all inline content for matching paths.
+/// Tier 2: Field-level drop — null entire fields by dotted path.
+/// Tier 3: Value-level scrub — regex scan only on `scan_fields`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RedactConfig {
+    /// Tier 1: glob patterns for paths whose inline content is always stripped.
+    #[serde(default = "default_exclude_paths")]
+    pub exclude_paths: Vec<String>,
+
+    /// Tier 2: fields to drop entirely (dotted paths, e.g. "http_request.headers.authorization").
+    #[serde(default = "default_drop_fields")]
+    pub drop_fields: Vec<String>,
+
+    /// Tier 3: which event fields are eligible for regex scanning.
+    /// Fields not listed here skip regex entirely.
+    #[serde(default = "default_scan_fields")]
+    pub scan_fields: Vec<String>,
+
+    /// Built-in regex pattern groups (Tier 3).
+    #[serde(default)]
+    pub builtins: BuiltinRedactions,
+
+    /// Custom regex patterns (Tier 3).
+    #[serde(default)]
+    pub patterns: Vec<RedactPattern>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuiltinRedactions {
@@ -375,11 +403,13 @@ pub struct BuiltinRedactions {
     pub credentials: bool,
     #[serde(default = "default_true")]
     pub private_keys: bool,
+    #[serde(default = "default_true")]
+    pub aws_keys: bool,
 }
 
 impl Default for BuiltinRedactions {
     fn default() -> Self {
-        Self { api_keys: true, credentials: true, private_keys: true }
+        Self { api_keys: true, credentials: true, private_keys: true, aws_keys: true }
     }
 }
 
@@ -391,31 +421,28 @@ pub struct RedactPattern {
     pub replacement: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RedactConfig {
-    #[serde(default)]
-    pub builtins: BuiltinRedactions,
-    #[serde(default)]
-    pub patterns: Vec<RedactPattern>,
-    #[serde(default = "default_exclude_paths")]
-    pub exclude_paths: Vec<String>,
-    #[serde(default)]
-    pub exclude_fields: Vec<String>,
-}
-
 impl Default for RedactConfig {
     fn default() -> Self {
         Self {
+            exclude_paths: default_exclude_paths(),
+            drop_fields: default_drop_fields(),
+            scan_fields: default_scan_fields(),
             builtins: BuiltinRedactions::default(),
             patterns: Vec::new(),
-            exclude_paths: default_exclude_paths(),
-            exclude_fields: Vec::new(),
         }
+    }
+}
+
+impl RedactConfig {
+    /// Build a HashSet from scan_fields for O(1) lookup at runtime.
+    pub fn scan_field_set(&self) -> HashSet<String> {
+        self.scan_fields.iter().cloned().collect()
     }
 }
 
 fn default_true() -> bool { true }
 fn default_replacement() -> String { "[REDACTED]".to_owned() }
+
 fn default_exclude_paths() -> Vec<String> {
     vec![
         "**/*.env".into(),
@@ -423,6 +450,25 @@ fn default_exclude_paths() -> Vec<String> {
         "**/*.key".into(),
         "**/credentials.json".into(),
         "**/.ssh/**".into(),
+    ]
+}
+
+fn default_drop_fields() -> Vec<String> {
+    vec![
+        "http_request.headers.authorization".into(),
+        "http_request.headers.cookie".into(),
+        "http_request.headers.x-api-key".into(),
+    ]
+}
+
+fn default_scan_fields() -> Vec<String> {
+    vec![
+        "http_request.headers".into(),
+        "http_request.body".into(),
+        "http_response.headers".into(),
+        "http_response.body".into(),
+        "stdio.text".into(),
+        "exec.envp".into(),
     ]
 }
 
@@ -436,7 +482,24 @@ mod tests {
         assert!(c.builtins.api_keys);
         assert!(c.builtins.credentials);
         assert!(c.builtins.private_keys);
+        assert!(c.builtins.aws_keys);
         assert!(!c.exclude_paths.is_empty());
+    }
+
+    #[test]
+    fn defaults_have_drop_fields() {
+        let c = RedactConfig::default();
+        assert!(c.drop_fields.contains(&"http_request.headers.authorization".to_string()));
+    }
+
+    #[test]
+    fn defaults_scan_fields_targets_pii_likely() {
+        let c = RedactConfig::default();
+        let set = c.scan_field_set();
+        assert!(set.contains("http_request.headers"));
+        assert!(set.contains("stdio.text"));
+        // file.data is NOT scanned by default (too high volume, low PII probability)
+        assert!(!set.contains("file.data"));
     }
 
     #[test]
@@ -450,6 +513,18 @@ patterns:
         let c: RedactConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(c.patterns.len(), 1);
         assert_eq!(c.patterns[0].name, "github_token");
+    }
+
+    #[test]
+    fn parse_yaml_adds_scan_field() {
+        let yaml = r#"
+scan_fields:
+  - "http_request.headers"
+  - "file.data"
+"#;
+        let c: RedactConfig = serde_yaml::from_str(yaml).unwrap();
+        let set = c.scan_field_set();
+        assert!(set.contains("file.data"));
     }
 
     #[test]
@@ -890,13 +965,20 @@ Note: `base64` crate added to `Cargo.toml` in Step 2.
 
 ---
 
-### Task 6: Redaction stage
+### Task 6: Redaction stage (three-tier)
 
 **Files:**
 - Create: `crates/argus/src/pipeline/stages/redact.rs`
 - Modify: `crates/argus/src/pipeline/stages/mod.rs`
 
-- [ ] **Step 1: Write failing test for pattern redaction**
+The redaction stage uses three tiers for performance:
+1. **Tier 1 — Path exclusion** (O(1) glob): strip all inline fields for sensitive paths
+2. **Tier 2 — Field drop** (O(1) set lookup): null specific fields by dotted path
+3. **Tier 3 — Value scrub** (regex): only on fields listed in `scan_fields`
+
+Most events (file I/O on non-sensitive paths) never reach the regex engine.
+
+- [ ] **Step 1: Write failing tests**
 
 ```rust
 #[cfg(test)]
@@ -904,54 +986,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redacts_api_key_in_string() {
+    fn tier1_path_exclusion_strips_all_inline() {
+        let stage = RedactStage::new(RedactConfig::default());
+        // .env file should have all inline content stripped
+        assert!(stage.should_exclude_path("/workspace/.env"));
+        assert!(stage.should_exclude_path("/home/user/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn tier2_field_drop_nullifies() {
+        let stage = RedactStage::new(RedactConfig::default());
+        assert!(stage.should_drop_field("http_request.headers.authorization"));
+        assert!(!stage.should_drop_field("http_request.body"));
+    }
+
+    #[test]
+    fn tier3_only_scans_eligible_fields() {
+        let stage = RedactStage::new(RedactConfig::default());
+        assert!(stage.should_scan("http_request.headers"));
+        assert!(stage.should_scan("stdio.text"));
+        // file.data is NOT scanned by default
+        assert!(!stage.should_scan("file.data"));
+    }
+
+    #[test]
+    fn tier3_redacts_api_key() {
         let stage = RedactStage::new(RedactConfig::default());
         let input = "Authorization: Bearer sk-ant-api03-abc123xyz";
-        let output = stage.scrub_string(input);
+        let (output, matches) = stage.scrub_string(input);
         assert!(!output.contains("sk-ant-api03"));
         assert!(output.contains("[REDACTED]"));
+        assert!(!matches.is_empty());
     }
 }
 ```
 
-- [ ] **Step 2: Implement RedactStage**
+- [ ] **Step 2: Implement RedactStage struct**
 
 ```rust
+use std::collections::HashSet;
 use regex::Regex;
 use crate::config::RedactConfig;
 use crate::events::Event;
 
 pub struct RedactStage {
-    patterns: Vec<CompiledPattern>,
+    // Tier 1
     exclude_paths: Vec<glob::Pattern>,
-    exclude_fields: Vec<String>,
+    // Tier 2
+    drop_fields: HashSet<String>,
+    // Tier 3
+    scan_fields: HashSet<String>,
+    patterns: Vec<CompiledPattern>,
 }
 
 struct CompiledPattern {
+    name: String,
     regex: Regex,
     replacement: String,
 }
-```
 
-Key methods:
-- `new(config: RedactConfig) -> Self` — compile all regexes (builtins + custom)
-- `scrub_string(&self, input: &str) -> Vec<RedactMatch>` — apply all patterns, return list of matches with rule name + count
-- `scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String` — scrub + emit tracing audit events
-- `redact(&self, event: &mut Event)` — walk event payload fields, apply scrubbing with audit logging
-- `should_exclude_path(&self, path: &str) -> bool` — check path exclusion
-
-```rust
-struct RedactMatch {
+struct ScrubMatch {
     rule: String,
     count: usize,
 }
 ```
 
-Built-in patterns to compile:
-- API keys: `sk-ant-[A-Za-z0-9_-]+`, `sk-[A-Za-z0-9_-]{20,}`, `Bearer\s+[A-Za-z0-9_.-]+`
-- Credentials: `(?i)(password|secret|token|api_key)\s*[=:]\s*\S+`
-- Private keys: `-----BEGIN\s+\S+\s+PRIVATE KEY-----[\s\S]*?-----END\s+\S+\s+PRIVATE KEY-----`
-- AWS keys: `AKIA[A-Z0-9]{16}`
+Key methods:
+- `new(config: RedactConfig) -> Self` — compile glob patterns, build field sets, compile regexes
+- `should_exclude_path(&self, path: &str) -> bool` — Tier 1 check
+- `should_drop_field(&self, field: &str) -> bool` — Tier 2 check
+- `should_scan(&self, field: &str) -> bool` — Tier 3 eligibility check
+- `scrub_string(&self, input: &str) -> (String, Vec<ScrubMatch>)` — apply regex patterns, return scrubbed string + match info
+- `scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String` — scrub + emit tracing audit events
+- `redact(&self, event: &mut Event)` — three-tier pipeline on event
+
+Built-in patterns to compile (only when enabled in config):
+- `api_keys`: `sk-ant-[A-Za-z0-9_-]+`, `sk-[A-Za-z0-9_-]{20,}`, `Bearer\s+[A-Za-z0-9_.-]+`
+- `credentials`: `(?i)(password|secret|token|api_key)\s*[=:]\s*\S+`
+- `private_keys`: `-----BEGIN\s+\S+\s+PRIVATE KEY-----[\s\S]*?-----END\s+\S+\s+PRIVATE KEY-----`
+- `aws_keys`: `AKIA[A-Z0-9]{16}`
+
+Note: `regex` and `glob` crates need adding to `Cargo.toml`.
 
 - [ ] **Step 3: Write more tests**
 
@@ -959,31 +1074,34 @@ Built-in patterns to compile:
 - `redacts_private_key_block`: PEM block → redacted
 - `redacts_custom_pattern`: custom pattern from config
 - `path_exclusion_strips_inline`: event with path matching `**/*.env` has inline data stripped
-- `field_exclusion_nullifies`: `exclude_fields: ["http_request.headers"]` nullifies headers
+- `field_drop_nullifies_auth_header`: default drop_fields nullifies authorization header
+- `field_drop_supports_dotted_paths`: `http_request.headers.cookie` drops cookie but keeps other headers
+- `non_scanned_field_skips_regex`: file.data with an API key passes through unredacted (not in scan_fields)
 - `leaves_hash_intact`: verify content_hash is never modified
-- `audit_log_emitted_on_redaction`: use `tracing_test::internal::logs_contain` or a subscriber capture to verify `redact.applied` event is emitted with correct `rule`, `field`, and `matches` values
-- `audit_log_emitted_on_path_exclusion`: verify `redact.path_excluded` event emitted when path matches
+- `audit_log_on_scrub`: verify `redact.scrubbed` tracing event with `rule`, `field`, `matches`
+- `audit_log_on_path_exclusion`: verify `redact.path_excluded` tracing event
+- `audit_log_on_field_drop`: verify `redact.field_dropped` tracing event
 
-- [ ] **Step 4: Implement redact method on Event**
-
-The `redact` method matches on `EventPayload` variants and applies `scrub_string` to each inline content field:
+- [ ] **Step 4: Implement redact method (three-tier)**
 
 ```rust
-/// Scrub a string field and emit audit log entries for each rule that matched.
+/// Tier 3: scrub a string and emit audit log per match.
 fn scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String {
+    if !self.should_scan(field) {
+        return input.to_owned();
+    }
     let mut result = input.to_owned();
     for pattern in &self.patterns {
         let count = pattern.regex.find_iter(&result).count();
         if count > 0 {
             result = pattern.regex.replace_all(&result, &*pattern.replacement).into_owned();
             tracing::info!(
-                name: "redact.applied",
+                name: "redact.scrubbed",
                 event_seq,
                 field,
                 rule = %pattern.name,
                 matches = count,
-                action = "scrubbed",
-                "redaction applied",
+                "value redaction applied",
             );
         }
     }
@@ -992,84 +1110,101 @@ fn scrub_and_log(&self, event_seq: u64, field: &str, input: &str) -> String {
 
 pub fn redact(&self, event: &mut Event) {
     let seq = event.seq;
+
+    // Tier 1: path exclusion — strip all inline content
+    if let Some(path) = self.event_path(event) {
+        if self.should_exclude_path(&path) {
+            tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %path);
+            self.strip_all_inline(event);
+            return;
+        }
+    }
+
+    // Tier 2 + 3 per variant
     match &mut event.payload {
         EventPayload::Stdio(ref mut s) => {
-            if let Some(path) = self.event_path(event) {
-                if self.should_exclude_path(&path) {
-                    tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %path, action = "stripped");
-                    s.text = None; return;
-                }
+            if let Some(ref mut t) = s.text {
+                *t = self.scrub_and_log(seq, "stdio.text", t);
             }
-            if let Some(ref mut t) = s.text { *t = self.scrub_and_log(seq, "text", t); }
         }
         EventPayload::PipeData(ref mut p) => {
-            if let Some(ref mut t) = p.text { *t = self.scrub_and_log(seq, "text", t); }
+            if let Some(ref mut t) = p.text {
+                *t = self.scrub_and_log(seq, "pipe.text", t);
+            }
         }
         EventPayload::PtyData(ref mut p) => {
-            if let Some(ref mut t) = p.text { *t = self.scrub_and_log(seq, "text", t); }
+            if let Some(ref mut t) = p.text {
+                *t = self.scrub_and_log(seq, "pty.text", t);
+            }
         }
         EventPayload::Write(ref mut w) => {
-            if self.should_exclude_path(&w.path) {
-                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %w.path, action = "stripped");
-                w.data = None; return;
+            if let Some(ref mut d) = w.data {
+                *d = self.scrub_and_log(seq, "file.data", d);
             }
-            if let Some(ref mut d) = w.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Read(ref mut r) => {
-            if self.should_exclude_path(&r.path) {
-                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %r.path, action = "stripped");
-                r.data = None; return;
+            if let Some(ref mut d) = r.data {
+                *d = self.scrub_and_log(seq, "file.data", d);
             }
-            if let Some(ref mut d) = r.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Unlink(ref mut u) => {
-            if self.should_exclude_path(&u.path) {
-                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %u.path, action = "stripped");
-                u.data = None; return;
+            if let Some(ref mut d) = u.data {
+                *d = self.scrub_and_log(seq, "file.data", d);
             }
-            if let Some(ref mut d) = u.data { *d = self.scrub_and_log(seq, "data", d); }
         }
         EventPayload::Truncate(ref mut t) => {
-            if self.should_exclude_path(&t.path) {
-                tracing::info!(name: "redact.path_excluded", event_seq = seq, path = %t.path, action = "stripped");
-                t.before_data = None; t.after_data = None; return;
+            if let Some(ref mut d) = t.before_data {
+                *d = self.scrub_and_log(seq, "file.data", d);
             }
-            if let Some(ref mut d) = t.before_data { *d = self.scrub_and_log(seq, "before_data", d); }
-            if let Some(ref mut d) = t.after_data { *d = self.scrub_and_log(seq, "after_data", d); }
+            if let Some(ref mut d) = t.after_data {
+                *d = self.scrub_and_log(seq, "file.data", d);
+            }
         }
         EventPayload::HttpRequest(ref mut h) => {
-            if self.is_field_excluded("http_request.headers") {
-                tracing::info!(name: "redact.field_excluded", event_seq = seq, field = "http_request.headers", action = "nullified");
+            // Tier 2: drop specific sub-fields
+            if self.should_drop_field("http_request.headers.authorization") ||
+               self.should_drop_field("http_request.headers") {
+                tracing::info!(name: "redact.field_dropped", event_seq = seq, field = "http_request.headers");
                 h.headers = None;
             }
-            if let Some(ref mut hd) = h.headers { *hd = self.scrub_and_log(seq, "headers", hd); }
-            if let Some(ref mut b) = h.body { *b = self.scrub_and_log(seq, "body", b); }
+            // Tier 3: scan remaining
+            if let Some(ref mut hd) = h.headers {
+                *hd = self.scrub_and_log(seq, "http_request.headers", hd);
+            }
+            if let Some(ref mut b) = h.body {
+                *b = self.scrub_and_log(seq, "http_request.body", b);
+            }
         }
         EventPayload::HttpResponse(ref mut h) => {
-            if self.is_field_excluded("http_response.headers") {
-                tracing::info!(name: "redact.field_excluded", event_seq = seq, field = "http_response.headers", action = "nullified");
+            if self.should_drop_field("http_response.headers") {
+                tracing::info!(name: "redact.field_dropped", event_seq = seq, field = "http_response.headers");
                 h.headers = None;
             }
-            if let Some(ref mut hd) = h.headers { *hd = self.scrub_and_log(seq, "headers", hd); }
-            if let Some(ref mut b) = h.body { *b = self.scrub_and_log(seq, "body", b); }
+            if let Some(ref mut hd) = h.headers {
+                *hd = self.scrub_and_log(seq, "http_response.headers", hd);
+            }
+            if let Some(ref mut b) = h.body {
+                *b = self.scrub_and_log(seq, "http_response.body", b);
+            }
         }
         _ => {}
     }
 }
 
-fn is_field_excluded(&self, field: &str) -> bool {
-    self.exclude_fields.iter().any(|f| f == field)
-}
-```
-
-Note: `regex` and `glob` crates may need adding to `Cargo.toml`.
-
-The `CompiledPattern` struct needs a `name` field for audit logging:
-```rust
-struct CompiledPattern {
-    name: String,
-    regex: Regex,
-    replacement: String,
+/// Helper: set all inline content fields to None for an event.
+fn strip_all_inline(&self, event: &mut Event) {
+    match &mut event.payload {
+        EventPayload::Stdio(s) => { s.text = None; }
+        EventPayload::PipeData(p) => { p.text = None; }
+        EventPayload::PtyData(p) => { p.text = None; }
+        EventPayload::Write(w) => { w.data = None; }
+        EventPayload::Read(r) => { r.data = None; }
+        EventPayload::Unlink(u) => { u.data = None; }
+        EventPayload::Truncate(t) => { t.before_data = None; t.after_data = None; }
+        EventPayload::HttpRequest(h) => { h.headers = None; h.body = None; }
+        EventPayload::HttpResponse(h) => { h.headers = None; h.body = None; }
+        _ => {}
+    }
 }
 ```
 
