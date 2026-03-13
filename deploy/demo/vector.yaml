@@ -1,0 +1,25 @@
+sources:
+  argus:
+    type: file
+    include: ["/data/events.jsonl"]
+
+transforms:
+  parsed:
+    inputs: ["argus"]
+    type: remap
+    source: '. = parse_json!(.message)'
+
+sinks:
+  s3_events:
+    inputs: ["parsed"]
+    type: aws_s3
+    bucket: argus-demo
+    key_prefix: "claude-agent/events/"
+    region: us-west-2
+    endpoint: http://host.docker.internal:9100
+    encoding:
+      codec: json
+    compression: gzip
+    batch:
+      timeout_secs: 60
+      max_bytes: 10000000

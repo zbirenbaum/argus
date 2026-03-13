@@ -1,0 +1,6 @@
+agent_id: demo-agent
+agent_command: ["bash", "-c", "echo 'hello world'"]
+outputs:
+  - type: stdout
+  - type: file
+    path: /data/events.jsonl

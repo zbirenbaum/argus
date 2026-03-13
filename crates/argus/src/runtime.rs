@@ -359,9 +359,8 @@ async fn build_upload_pool(config: &SupervisorConfig) -> Result<Option<Arc<Uploa
 
 /// Constructs the `RecordBus` from internal sinks only.
 ///
-/// `StdoutSink` is intentionally excluded: enriched user-facing output is now
-/// handled by `OutputList` (with redaction applied) before the bus receives
-/// each event.
+/// Enriched user-facing output is handled by `OutputList` (with redaction
+/// applied) before the bus receives each event.
 fn build_bus(
     local_cas: LocalCas,
     event_log: EventLog,

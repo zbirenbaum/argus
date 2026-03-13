@@ -11,11 +11,9 @@ pub(crate) mod index;
 pub(crate) mod local_cas;
 pub(crate) mod memory;
 pub(crate) mod remote_cas;
-pub(crate) mod stdout;
 
 pub(crate) use broadcast::BroadcastSink;
 pub(crate) use event_log::EventLogSink;
 pub(crate) use index::IndexSink;
 pub(crate) use local_cas::LocalCasSink;
 pub(crate) use remote_cas::RemoteCasSink;
-pub(crate) use stdout::StdoutSink;
