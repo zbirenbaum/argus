@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 
@@ -19,6 +20,7 @@ use crate::api::state::SharedState;
 use crate::events::{ApprovalDecision, EventPayload};
 use crate::events::control;
 use crate::pipeline::{EmitResult, PtraceStream, RawStopRecorder, RecordBus};
+use crate::pipeline::stall::StallState;
 use crate::pipeline::classified::Classification;
 use crate::pipeline::directive::PipelineDirective;
 use crate::pipeline::outputs::OutputList;
@@ -152,19 +154,7 @@ impl PipelineRunner {
                         );
                         self.redact.redact(&mut blocked);
                         self.outputs.emit(&blocked);
-                        if let EmitResult::RequiredFailed(failures) =
-                            self.bus.emit(crate::pipeline::Record::Event(blocked))
-                        {
-                            for (sink_name, err) in &failures {
-                                event!(
-                                    name: "pipeline.emit.required_sink_failed",
-                                    Level::ERROR,
-                                    sink.name = sink_name.as_str(),
-                                    error.message = %err,
-                                    "required sink failed on blocked path, event may be lost",
-                                );
-                            }
-                        }
+                        self.emit_required(crate::pipeline::Record::Event(blocked)).await;
                         continue;
                     }
                     RuleAction::Pause => {
@@ -263,19 +253,7 @@ impl PipelineRunner {
                 // Enriched user-facing output (stdout, file, etc.).
                 self.outputs.emit(&evt);
                 // Internal sinks (event log, index, broadcast).
-                if let EmitResult::RequiredFailed(failures) =
-                    self.bus.emit(crate::pipeline::Record::Event(evt))
-                {
-                    for (sink_name, err) in &failures {
-                        event!(
-                            name: "pipeline.emit.required_sink_failed",
-                            Level::ERROR,
-                            sink.name = sink_name.as_str(),
-                            error.message = %err,
-                            "required sink failed on ptrace path, event may be lost",
-                        );
-                    }
-                }
+                self.emit_required(crate::pipeline::Record::Event(evt)).await;
             }
         }
 
@@ -285,6 +263,61 @@ impl PipelineRunner {
         // happen here rather than in the caller.
         let _ = self.outputs.shutdown();
         self.bus.shutdown_all();
+    }
+
+    /// Emit a record, retrying with exponential backoff if required sinks fail.
+    ///
+    /// The tracee stays frozen (ptrace-stopped) for the entire duration because
+    /// the ptrace thread is blocked waiting for a directive that this method
+    /// withholds until all required sinks succeed. This is the core durability
+    /// guarantee: required events are never dropped.
+    ///
+    /// Initial backoff starts at 1 s and doubles each attempt up to 60 s,
+    /// matching typical S3 and downstream recovery windows.
+    async fn emit_required(&mut self, record: crate::pipeline::Record) {
+        // 1 s initial, 60 s cap — sized for S3 transient outages.
+        let mut backoff = Duration::from_secs(1);
+        const MAX_BACKOFF: Duration = Duration::from_secs(60);
+        let mut retry_count: u32 = 0;
+        let stall_start = Instant::now();
+
+        loop {
+            match self.bus.emit(record.clone()) {
+                EmitResult::Ok => {
+                    if retry_count > 0 {
+                        self.shared.clear_stall();
+                        event!(
+                            name: "pipeline.ptrace.stall_recovered",
+                            Level::INFO,
+                            retry_count,
+                            stall_duration_ms = stall_start.elapsed().as_millis() as u64,
+                            "required sinks recovered, resuming tracee",
+                        );
+                    }
+                    break;
+                }
+                EmitResult::RequiredFailed(failures) => {
+                    retry_count += 1;
+                    let sink_names: Vec<String> =
+                        failures.iter().map(|(n, _)| n.clone()).collect();
+                    self.shared.set_stall(StallState {
+                        failed_sinks: sink_names.clone(),
+                        since: stall_start,
+                        retry_count,
+                    });
+                    event!(
+                        name: "pipeline.ptrace.sink_stall",
+                        Level::WARN,
+                        ?sink_names,
+                        retry_count,
+                        backoff_ms = backoff.as_millis() as u64,
+                        "required sinks failed, tracee frozen, retrying",
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
+            }
+        }
     }
 
     /// Spin-wait while the pause flag is set, yielding to the runtime.

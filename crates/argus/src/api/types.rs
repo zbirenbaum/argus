@@ -111,6 +111,32 @@ pub struct RulesAppliedResponse {
     pub rule_count: usize,
 }
 
+/// Supervisor operational status for the `/agent/status` endpoint.
+///
+/// Uses a tagged union (`status` field) in JSON for easy client switching.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SupervisorStatus {
+    /// The supervisor is running normally.
+    Running,
+    /// The agent is paused awaiting a resume command.
+    Paused {
+        /// Human-readable reason for the pause.
+        reason: String,
+    },
+    /// One or more required sinks are failing; tracee is frozen.
+    SinkStall {
+        /// Names of the currently-failing required sinks.
+        failed_sinks: Vec<String>,
+        /// ISO 8601 timestamp when the stall began.
+        stalled_since: String,
+        /// Number of retry attempts made so far.
+        retry_count: u32,
+        /// Human-readable summary.
+        message: String,
+    },
+}
+
 /// Health check response for `GET /health`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {

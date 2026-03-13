@@ -25,6 +25,7 @@ pub(crate) mod replay;
 pub mod runner;
 pub(crate) mod output;
 pub(crate) mod outputs;
+pub(crate) mod stall;
 pub(crate) mod sink;
 pub(crate) mod sinks;
 pub(crate) mod stages;

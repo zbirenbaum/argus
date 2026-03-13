@@ -13,6 +13,7 @@ use std::time::Instant;
 use arc_swap::ArcSwap;
 use compact_str::CompactString;
 use dashmap::DashMap;
+use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::broadcast;
 
 use crate::api::types::PendingApprovalEntry;
@@ -22,6 +23,7 @@ use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
 use crate::pipeline::EmitResult;
 use crate::pipeline::RecordBus;
 use crate::pipeline::record::Record;
+use crate::pipeline::stall::StallState;
 use crate::snapshot::MerkleTree;
 
 /// Broadcast channel capacity for API event subscribers.
@@ -30,10 +32,11 @@ use crate::snapshot::MerkleTree;
 /// trace loop. Lagging receivers silently skip missed events.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Lock-free bridge between the ptrace loop and the API server.
+/// Bridge between the ptrace loop and the API server.
 ///
-/// Every field is either immutable after construction or uses a lock-free
-/// primitive. The trace loop never blocks on anything the API controls.
+/// Most fields are immutable after construction or use lock-free primitives.
+/// The stall field uses a `parking_lot::Mutex` because its writes are brief
+/// and never held across await points.
 pub struct Bridge {
     agent_id: CompactString,
     started_at: Instant,
@@ -50,6 +53,8 @@ pub struct Bridge {
     tree_hashes: DashMap<u64, String>,
     /// Pipeline bus for emitting API-originated events to all sinks.
     bus: RecordBus,
+    /// Current sink stall state, if any required sinks are failing.
+    stall: ParkingMutex<Option<StallState>>,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -79,6 +84,7 @@ impl Bridge {
             cas,
             tree_hashes: DashMap::new(),
             bus,
+            stall: ParkingMutex::new(None),
         }
     }
 
@@ -215,6 +221,21 @@ impl Bridge {
     /// Atomically replace the active rule set.
     pub fn store_rules(&self, new_rules: RuleSet) {
         self.rules.store(Arc::new(new_rules));
+    }
+
+    /// Records a sink stall condition, replacing any prior stall state.
+    pub fn set_stall(&self, state: StallState) {
+        *self.stall.lock() = Some(state);
+    }
+
+    /// Clears the stall state once all required sinks have recovered.
+    pub fn clear_stall(&self) {
+        *self.stall.lock() = None;
+    }
+
+    /// Returns a snapshot of the current stall state, if any.
+    pub fn stall_state(&self) -> Option<StallState> {
+        self.stall.lock().clone()
     }
 }
 
