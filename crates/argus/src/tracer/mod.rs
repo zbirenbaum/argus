@@ -5,8 +5,9 @@
 //! The trace loop itself has moved to `argus::pipeline`; this module
 //! retains the low-level building blocks used by pipeline stages.
 
-pub mod memory;
-pub mod pending;
-pub mod regs;
+pub(crate) mod memory;
+pub(crate) mod pending;
+pub(crate) mod regs;
+// seccomp stays pub: supervisor's startup.rs calls install_seccomp_filter directly.
 pub mod seccomp;
-pub mod syscall_nr;
+pub(crate) mod syscall_nr;

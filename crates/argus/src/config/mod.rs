@@ -234,7 +234,7 @@ fn generate_agent_id() -> String {
 /// Inside a PID namespace the supervisor runs as PID 1, but the host
 /// sees a different PID. The `NSpid` line lists PIDs from outermost
 /// to innermost namespace: `NSpid: 14523 1`.
-pub fn read_host_pid() -> Option<u32> {
+pub(crate) fn read_host_pid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/1/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("NSpid:") {
@@ -248,7 +248,7 @@ pub fn read_host_pid() -> Option<u32> {
 /// Reads all namespace PID layers from `/proc/1/status` NSpid line.
 ///
 /// Returns `(host_pid, namespace_pid)` if both are present.
-pub fn read_nspid_pair() -> Option<(u32, u32)> {
+pub(crate) fn read_nspid_pair() -> Option<(u32, u32)> {
     let status = std::fs::read_to_string("/proc/1/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("NSpid:") {

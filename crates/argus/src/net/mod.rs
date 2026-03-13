@@ -16,12 +16,15 @@ mod flow_watcher;
 mod keylog;
 mod mitmdump;
 
+// Cross-crate: supervisor startup needs these directly.
 pub use ca::{CaPaths, generate_ca};
-pub use dedup::NetworkDedup;
 pub use env::agent_env_vars;
-pub use flow_parser::{
+pub use mitmdump::{AddonConfig, MitmdumpHandle, start_mitmdump, start_mitmdump_with_flow_capture};
+
+// Crate-internal: used only by runtime TLS watcher.
+pub(crate) use dedup::NetworkDedup;
+pub(crate) use flow_parser::{
     MitmdumpFlow, ProcessedFlow, parse_flow_line, parse_flow_lines, process_flow,
 };
-pub use flow_watcher::{FlowEvents, FlowWatcher};
-pub use keylog::{KeylogLine, KeylogWatcher, parse_keylog_line};
-pub use mitmdump::{AddonConfig, MitmdumpHandle, start_mitmdump, start_mitmdump_with_flow_capture};
+pub(crate) use flow_watcher::{FlowEvents, FlowWatcher};
+pub(crate) use keylog::{KeylogLine, KeylogWatcher, parse_keylog_line};

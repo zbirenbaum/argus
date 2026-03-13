@@ -5,8 +5,8 @@
 //! endpoints. The server binds to `127.0.0.1:9090` by default and
 //! communicates with the tracer thread through [`state::SharedState`].
 
-pub mod errors;
-pub mod routes;
+pub(crate) mod errors;
+pub(crate) mod routes;
 pub mod state;
 pub mod types;
 

@@ -9,27 +9,23 @@
 //! time range, sequence range, limit) and intersects results from the
 //! individual indexes.
 
-pub mod path_index;
-pub mod pid_index;
-pub mod query;
-pub mod type_index;
+pub(crate) mod path_index;
+pub(crate) mod pid_index;
+pub(crate) mod query;
+pub(crate) mod type_index;
 
 /// Sequence number paired with the event type tag.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IndexEntry {
+pub(crate) struct IndexEntry {
     /// Monotonic event sequence number.
-    pub seq: u64,
+    pub(crate) seq: u64,
     /// Serde discriminator tag (e.g. `"write"`, `"unlink"`).
-    pub event_type: String,
+    pub(crate) event_type: String,
 }
 
-#[doc(inline)]
-pub use path_index::PathIndex;
-#[doc(inline)]
-pub use pid_index::{PidIndex, ProcessInfo};
-#[doc(inline)]
-pub use query::{QueryEngine, QueryFilter, QueryResult};
-#[doc(inline)]
-pub use type_index::TypeIndex;
+pub(crate) use path_index::PathIndex;
+pub(crate) use pid_index::{PidIndex, ProcessInfo};
+pub(crate) use query::{QueryEngine, QueryFilter, QueryResult};
+pub(crate) use type_index::TypeIndex;
 
 // Rust guideline compliant 2026-02-21
