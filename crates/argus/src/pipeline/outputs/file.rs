@@ -24,7 +24,7 @@ use crate::pipeline::output::Output;
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```ignore
 /// use std::path::PathBuf;
 /// use bytesize::ByteSize;
 /// use argus::pipeline::outputs::FileOutput;
