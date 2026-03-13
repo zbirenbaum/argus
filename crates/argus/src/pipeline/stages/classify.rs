@@ -38,8 +38,8 @@ pub enum PendingEntry {
 pub struct ClassifyStage {
     pub handle: PtraceHandle,
     pub fd_tables: Arc<DashMap<Pid, FdTable>>,
-    pub pipe_registry: Arc<std::sync::Mutex<PipeRegistry>>,
-    pub pty_registry: Arc<std::sync::Mutex<PtyRegistry>>,
+    pub pipe_registry: Arc<parking_lot::Mutex<PipeRegistry>>,
+    pub pty_registry: Arc<parking_lot::Mutex<PtyRegistry>>,
     /// Syscall entries awaiting their exit stop for fd/state updates.
     pub pending: DashMap<Pid, PendingEntry>,
     /// Whether transparent connect() rewriting is active.
@@ -59,8 +59,8 @@ impl ClassifyStage {
     pub fn new(
         handle: PtraceHandle,
         fd_tables: Arc<DashMap<Pid, FdTable>>,
-        pipe_registry: Arc<std::sync::Mutex<PipeRegistry>>,
-        pty_registry: Arc<std::sync::Mutex<PtyRegistry>>,
+        pipe_registry: Arc<parking_lot::Mutex<PipeRegistry>>,
+        pty_registry: Arc<parking_lot::Mutex<PtyRegistry>>,
         transparent_mode: bool,
         proxy_addr: SocketAddr,
         file_state: Arc<DashMap<PathBuf, ContentHash>>,
@@ -190,7 +190,8 @@ impl ClassifyStage {
         }
 
         // Update pipe registry.
-        if let Ok(mut reg) = self.pipe_registry.lock() {
+        {
+            let mut reg = self.pipe_registry.lock();
             reg.create_pipe(pid.as_raw() as u32, inode, read_fd, write_fd);
         }
 

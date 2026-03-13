@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -367,8 +367,8 @@ impl SupervisorRuntime {
         let handle = ptrace_stream.handle();
 
         let fd_tables: Arc<DashMap<Pid, FdTable>> = Arc::new(DashMap::new());
-        let pipe_registry = Arc::new(Mutex::new(PipeRegistry::new()));
-        let pty_registry = Arc::new(Mutex::new(PtyRegistry::new()));
+        let pipe_registry = Arc::new(parking_lot::Mutex::new(PipeRegistry::new()));
+        let pty_registry = Arc::new(parking_lot::Mutex::new(PtyRegistry::new()));
 
         let transparent_mode = matches!(
             self.config.tls.proxy_mode,
