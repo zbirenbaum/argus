@@ -88,7 +88,7 @@ fn to_payload(
     match cls {
         Classification::FileWrite { path, fd, .. } => {
             let (before_hash, after_hash, size) = match content {
-                CapturedContent::FileWrite { before_hash, after_hash, size } => {
+                CapturedContent::FileWrite { before_hash, after_hash, size, .. } => {
                     (before_hash.map(|h| h.to_string()), after_hash.map(|h| h.to_string()), size)
                 }
                 _ => (None, None, 0),
@@ -106,7 +106,7 @@ fn to_payload(
         }
         Classification::FileRead { path, fd, len, .. } => {
             let (content_hash, size) = match content {
-                CapturedContent::FileRead { content_hash, size } => {
+                CapturedContent::FileRead { content_hash, size, .. } => {
                     (content_hash.map(|h| h.to_string()), size)
                 }
                 _ => (None, len),
@@ -130,7 +130,7 @@ fn to_payload(
         }
         Classification::FileUnlink { path } => {
             let content_hash = match content {
-                CapturedContent::FileDelete { content_hash } => content_hash.map(|h| h.to_string()),
+                CapturedContent::FileDelete { content_hash, .. } => content_hash.map(|h| h.to_string()),
                 _ => None,
             };
             Some(EventPayload::Unlink(ef::Unlink {
@@ -295,10 +295,10 @@ fn to_payload(
 
 fn stream_content(content: &CapturedContent, fallback_len: usize) -> (Option<String>, usize) {
     match content {
-        CapturedContent::StreamData { content_hash, size } => {
+        CapturedContent::StreamData { content_hash, size, .. } => {
             (content_hash.as_ref().map(|h| h.to_string()), *size)
         }
-        CapturedContent::FileRead { content_hash, size } => {
+        CapturedContent::FileRead { content_hash, size, .. } => {
             (content_hash.as_ref().map(|h| h.to_string()), *size)
         }
         _ => (None, fallback_len),

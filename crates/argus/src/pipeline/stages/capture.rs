@@ -136,7 +136,7 @@ impl CaptureStage {
             self.file_state.insert(path.to_path_buf(), hash);
         }
 
-        CapturedContent::FileWrite { before_hash, after_hash, size: len }
+        CapturedContent::FileWrite { before_hash, after_hash, data: None, size: len }
     }
 
     async fn capture_read(
@@ -151,7 +151,7 @@ impl CaptureStage {
             return CapturedContent::None;
         }
         if level == CaptureLevel::MetadataOnly {
-            return CapturedContent::FileRead { content_hash: None, size: len };
+            return CapturedContent::FileRead { content_hash: None, data: None, size: len };
         }
 
         let content_hash = self.handle.read_memory(pid, buf_addr, len).await.ok().map(|d| {
@@ -159,12 +159,12 @@ impl CaptureStage {
             emit_content(&self.bus, d)
         });
 
-        CapturedContent::FileRead { content_hash, size: len }
+        CapturedContent::FileRead { content_hash, data: None, size: len }
     }
 
     async fn capture_delete(&self, path: &Path) -> CapturedContent {
         let content_hash = self.handle.read_file(path.to_path_buf()).await.ok().map(|d| hash_and_emit(&self.bus, d));
-        CapturedContent::FileDelete { content_hash }
+        CapturedContent::FileDelete { content_hash, data: None }
     }
 
     async fn capture_stream(
@@ -177,7 +177,7 @@ impl CaptureStage {
             self.policy.record_bytes(pid.as_raw() as u32, d.len());
             emit_content(&self.bus, d)
         });
-        CapturedContent::StreamData { content_hash, size: len }
+        CapturedContent::StreamData { content_hash, data: None, size: len }
     }
 }
 

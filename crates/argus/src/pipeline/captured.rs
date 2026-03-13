@@ -19,24 +19,44 @@ pub enum CapturedContent {
         before_hash: Option<ContentHash>,
         /// Hash of the data being written (from tracee memory buffer).
         after_hash: Option<ContentHash>,
+        /// Raw bytes written, retained for downstream enrichment.
+        data: Option<Vec<u8>>,
         size: usize,
     },
 
     /// A read captured the file content.
     FileRead {
         content_hash: Option<ContentHash>,
+        /// Raw bytes read, retained for downstream enrichment.
+        data: Option<Vec<u8>>,
         size: usize,
     },
 
     /// Bytes flowing through stdio, pipe, or PTY.
     StreamData {
         content_hash: Option<ContentHash>,
+        /// Raw bytes captured, retained for downstream enrichment.
+        data: Option<Vec<u8>>,
         size: usize,
     },
 
     /// File deleted — pre-deletion hash recorded.
     FileDelete {
         content_hash: Option<ContentHash>,
+        /// Raw bytes of file before deletion, retained for downstream enrichment.
+        data: Option<Vec<u8>>,
+    },
+
+    /// File truncated — before and after content captured.
+    FileTruncate {
+        /// Hash of the file content before truncation.
+        before_hash: Option<ContentHash>,
+        /// Hash of the file content after truncation.
+        after_hash: Option<ContentHash>,
+        /// Raw bytes before truncation, retained for downstream enrichment.
+        before_data: Option<Vec<u8>>,
+        /// Raw bytes after truncation, retained for downstream enrichment.
+        after_data: Option<Vec<u8>>,
     },
 }
 

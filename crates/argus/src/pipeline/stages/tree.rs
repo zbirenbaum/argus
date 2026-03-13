@@ -98,8 +98,9 @@ fn mutated_path(c: &Classification) -> Option<std::path::PathBuf> {
 fn content_hash(event: &CapturedEvent) -> Option<ContentHash> {
     match &event.content {
         CapturedContent::FileWrite { after_hash, .. } => *after_hash,
+        CapturedContent::FileTruncate { after_hash, .. } => *after_hash,
         CapturedContent::FileRead { content_hash, .. } => *content_hash,
-        CapturedContent::FileDelete { content_hash } => *content_hash,
+        CapturedContent::FileDelete { content_hash, .. } => *content_hash,
         _ => None,
     }
 }
