@@ -100,6 +100,8 @@ mod tests {
                 before_hash: None,
                 after_hash: None,
                 tree_hash: None,
+                data: None,
+                encoding: None,
             }),
         }
     }

@@ -102,6 +102,8 @@ fn to_payload(
                 before_hash,
                 after_hash,
                 tree_hash,
+                data: None,
+                encoding: None,
             }))
         }
         Classification::FileRead { path, fd, len, .. } => {
@@ -118,6 +120,8 @@ fn to_payload(
                 offset: 0,
                 size: size as u64,
                 content_hash,
+                data: None,
+                encoding: None,
             }))
         }
         Classification::FileRename { old_path, new_path } => {
@@ -138,6 +142,8 @@ fn to_payload(
                 path: path.to_string_lossy().into(),
                 content_hash,
                 tree_hash,
+                data: None,
+                encoding: None,
             }))
         }
         Classification::FileMkdir { path } => {
@@ -171,6 +177,9 @@ fn to_payload(
                 before_hash: None,
                 after_hash: None,
                 tree_hash,
+                before_data: None,
+                after_data: None,
+                encoding: None,
             }))
         }
         Classification::FileLink { target, link_path } => {
@@ -199,6 +208,8 @@ fn to_payload(
                 pipe_inode,
                 dest_pid: None,
                 source_pid: None,
+                text: None,
+                encoding: None,
             }))
         }
         Classification::PipeCreate { read_fd, write_fd, inode } => {
@@ -213,6 +224,8 @@ fn to_payload(
                 content_hash,
                 size: size as u64,
                 dest_pids: Vec::new(),
+                text: None,
+                encoding: None,
             }))
         }
         Classification::PtyCreate { master_fd, slave_path } => {
@@ -230,6 +243,8 @@ fn to_payload(
                 content_hash,
                 size: size as u64,
                 slave_path: String::new(),
+                text: None,
+                encoding: None,
             }))
         }
         Classification::FdDup { old_fd: _, new_fd: fd } => {

@@ -93,6 +93,8 @@ pub fn process_flow(
                 status: resp.status_code,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
+                headers: None,
+                body: None,
             })
         }
         None => None,
@@ -112,6 +114,8 @@ pub fn process_flow(
         url: flow.request.url.clone(),
         headers_hash: req_headers_hash,
         body_hash: req_body_hash,
+        headers: None,
+        body: None,
     };
 
     Ok(ProcessedFlow {

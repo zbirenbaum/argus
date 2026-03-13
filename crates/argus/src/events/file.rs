@@ -12,6 +12,12 @@ pub struct Read {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    /// Inline content; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// File data was written to a tracked path.
@@ -28,6 +34,12 @@ pub struct Write {
     pub after_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree_hash: Option<String>,
+    /// Inline content written; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A file or directory was renamed.
@@ -49,6 +61,12 @@ pub struct Unlink {
     pub content_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree_hash: Option<String>,
+    /// Inline content of the deleted file; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Encoding of `data`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A directory was created.
@@ -91,6 +109,15 @@ pub struct Truncate {
     pub after_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tree_hash: Option<String>,
+    /// Inline content before truncation; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_data: Option<String>,
+    /// Inline content after truncation; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_data: Option<String>,
+    /// Encoding of `before_data` and `after_data`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A hard link was created.
@@ -128,6 +155,8 @@ mod tests {
             before_hash: Some("ab12".into()),
             after_hash: Some("cd34".into()),
             tree_hash: Some("ef56".into()),
+            data: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&w).unwrap();
         let back: Write = serde_json::from_str(&json).unwrap();
@@ -143,6 +172,8 @@ mod tests {
             offset: 0,
             size: 512,
             content_hash: None,
+            data: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("content_hash"));
@@ -184,6 +215,9 @@ mod tests {
             before_hash: Some("aa".into()),
             after_hash: Some("bb".into()),
             tree_hash: None,
+            before_data: None,
+            after_data: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&t).unwrap();
         let back: Truncate = serde_json::from_str(&json).unwrap();
@@ -214,12 +248,89 @@ mod tests {
     }
 
     #[test]
+    fn write_inline_data_round_trip() {
+        let w = Write {
+            pid: 1,
+            path: "/f".into(),
+            fd: 3,
+            offset: 0,
+            size: 5,
+            before_hash: None,
+            after_hash: None,
+            tree_hash: None,
+            data: Some("hello".into()),
+            encoding: None,
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("\"data\""));
+        assert!(!json.contains("\"encoding\""));
+        let back: Write = serde_json::from_str(&json).unwrap();
+        assert_eq!(w, back);
+    }
+
+    #[test]
+    fn read_inline_binary_round_trip() {
+        let r = Read {
+            pid: 1,
+            path: "/f".into(),
+            fd: 3,
+            offset: 0,
+            size: 4,
+            content_hash: None,
+            data: Some("AAAA".into()),
+            encoding: Some("base64".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"base64\""));
+        let back: Read = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn truncate_inline_data_round_trip() {
+        let t = Truncate {
+            pid: 1,
+            path: "/f".into(),
+            old_size: 10,
+            new_size: 0,
+            before_hash: None,
+            after_hash: None,
+            tree_hash: None,
+            before_data: Some("old content".into()),
+            after_data: Some("".into()),
+            encoding: None,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"before_data\""));
+        let back: Truncate = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn unlink_inline_data_round_trip() {
+        let u = Unlink {
+            pid: 1,
+            path: "/f".into(),
+            content_hash: None,
+            tree_hash: None,
+            data: Some("deleted".into()),
+            encoding: None,
+        };
+        let json = serde_json::to_string(&u).unwrap();
+        assert!(json.contains("\"data\""));
+        let back: Unlink = serde_json::from_str(&json).unwrap();
+        assert_eq!(u, back);
+    }
+
+    #[test]
     fn unlink_mkdir_rmdir_round_trip() {
         let u = Unlink {
             pid: 1,
             path: "/workspace/tmp.txt".into(),
             content_hash: Some("dead".into()),
             tree_hash: None,
+            data: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&u).unwrap();
         let back: Unlink = serde_json::from_str(&json).unwrap();

@@ -25,6 +25,12 @@ pub struct Stdio {
     pub dest_pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_pid: Option<u32>,
+    /// Inline content; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Encoding of `text`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A pipe was created.
@@ -55,6 +61,12 @@ pub struct PipeData {
     pub size: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dest_pids: Vec<u32>,
+    /// Inline content; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Encoding of `text`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A pipe endpoint was closed.
@@ -90,6 +102,12 @@ pub struct PtyData {
     pub content_hash: Option<String>,
     pub size: u64,
     pub slave_path: String,
+    /// Inline content; absent when content was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Encoding of `text`; absent means UTF-8, `"base64"` means binary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// Describes the target of a file descriptor redirect.
@@ -127,6 +145,8 @@ mod tests {
             pipe_inode: Some(12345),
             dest_pid: Some(6),
             source_pid: None,
+            text: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("source_pid"));
@@ -156,6 +176,8 @@ mod tests {
             content_hash: Some("ff".into()),
             size: 128,
             dest_pids: vec![2, 3],
+            text: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         let back: PipeData = serde_json::from_str(&json).unwrap();
@@ -194,8 +216,65 @@ mod tests {
             content_hash: Some("aa".into()),
             size: 64,
             slave_path: "/dev/pts/0".into(),
+            text: None,
+            encoding: None,
         };
         let json = serde_json::to_string(&d).unwrap();
+        let back: PtyData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn stdio_inline_text_round_trip() {
+        let s = Stdio {
+            pid: 1,
+            subtype: StdioSubtype::Stderr,
+            content_hash: None,
+            size: 5,
+            pipe_inode: None,
+            dest_pid: None,
+            source_pid: None,
+            text: Some("hello".into()),
+            encoding: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"text\""));
+        assert!(!json.contains("\"encoding\""));
+        let back: Stdio = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn pipe_data_inline_binary_round_trip() {
+        let d = PipeData {
+            pid: 1,
+            inode: 1,
+            direction: PipeDirection::Read,
+            content_hash: None,
+            size: 4,
+            dest_pids: vec![],
+            text: Some("AAAA".into()),
+            encoding: Some("base64".into()),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"base64\""));
+        let back: PipeData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+    }
+
+    #[test]
+    fn pty_data_inline_text_round_trip() {
+        let d = PtyData {
+            pid: 2,
+            subtype: PtySubtype::MasterRead,
+            content_hash: None,
+            size: 3,
+            slave_path: "/dev/pts/1".into(),
+            text: Some("ls\n".into()),
+            encoding: None,
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(json.contains("\"text\""));
         let back: PtyData = serde_json::from_str(&json).unwrap();
         assert_eq!(d, back);
     }

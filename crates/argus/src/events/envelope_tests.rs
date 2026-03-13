@@ -98,6 +98,8 @@ fn event_round_trip_write() {
             before_hash: Some("ab12".into()),
             after_hash: Some("cd34".into()),
             tree_hash: Some("ef56".into()),
+            data: None,
+            encoding: None,
         }),
     );
     let json = serde_json::to_string(&event).unwrap();
@@ -200,17 +202,19 @@ fn all_variants_round_trip() {
         EventPayload::Exit(process::Exit { pid: 1, exit_code: 0, signal: None }),
         EventPayload::Read(file::Read {
             pid: 1, path: "/f".into(), fd: 3, offset: 0, size: 10,
-            content_hash: None,
+            content_hash: None, data: None, encoding: None,
         }),
         EventPayload::Write(file::Write {
             pid: 1, path: "/f".into(), fd: 3, offset: 0, size: 10,
             before_hash: None, after_hash: None, tree_hash: None,
+            data: None, encoding: None,
         }),
         EventPayload::Rename(file::Rename {
             pid: 1, old_path: "/a".into(), new_path: "/b".into(), tree_hash: None,
         }),
         EventPayload::Unlink(file::Unlink {
             pid: 1, path: "/f".into(), content_hash: None, tree_hash: None,
+            data: None, encoding: None,
         }),
         EventPayload::Mkdir(file::Mkdir { pid: 1, path: "/d".into(), tree_hash: None }),
         EventPayload::Rmdir(file::Rmdir { pid: 1, path: "/d".into(), tree_hash: None }),
@@ -220,6 +224,7 @@ fn all_variants_round_trip() {
         EventPayload::Truncate(file::Truncate {
             pid: 1, path: "/f".into(), old_size: 100, new_size: 0,
             before_hash: None, after_hash: None, tree_hash: None,
+            before_data: None, after_data: None, encoding: None,
         }),
         EventPayload::Link(file::Link {
             pid: 1, target: "/a".into(), link_path: "/b".into(), tree_hash: None,
@@ -231,6 +236,7 @@ fn all_variants_round_trip() {
             pid: 1, subtype: io::StdioSubtype::Stdout,
             content_hash: None, size: 5, pipe_inode: None,
             dest_pid: None, source_pid: None,
+            text: None, encoding: None,
         }),
         EventPayload::PipeCreate(io::PipeCreate {
             pid: 1, inode: 99, read_fd: 3, write_fd: 4,
@@ -238,6 +244,7 @@ fn all_variants_round_trip() {
         EventPayload::PipeData(io::PipeData {
             pid: 1, inode: 99, direction: io::PipeDirection::Write,
             content_hash: None, size: 10, dest_pids: vec![],
+            text: None, encoding: None,
         }),
         EventPayload::PipeClose(io::PipeClose {
             pid: 1, inode: 99, direction: io::PipeDirection::Read,
@@ -248,6 +255,7 @@ fn all_variants_round_trip() {
         EventPayload::PtyData(io::PtyData {
             pid: 1, subtype: io::PtySubtype::MasterRead,
             content_hash: None, size: 8, slave_path: "/dev/pts/0".into(),
+            text: None, encoding: None,
         }),
         EventPayload::FdRedirect(io::FdRedirect {
             pid: 1, fd: 1, target: io::FdTarget {
@@ -270,9 +278,11 @@ fn all_variants_round_trip() {
         EventPayload::HttpRequest(network::HttpRequest {
             pid: 1, method: "GET".into(), url: "/".into(),
             headers_hash: None, body_hash: None,
+            headers: None, body: None,
         }),
         EventPayload::HttpResponse(network::HttpResponse {
             pid: 1, status: 200, headers_hash: None, body_hash: None,
+            headers: None, body: None,
         }),
         EventPayload::AgentStart(control::AgentStart {
             agent_id: "a".into(), supervisor_pid_host: None, supervisor_pid_ns: None,

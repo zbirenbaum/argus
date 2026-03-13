@@ -240,12 +240,16 @@ mod tests {
                 url: "https://x.com".into(),
                 headers_hash: None,
                 body_hash: None,
+                headers: None,
+                body: None,
             },
             response: Some(HttpResponse {
                 pid: 1,
                 status: 200,
                 headers_hash: None,
                 body_hash: None,
+                headers: None,
+                body: None,
             }),
         }];
 
@@ -264,6 +268,8 @@ mod tests {
                 url: "https://x.com".into(),
                 headers_hash: None,
                 body_hash: None,
+                headers: None,
+                body: None,
             },
             response: None,
         }];

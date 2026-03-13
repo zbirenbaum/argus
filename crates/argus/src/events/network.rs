@@ -50,6 +50,12 @@ pub struct HttpRequest {
     pub headers_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_hash: Option<String>,
+    /// Inline request headers; absent when headers were not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<String>,
+    /// Inline request body; absent when body was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 /// An HTTP response was captured.
@@ -61,6 +67,12 @@ pub struct HttpResponse {
     pub headers_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_hash: Option<String>,
+    /// Inline response headers; absent when headers were not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<String>,
+    /// Inline response body; absent when body was not inlined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 #[cfg(test)]
@@ -127,6 +139,8 @@ mod tests {
             url: "https://api.example.com/data".into(),
             headers_hash: Some("h1".into()),
             body_hash: Some("b1".into()),
+            headers: None,
+            body: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: HttpRequest = serde_json::from_str(&json).unwrap();
@@ -140,6 +154,8 @@ mod tests {
             status: 404,
             headers_hash: None,
             body_hash: None,
+            headers: None,
+            body: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("headers_hash"));
@@ -161,6 +177,41 @@ mod tests {
     }
 
     #[test]
+    fn http_request_inline_fields_round_trip() {
+        let r = HttpRequest {
+            pid: 1,
+            method: "POST".into(),
+            url: "https://api.example.com/data".into(),
+            headers_hash: None,
+            body_hash: None,
+            headers: Some("Content-Type: application/json".into()),
+            body: Some("{\"key\":\"value\"}".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"headers\""));
+        assert!(json.contains("\"body\""));
+        let back: HttpRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn http_response_inline_fields_round_trip() {
+        let r = HttpResponse {
+            pid: 1,
+            status: 200,
+            headers_hash: None,
+            body_hash: None,
+            headers: Some("Content-Type: text/plain".into()),
+            body: Some("OK".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"headers\""));
+        assert!(json.contains("\"body\""));
+        let back: HttpResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
     fn http_request_none_fields_omitted() {
         let r = HttpRequest {
             pid: 1,
@@ -168,6 +219,8 @@ mod tests {
             url: "https://example.com".into(),
             headers_hash: None,
             body_hash: None,
+            headers: None,
+            body: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains("headers_hash"));
