@@ -6,7 +6,6 @@
 
 mod signals;
 mod startup;
-mod tls_watcher;
 mod wiring;
 
 use std::fs;
