@@ -91,7 +91,7 @@ impl SupervisorRuntime {
             .context("failed to initialize durability CAS")?;
         let digest_cache_for_durability = if upload_pool.is_some() {
             let cache_path = data_dir.join("digest-cache.bin");
-            Some(Arc::new(Mutex::new(DigestCache::new(cache_path))))
+            Some(Arc::new(DigestCache::new(cache_path)))
         } else {
             None
         };

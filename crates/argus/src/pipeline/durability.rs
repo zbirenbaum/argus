@@ -25,11 +25,10 @@ use crate::storage::upload_pool::UploadPool;
 pub struct DurabilityLayer {
     local_cas: LocalCas,
     upload_pool: Option<Arc<UploadPool>>,
-    /// Must be `Arc<Mutex<DigestCache>>` to be `Sync`, but the task
-    /// contract passes `Arc<DigestCache>`. `DigestCache` is not `Sync`
-    /// in isolation; we guard reads with a re-entrant-safe approach by
-    /// owning the Arc and calling `contains` only from the ptrace thread.
-    digest_cache: Option<Arc<std::sync::Mutex<DigestCache>>>,
+    /// `DigestCache` is internally `Sync` via `DashMap`; no external lock
+    /// needed.  When `Some`, consulted by `upload_async` to skip already-
+    /// confirmed remote objects.
+    digest_cache: Option<Arc<DigestCache>>,
 }
 
 impl DurabilityLayer {
@@ -46,7 +45,7 @@ impl DurabilityLayer {
     pub fn new(
         local_cas: LocalCas,
         upload_pool: Option<Arc<UploadPool>>,
-        digest_cache: Option<Arc<std::sync::Mutex<DigestCache>>>,
+        digest_cache: Option<Arc<DigestCache>>,
     ) -> Self {
         Self { local_cas, upload_pool, digest_cache }
     }
@@ -89,7 +88,7 @@ impl DurabilityLayer {
 
         // Skip upload when the digest cache confirms the object is remote.
         if let Some(cache) = &self.digest_cache {
-            if cache.lock().expect("digest cache lock poisoned").contains(&hash) {
+            if cache.contains(&hash) {
                 return;
             }
         }
