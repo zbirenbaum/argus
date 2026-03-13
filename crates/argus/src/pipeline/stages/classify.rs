@@ -19,7 +19,6 @@ use crate::pipeline::classified::{ClassifiedEvent, Classification};
 use crate::pipeline::ptrace_thread::PtraceHandle;
 use crate::pipeline::raw_stop::{RawSyscallStop, StopType};
 
-pub use super::sockaddr::{encode_sockaddr, is_tls_port, parse_sockaddr};
 use super::syscall_handlers;
 
 /// Saved state from a syscall entry that requires exit correlation.

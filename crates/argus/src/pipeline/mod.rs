@@ -29,13 +29,6 @@ pub(crate) mod stages;
 pub use runner::PipelineRunner;
 
 pub(crate) use bus::RecordBus;
-pub(crate) use context::PipelineContext;
-pub(crate) use capture_policy::{CaptureConfig, CaptureLevel, CapturePolicy, CaptureRule};
-pub(crate) use captured::{CapturedContent, CapturedEvent};
-pub(crate) use classified::{ClassifiedEvent, Classification, PipeDirection, PtyDataType, StdioType};
-pub(crate) use directive::PipelineDirective;
-pub(crate) use ptrace_thread::{PtraceHandle, PtraceStream};
-pub(crate) use raw_stop::{RawSyscallStop, StopType, SyscallArgs};
+pub(crate) use ptrace_thread::PtraceStream;
 pub(crate) use record::Record;
 pub(crate) use replay::RawStopRecorder;
-pub(crate) use sink::{Sink, SinkPriority};

@@ -140,4 +140,3 @@ mod nums {
     pub const SYS_CHOWN: u64 = ABSENT - 14;
 }
 
-pub use nums::*;

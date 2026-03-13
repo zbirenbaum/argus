@@ -13,12 +13,8 @@ pub(crate) mod s3;
 pub(crate) mod upload_job;
 pub(crate) mod upload_pool;
 
-pub(crate) use digest_cache::{DigestCache, DigestCacheStats, DigestEntry};
+pub(crate) use digest_cache::DigestCache;
 pub(crate) use event_log::EventLog;
-pub(crate) use local_buffer::LocalBuffer;
 pub(crate) use object_store_dyn::DynObjectStore;
-pub(crate) use s3::{ObjectStore, S3Client};
-pub(crate) use upload_job::UploadJob;
-pub(crate) use upload_pool::{
-    UploadConfirmation, UploadPool, UploadStats, UploadStatsSnapshot,
-};
+pub(crate) use s3::S3Client;
+pub(crate) use upload_pool::UploadPool;

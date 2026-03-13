@@ -24,8 +24,7 @@ pub(crate) struct IndexEntry {
 }
 
 pub(crate) use path_index::PathIndex;
-pub(crate) use pid_index::{PidIndex, ProcessInfo};
-pub(crate) use query::{QueryEngine, QueryFilter, QueryResult};
+pub(crate) use pid_index::PidIndex;
 pub(crate) use type_index::TypeIndex;
 
 // Rust guideline compliant 2026-02-21

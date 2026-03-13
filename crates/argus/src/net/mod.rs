@@ -22,9 +22,5 @@ pub use env::agent_env_vars;
 pub use mitmdump::{AddonConfig, MitmdumpHandle, start_mitmdump, start_mitmdump_with_flow_capture};
 
 // Crate-internal: used only by runtime TLS watcher.
-pub(crate) use dedup::NetworkDedup;
-pub(crate) use flow_parser::{
-    MitmdumpFlow, ProcessedFlow, parse_flow_line, parse_flow_lines, process_flow,
-};
-pub(crate) use flow_watcher::{FlowEvents, FlowWatcher};
-pub(crate) use keylog::{KeylogLine, KeylogWatcher, parse_keylog_line};
+pub(crate) use flow_watcher::FlowWatcher;
+pub(crate) use keylog::KeylogWatcher;

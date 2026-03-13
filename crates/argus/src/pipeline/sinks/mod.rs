@@ -17,6 +17,5 @@ pub(crate) use broadcast::BroadcastSink;
 pub(crate) use event_log::EventLogSink;
 pub(crate) use index::IndexSink;
 pub(crate) use local_cas::LocalCasSink;
-pub(crate) use memory::MemorySink;
 pub(crate) use remote_cas::RemoteCasSink;
 pub(crate) use stdout::StdoutSink;

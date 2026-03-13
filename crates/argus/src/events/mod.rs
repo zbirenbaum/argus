@@ -21,4 +21,3 @@ pub mod snapshot;
 pub use control::ApprovalDecision;
 #[doc(inline)]
 pub use envelope::{Event, EventPayload, SequenceGenerator};
-pub(crate) use envelope::timestamp_pair;
