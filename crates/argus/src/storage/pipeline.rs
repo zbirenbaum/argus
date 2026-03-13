@@ -239,14 +239,15 @@ impl StoragePipeline {
     }
 }
 
-/// Extract a `ContentHash` from a CAS S3 key like `cas/ab/cdef...`.
+/// Extract a `ContentHash` from a CAS S3 key like `cas/blake3/ab/cdef...`.
 fn extract_cas_hash(key: &str) -> Option<ContentHash> {
     let rest = key.strip_prefix("cas/")?;
-    let (prefix, suffix) = rest.split_once('/')?;
-    if prefix.len() != 2 {
+    let (algorithm, remainder) = rest.split_once('/')?;
+    let (hex_prefix, hex_suffix) = remainder.split_once('/')?;
+    if hex_prefix.len() != 2 {
         return None;
     }
-    let full = format!("{prefix}{suffix}");
+    let full = format!("{algorithm}:{hex_prefix}{hex_suffix}");
     ContentHash::try_from(full).ok()
 }
 

@@ -159,7 +159,7 @@ async fn store_content_uploads_to_s3() {
     pipeline.shutdown().await.unwrap();
 
     // Verify CAS object uploaded
-    let cas_key = format!("cas/{}/{}", hash.prefix(), hash.suffix());
+    let cas_key = format!("cas/{}/{}/{}", hash.algorithm_dir(), hash.prefix(), hash.suffix());
     let uploaded = store.get_stored(&cas_key).await;
     assert!(uploaded.is_some());
     assert_eq!(uploaded.unwrap(), data);
@@ -332,7 +332,7 @@ async fn shutdown_reports_stats() {
 #[test]
 fn extract_cas_hash_parses_valid_key() {
     let hash = ContentHash::from_data(b"test");
-    let key = format!("cas/{}/{}", hash.prefix(), hash.suffix());
+    let key = format!("cas/{}/{}/{}", hash.algorithm_dir(), hash.prefix(), hash.suffix());
     let extracted = super::extract_cas_hash(&key);
     assert_eq!(extracted, Some(hash));
 }

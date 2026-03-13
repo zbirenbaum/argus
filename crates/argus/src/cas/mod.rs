@@ -1,7 +1,9 @@
-//! Content-addressable storage using SHA-256.
+//! Content-addressable storage with algorithm-prefixed hashes.
 //!
 //! All content (file bodies, stdio, network payloads) is addressed by
-//! its SHA-256 digest. Identical content is stored exactly once.
+//! its content hash. The default algorithm is BLAKE3; SHA-256 is
+//! supported for backward compatibility. Identical content is stored
+//! exactly once.
 //!
 //! The [`Cas`] trait defines the provider-agnostic read/write contract.
 //! [`CasBackend`] extends it with eviction and stats. Backends compose
@@ -24,7 +26,7 @@ mod traits;
 #[doc(inline)]
 pub use tiered::TieredCas;
 #[doc(inline)]
-pub use hash::{ContentHash, InvalidHashError};
+pub use hash::{ContentHash, HashAlgorithm, InvalidHashError};
 #[doc(inline)]
 pub use memory::MemoryCas;
 #[doc(inline)]
