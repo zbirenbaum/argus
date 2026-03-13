@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cas::ContentHash;
 use crate::config::TreeConfig;
 use crate::snapshot::node::MerkleNode;
@@ -41,7 +43,7 @@ pub struct TreeBuilder {
 ///
 /// Contains only the precomputed root hash and a flat file index.
 /// The persistent [`MerkleNode`] tree stays internal to [`TreeBuilder`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeSnapshot {
     /// Precomputed root hash at the time of finalization.
     pub root_hash: ContentHash,
@@ -50,6 +52,16 @@ pub struct TreeSnapshot {
 }
 
 impl TreeSnapshot {
+    /// Create an empty snapshot representing an empty workspace.
+    #[must_use]
+    pub fn empty() -> Self {
+        // Hash of the empty tree is the hash of empty bytes — a stable sentinel.
+        Self {
+            root_hash: ContentHash::from_data(b""),
+            files: BTreeMap::new(),
+        }
+    }
+
     /// Number of files in this snapshot.
     #[must_use]
     pub fn file_count(&self) -> usize {
@@ -71,6 +83,14 @@ impl TreeSnapshot {
     /// Iterates over all `(path, hash)` pairs in this snapshot.
     pub fn files_iter(&self) -> impl Iterator<Item = (&Path, &ContentHash)> {
         self.files.iter().map(|(p, h)| (p.as_path(), h))
+    }
+
+    /// Iterates over all `(path, hash)` pairs in this snapshot.
+    ///
+    /// Alias for [`TreeSnapshot::files_iter`] to match the naming convention
+    /// of `MerkleTree` and `TreeBuilder`.
+    pub fn files(&self) -> impl Iterator<Item = (&Path, &ContentHash)> {
+        self.files_iter()
     }
 
     /// Returns the precomputed root hash.

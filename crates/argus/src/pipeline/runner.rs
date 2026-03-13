@@ -227,12 +227,15 @@ impl PipelineRunner {
                 "tree stage complete",
             );
 
-            // Sync tree snapshot to SharedState and persist to CAS so
-            // the /tree and /restore endpoints can serve it.
-            let cas_tree_hash = {
-                let snapshot = self.tree.tree().lock();
-                self.shared.store_tree(Arc::new(snapshot.clone()));
-                snapshot.store(self.shared.cas().as_ref()).ok()
+            // Finalize and publish snapshot at batch-size cadence to avoid
+            // an O(n) deep clone on every event.
+            let cas_tree_hash = if self.tree.should_finalize() {
+                let snapshot = self.tree.finalize();
+                let root = snapshot.root_hash();
+                self.shared.store_tree_snapshot(snapshot);
+                Some(root)
+            } else {
+                None
             };
 
             if let Some(mut evt) = self.stamp.stamp(captured, tree_hash) {

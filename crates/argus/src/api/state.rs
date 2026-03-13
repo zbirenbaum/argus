@@ -22,9 +22,10 @@ use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
 use crate::pipeline::EmitResult;
 use crate::pipeline::RecordBus;
+use crate::pipeline::overflow::OverflowQueue;
 use crate::pipeline::record::Record;
 use crate::pipeline::stall::StallState;
-use crate::snapshot::MerkleTree;
+use crate::snapshot::builder::TreeSnapshot;
 
 /// Broadcast channel capacity for API event subscribers.
 ///
@@ -46,13 +47,15 @@ pub struct Bridge {
     seq_gen: SequenceGenerator,
     event_tx: broadcast::Sender<Event>,
     /// Latest Merkle tree snapshot, swapped on every mutating event.
-    tree: ArcSwap<MerkleTree>,
+    tree: ArcSwap<TreeSnapshot>,
     /// CAS backend for content reads and restore operations.
     cas: Arc<dyn Cas>,
     /// Maps event seq → tree_hash for point-in-time restore lookups.
     tree_hashes: DashMap<u64, String>,
     /// Pipeline bus for emitting API-originated events to all sinks.
     bus: RecordBus,
+    /// Overflow queue for API-path events that fail required sinks.
+    overflow: Option<Arc<OverflowQueue>>,
     /// Current sink stall state, if any required sinks are failing.
     stall: ParkingMutex<Option<StallState>>,
 }
@@ -71,6 +74,16 @@ impl std::fmt::Debug for Bridge {
 impl Bridge {
     /// Creates a new bridge with the given CAS backend.
     pub fn new(agent_id: CompactString, cas: Arc<dyn Cas>, bus: RecordBus) -> Self {
+        Self::with_overflow(agent_id, cas, bus, None)
+    }
+
+    /// Creates a new bridge with an optional overflow queue.
+    pub fn with_overflow(
+        agent_id: CompactString,
+        cas: Arc<dyn Cas>,
+        bus: RecordBus,
+        overflow: Option<Arc<OverflowQueue>>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
             agent_id,
@@ -80,23 +93,24 @@ impl Bridge {
             pending_approvals: DashMap::new(),
             seq_gen: SequenceGenerator::default(),
             event_tx,
-            tree: ArcSwap::from_pointee(MerkleTree::new()),
+            tree: ArcSwap::from_pointee(TreeSnapshot::empty()),
             cas,
             tree_hashes: DashMap::new(),
             bus,
+            overflow,
             stall: ParkingMutex::new(None),
         }
     }
 
     /// Atomically swap the latest tree snapshot.
     ///
-    /// Called by the tracer after every mutating event.
-    pub fn store_tree(&self, tree: Arc<MerkleTree>) {
-        self.tree.store(tree);
+    /// Called by the pipeline runner at batch-size cadence.
+    pub fn store_tree_snapshot(&self, snapshot: TreeSnapshot) {
+        self.tree.store(Arc::new(snapshot));
     }
 
     /// Load the latest tree snapshot.
-    pub fn load_tree(&self) -> arc_swap::Guard<Arc<MerkleTree>> {
+    pub fn load_tree(&self) -> arc_swap::Guard<Arc<TreeSnapshot>> {
         self.tree.load()
     }
 
@@ -118,17 +132,22 @@ impl Bridge {
     /// Emits an event to all broadcast subscribers.
     ///
     /// Zero-cost when no receivers are connected — `send` silently drops
-    /// the event with no allocation.
+    /// the event with no allocation. On required-sink failure the record
+    /// is buffered in the overflow queue when one is configured.
     pub fn emit(&self, payload: EventPayload) {
         let evt = Event::new(&self.seq_gen, self.agent_id.clone(), payload);
-        if let EmitResult::RequiredFailed(failures) = self.bus.emit(Record::Event(evt.clone())) {
+        let record = Record::Event(evt.clone());
+        if let EmitResult::RequiredFailed(failures) = self.bus.emit(record.clone()) {
+            if let Some(ref overflow) = self.overflow {
+                overflow.push(&record);
+            }
             for (sink_name, err) in &failures {
                 tracing::event!(
                     name: "pipeline.emit.required_sink_failed",
                     tracing::Level::ERROR,
                     sink.name = sink_name.as_str(),
                     error.message = %err,
-                    "required sink failed on API path, event may be lost",
+                    "required sink failed on API path, buffered in overflow queue",
                 );
             }
         }
@@ -245,6 +264,16 @@ pub type SharedState = Arc<Bridge>;
 /// Creates a new shared bridge handle.
 pub fn new_shared_state(agent_id: CompactString, cas: Arc<dyn Cas>, bus: RecordBus) -> SharedState {
     Arc::new(Bridge::new(agent_id, cas, bus))
+}
+
+/// Creates a new shared bridge handle with an overflow queue.
+pub fn new_shared_state_with_overflow(
+    agent_id: CompactString,
+    cas: Arc<dyn Cas>,
+    bus: RecordBus,
+    overflow: Option<Arc<OverflowQueue>>,
+) -> SharedState {
+    Arc::new(Bridge::with_overflow(agent_id, cas, bus, overflow))
 }
 
 /// Delivers an approval decision through the oneshot channel.
@@ -393,13 +422,17 @@ mod tests {
 
     #[test]
     fn store_and_load_tree() {
+        use crate::config::TreeConfig;
+        use crate::snapshot::builder::TreeBuilder;
+
         let bridge = Bridge::new("test".into(), test_cas(), test_bus());
-        let mut tree = MerkleTree::new();
-        tree.update(
+        let mut builder = TreeBuilder::new(TreeConfig::default());
+        builder.update(
             std::path::PathBuf::from("a.txt"),
             crate::cas::ContentHash::from_data(b"hello"),
         );
-        bridge.store_tree(Arc::new(tree));
+        let snapshot = builder.finalize();
+        bridge.store_tree_snapshot(snapshot);
 
         let loaded = bridge.load_tree();
         assert_eq!(loaded.file_count(), 1);

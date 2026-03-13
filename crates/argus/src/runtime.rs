@@ -18,7 +18,7 @@ use nix::unistd::Pid;
 use tokio::sync::broadcast;
 use tracing::{Level, event};
 
-use crate::api::state::{SharedState, new_shared_state};
+use crate::api::state::{SharedState, new_shared_state_with_overflow};
 use crate::approver::Approvers;
 use crate::cas::{Cas, ContentHash, LocalCas};
 use crate::config::{OutputConfig, SupervisorConfig};
@@ -30,6 +30,7 @@ use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::CapturePolicy;
 use crate::pipeline::context::PipelineContext;
 use crate::pipeline::durability::DurabilityLayer;
+use crate::pipeline::overflow::OverflowQueue;
 use crate::pipeline::outputs::{FileOutput, OutputList, StdoutOutput};
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
@@ -139,12 +140,18 @@ impl SupervisorRuntime {
 
         let seq = Arc::new(SequenceGenerator::default());
         let agent_id = CompactString::from(config.agent_id.as_str());
-        let ctx = PipelineContext::new(seq, bus.clone(), agent_id.clone());
+
+        let overflow = build_overflow_queue(&config);
+
+        // The ptrace pipeline never needs the overflow queue — it can freeze
+        // the tracee on required-sink failure (handled by the runner retry loop).
+        // Non-ptrace threads (keylog, proxy, API) get the queue via ctx/bridge.
+        let ctx = PipelineContext::new(seq, bus.clone(), agent_id.clone(), overflow.clone());
 
         let api_cas: Arc<dyn Cas> = Arc::new(
             LocalCas::new(cas_path).context("failed to initialize API CAS handle")?,
         );
-        let shared = new_shared_state(agent_id, api_cas, bus);
+        let shared = new_shared_state_with_overflow(agent_id, api_cas, bus, overflow);
         shared.store_rules(config.build_ruleset());
 
         let outputs = build_outputs(&config);
@@ -353,7 +360,7 @@ impl SupervisorRuntime {
         let tree_cas = LocalCas::new(self.config.data_dir.join("cas"))
             .context("failed to initialize tree-stage CAS")?;
         let tree_durability = DurabilityLayer::new(tree_cas, self.upload_pool, None);
-        let tree_stage = TreeStage::new(MerkleTree::new(), tree_durability, 1000);
+        let tree_stage = TreeStage::new(self.config.tree.clone(), tree_durability);
         let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.ctx.agent_id.clone(), self.config.enrich.clone());
 
         let recorder: Option<RawStopRecorder> = None;
@@ -473,6 +480,37 @@ fn build_outputs(config: &SupervisorConfig) -> OutputList {
         }
     }
     list
+}
+
+/// Construct the SQLite overflow queue if data_dir exists.
+///
+/// Returns `None` without error when the directory is absent (e.g. local dev
+/// without `/data` mounted), so non-overflow code paths are unaffected.
+fn build_overflow_queue(config: &SupervisorConfig) -> Option<Arc<OverflowQueue>> {
+    if !config.data_dir.exists() {
+        return None;
+    }
+    let db_path = config.data_dir.join("overflow.db");
+    match OverflowQueue::new(&db_path, config.overflow.clone()) {
+        Ok(q) => {
+            event!(
+                name: "runtime.overflow.initialized",
+                Level::INFO,
+                db.path = %db_path.display(),
+                "overflow queue initialized at {{db.path}}",
+            );
+            Some(Arc::new(q))
+        }
+        Err(e) => {
+            event!(
+                name: "runtime.overflow.init_failed",
+                Level::WARN,
+                error.message = %e,
+                "failed to initialize overflow queue, non-ptrace emit failures will not be buffered",
+            );
+            None
+        }
+    }
 }
 
 fn walk_dir_recursive(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
