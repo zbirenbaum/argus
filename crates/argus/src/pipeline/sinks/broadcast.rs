@@ -40,7 +40,7 @@ impl Sink for BroadcastSink {
         matches!(record, Record::Event(_))
     }
 
-    fn write(&self, record: Record) -> Result<()> {
+    fn write(&mut self, record: Record) -> Result<()> {
         if let Record::Event(event) = record {
             // SendError means all receivers were dropped; that is fine
             // since broadcast is purely for live observers.
@@ -49,7 +49,7 @@ impl Sink for BroadcastSink {
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn delivers_event_to_subscriber() {
         let (tx, mut rx) = broadcast::channel(8);
-        let sink = BroadcastSink::new(tx);
+        let mut sink = BroadcastSink::new(tx);
         let event = make_event(7);
         sink.write(Record::Event(event.clone())).expect("write");
         let received = rx.try_recv().expect("recv");
@@ -97,7 +97,7 @@ mod tests {
     fn no_subscribers_does_not_error() {
         let (tx, _rx) = broadcast::channel::<Event>(8);
         // Drop the receiver so there are no subscribers.
-        let sink = BroadcastSink::new(tx);
+        let mut sink = BroadcastSink::new(tx);
         let event = make_event(1);
         sink.write(Record::Event(event)).expect("write with no subscribers");
     }

@@ -1,8 +1,6 @@
 // Rust guideline compliant 2026-02-21
 //! Blocking sink that appends events to the JSONL segment log.
 
-use std::sync::Mutex;
-
 use anyhow::Result;
 
 use crate::pipeline::record::Record;
@@ -11,36 +9,32 @@ use crate::storage::event_log::EventLog;
 
 /// Blocking sink that appends every event to the JSONL event log.
 ///
-/// Non-event records are silently ignored. The underlying `EventLog`
-/// requires mutable access per write, so it is wrapped in a `Mutex`.
-/// The sink does not hold an `UploadPool` reference — callers that
-/// want segment rotation to trigger uploads should configure the
-/// `EventLog` with one before handing it to this sink, or drive
-/// rotation externally via finalize/reopen.
+/// Non-event records are silently ignored. The bus wraps this sink in
+/// `Mutex<dyn Sink>`, so no internal mutex is needed here — `write` and
+/// `flush` take `&mut self` and access the log directly.
+///
+/// The sink does not hold an `UploadPool` reference — callers that want
+/// segment rotation to trigger uploads should configure the `EventLog`
+/// with one before handing it to this sink, or drive rotation externally
+/// via finalize/reopen.
 #[derive(Debug)]
 pub struct EventLogSink {
-    log: Mutex<EventLog>,
+    log: EventLog,
 }
 
 impl EventLogSink {
     /// Creates a sink that writes to `log`.
     pub fn new(log: EventLog) -> Self {
-        Self {
-            log: Mutex::new(log),
-        }
+        Self { log }
     }
 
-    /// Grants temporary access to the inner log for callers that need
-    /// to trigger segment rotation or finalization.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the mutex is poisoned (a previous write panicked).
-    pub fn with_log<F, T>(&self, f: F) -> T
+    /// Grants mutable access to the inner log for callers that need to
+    /// trigger segment rotation or finalization.
+    pub fn with_log<F, T>(&mut self, f: F) -> T
     where
         F: FnOnce(&mut EventLog) -> T,
     {
-        f(&mut self.log.lock().expect("event log mutex poisoned"))
+        f(&mut self.log)
     }
 }
 
@@ -53,24 +47,19 @@ impl Sink for EventLogSink {
         matches!(record, Record::Event(_))
     }
 
-    fn write(&self, record: Record) -> Result<()> {
+    fn write(&mut self, record: Record) -> Result<()> {
         let Record::Event(event) = record else {
             return Ok(());
         };
         // No upload pool here — segment upload is driven by the storage layer
         // separately to keep the sink interface synchronous.
-        self.log
-            .lock()
-            .expect("event log mutex poisoned")
-            .append(&event, None)?;
+        self.log.append(&event, None)?;
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
-        self.log
-            .lock()
-            .expect("event log mutex poisoned")
-            .flush()}
+    fn flush(&mut self) -> Result<()> {
+        self.log.flush()
+    }
 
     fn name(&self) -> &str {
         "event-log"
@@ -131,14 +120,14 @@ mod tests {
 
     #[test]
     fn write_event_succeeds() {
-        let (_dir, sink) = make_sink();
+        let (_dir, mut sink) = make_sink();
         sink.write(Record::Event(make_event())).expect("write");
         sink.flush().expect("flush");
     }
 
     #[test]
     fn write_non_event_is_noop() {
-        let (_dir, sink) = make_sink();
+        let (_dir, mut sink) = make_sink();
         let hash = crate::cas::ContentHash::from_data(b"x");
         sink.write(Record::Content { hash, data: vec![1, 2, 3] })
             .expect("write non-event noop");

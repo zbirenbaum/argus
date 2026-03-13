@@ -1,8 +1,6 @@
 // Rust guideline compliant 2026-02-21
 //! In-memory sink for testing pipeline wiring.
 
-use std::sync::Mutex;
-
 use anyhow::Result;
 
 use crate::events::Event;
@@ -14,9 +12,13 @@ use crate::pipeline::sink::{Sink, SinkPriority};
 /// All record variants are accepted regardless of priority. Use `drain`
 /// to remove and return all accumulated records, or `events` to extract
 /// only the event records.
+///
+/// In production tests the sink is wrapped in `Arc<Mutex<MemorySink>>`
+/// by the bus; direct mutation methods (`drain`, `events`, `len`) require
+/// holding the lock and calling them on the guard.
 #[derive(Debug)]
 pub struct MemorySink {
-    records: Mutex<Vec<Record>>,
+    records: Vec<Record>,
     priority: SinkPriority,
 }
 
@@ -27,29 +29,19 @@ impl MemorySink {
     /// it does not change accumulation behavior.
     pub fn new(priority: SinkPriority) -> Self {
         Self {
-            records: Mutex::new(Vec::new()),
+            records: Vec::new(),
             priority,
         }
     }
 
     /// Removes and returns all accumulated records.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn drain(&self) -> Vec<Record> {
-        std::mem::take(&mut self.records.lock().expect("memory sink mutex poisoned"))
+    pub fn drain(&mut self) -> Vec<Record> {
+        std::mem::take(&mut self.records)
     }
 
     /// Returns clones of only the event records without clearing the buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn events(&self) -> Vec<Event> {
         self.records
-            .lock()
-            .expect("memory sink mutex poisoned")
             .iter()
             .filter_map(|r| {
                 if let Record::Event(e) = r {
@@ -62,21 +54,13 @@ impl MemorySink {
     }
 
     /// Returns the number of accumulated records.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn len(&self) -> usize {
-        self.records.lock().expect("memory sink mutex poisoned").len()
+        self.records.len()
     }
 
     /// Returns `true` if no records have been accumulated.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.records.is_empty()
     }
 }
 
@@ -89,15 +73,12 @@ impl Sink for MemorySink {
         true
     }
 
-    fn write(&self, record: Record) -> Result<()> {
-        self.records
-            .lock()
-            .expect("memory sink mutex poisoned")
-            .push(record);
+    fn write(&mut self, record: Record) -> Result<()> {
+        self.records.push(record);
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -134,7 +115,7 @@ mod tests {
 
     #[test]
     fn accumulates_records() {
-        let sink = MemorySink::new(SinkPriority::Blocking);
+        let mut sink = MemorySink::new(SinkPriority::Blocking);
         sink.write(Record::Event(make_event(1))).expect("write");
         let hash = ContentHash::from_data(b"x");
         sink.write(Record::Content { hash, data: vec![] }).expect("write");
@@ -143,7 +124,7 @@ mod tests {
 
     #[test]
     fn drain_empties_buffer() {
-        let sink = MemorySink::new(SinkPriority::Blocking);
+        let mut sink = MemorySink::new(SinkPriority::Blocking);
         sink.write(Record::Event(make_event(1))).expect("write");
         let drained = sink.drain();
         assert_eq!(drained.len(), 1);
@@ -152,7 +133,7 @@ mod tests {
 
     #[test]
     fn events_filters_to_events_only() {
-        let sink = MemorySink::new(SinkPriority::Blocking);
+        let mut sink = MemorySink::new(SinkPriority::Blocking);
         sink.write(Record::Event(make_event(5))).expect("write");
         let hash = ContentHash::from_data(b"data");
         sink.write(Record::Content { hash, data: vec![] }).expect("write");

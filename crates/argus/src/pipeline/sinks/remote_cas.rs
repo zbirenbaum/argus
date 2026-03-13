@@ -16,8 +16,8 @@ use crate::storage::upload_pool::UploadPool;
 ///
 /// Holds a shared reference to the `UploadPool` and submits jobs
 /// via `pool.submit()`. The pool's internal channel is `Send + Sync`,
-/// so this sink satisfies the `Sink: Sync` bound without a mutex on
-/// the submission path.
+/// so this sink satisfies the `Sink: Send` bound without internal
+/// synchronization on the submission path.
 ///
 /// The digest cache is consulted before each submission to skip objects
 /// that are already known to exist remotely. Events are silently ignored.
@@ -56,7 +56,7 @@ impl Sink for RemoteCasSink {
         !matches!(record, Record::Event(_))
     }
 
-    fn write(&self, record: Record) -> Result<()> {
+    fn write(&mut self, record: Record) -> Result<()> {
         match record {
             Record::Content { hash, data } => {
                 if self.is_cached(&hash) {
@@ -85,7 +85,7 @@ impl Sink for RemoteCasSink {
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 

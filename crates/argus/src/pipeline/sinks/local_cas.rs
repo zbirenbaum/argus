@@ -34,7 +34,7 @@ impl Sink for LocalCasSink {
         !matches!(record, Record::Event(_))
     }
 
-    fn write(&self, record: Record) -> Result<()> {
+    fn write(&mut self, record: Record) -> Result<()> {
         match record {
             Record::Content { hash, data } => {
                 self.cas.put_with_hash(hash, &data)?;
@@ -60,7 +60,7 @@ impl Sink for LocalCasSink {
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 
@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn stores_content_record() {
-        let (_dir, sink) = make_sink();
+        let (_dir, mut sink) = make_sink();
         let data = b"hello sink".to_vec();
         let hash = ContentHash::from_data(&data);
         let record = Record::Content { hash: hash.clone(), data };
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn stores_manifest_as_json() {
-        let (_dir, sink) = make_sink();
+        let (_dir, mut sink) = make_sink();
         let chunks = vec![
             ContentHash::from_data(b"a"),
             ContentHash::from_data(b"b"),
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn flush_is_noop() {
-        let (_dir, sink) = make_sink();
+        let (_dir, mut sink) = make_sink();
         sink.flush().expect("flush");
     }
 

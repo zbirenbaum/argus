@@ -7,7 +7,6 @@
 //! mix with this JSONL stream.
 
 use std::io::{self, BufWriter, Write};
-use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 
@@ -19,18 +18,18 @@ use crate::pipeline::sink::{Sink, SinkPriority};
 /// Only `Record::Event` records are written; content, manifest, and
 /// checkpoint records are silently ignored so the stream stays valid JSONL.
 ///
-/// `BufWriter<Stdout>` is wrapped in a `Mutex` because `Stdout` itself is
-/// not `Sync` in all configurations and the `Sink` trait requires `Sync`.
+/// The bus wraps this sink in `Mutex<dyn Sink>` so no internal lock is
+/// needed — `write` and `flush` access `self.out` directly via `&mut self`.
 #[derive(Debug)]
 pub struct StdoutSink {
-    out: Mutex<BufWriter<io::Stdout>>,
+    out: BufWriter<io::Stdout>,
 }
 
 impl StdoutSink {
     /// Creates a sink backed by buffered stdout.
     pub fn new() -> Self {
         Self {
-            out: Mutex::new(BufWriter::new(io::stdout())),
+            out: BufWriter::new(io::stdout()),
         }
     }
 }
@@ -52,23 +51,18 @@ impl Sink for StdoutSink {
         matches!(record, Record::Event(_))
     }
 
-    fn write(&self, record: Record) -> Result<()> {
+    fn write(&mut self, record: Record) -> Result<()> {
         let Record::Event(event) = record else {
             return Ok(());
         };
         let json =
             serde_json::to_string(&event).with_context(|| format!("serialize event seq={}", event.seq))?;
-        let mut out = self.out.lock().expect("stdout sink mutex poisoned");
-        writeln!(out, "{json}").context("write event to stdout")?;
-        out.flush().context("flush stdout after event")
+        writeln!(self.out, "{json}").context("write event to stdout")?;
+        self.out.flush().context("flush stdout after event")
     }
 
-    fn flush(&self) -> Result<()> {
-        self.out
-            .lock()
-            .expect("stdout sink mutex poisoned")
-            .flush()
-            .context("flush stdout sink")
+    fn flush(&mut self) -> Result<()> {
+        self.out.flush().context("flush stdout sink")
     }
 
     fn name(&self) -> &str {

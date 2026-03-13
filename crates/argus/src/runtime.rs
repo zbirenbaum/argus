@@ -29,7 +29,7 @@ use crate::pipeline::bus::RecordBus;
 use crate::pipeline::capture_policy::CapturePolicy;
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
-use crate::pipeline::sink::{Sink, SinkPriority};
+use crate::pipeline::sink::Sink;
 use crate::pipeline::sinks::{
     BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink, StdoutSink,
 };
@@ -305,22 +305,22 @@ fn build_bus(
     config: &SupervisorConfig,
     broadcast_tx: broadcast::Sender<Event>,
 ) -> RecordBus {
-    let mut sinks: Vec<Arc<dyn Sink>> = vec![
-        Arc::new(StdoutSink::new()),
-        Arc::new(LocalCasSink::new(local_cas)),
-        Arc::new(EventLogSink::new(event_log)),
-        Arc::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new())),
-        Arc::new(BroadcastSink::new(broadcast_tx)),
+    let mut sinks: Vec<Arc<Mutex<dyn Sink>>> = vec![
+        Arc::new(Mutex::new(StdoutSink::new())),
+        Arc::new(Mutex::new(LocalCasSink::new(local_cas))),
+        Arc::new(Mutex::new(EventLogSink::new(event_log))),
+        Arc::new(Mutex::new(IndexSink::new(PathIndex::new(), PidIndex::new(), TypeIndex::new()))),
+        Arc::new(Mutex::new(BroadcastSink::new(broadcast_tx))),
     ];
 
     if let Some(pool) = upload_pool {
         let cache_path = config.data_dir.join("digest-cache.bin");
         let digest_cache = Arc::new(DigestCache::new(cache_path));
-        sinks.push(Arc::new(RemoteCasSink::new(
+        sinks.push(Arc::new(Mutex::new(RemoteCasSink::new(
             pool,
             digest_cache,
             config.agent_id.clone(),
-        )));
+        ))));
     }
 
     RecordBus::new(sinks)
