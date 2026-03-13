@@ -11,6 +11,7 @@
 
 pub mod checkpoint;
 pub mod diff;
+pub mod node;
 pub mod restore;
 pub mod tree;
 
