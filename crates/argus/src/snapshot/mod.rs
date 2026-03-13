@@ -9,12 +9,15 @@
 //! The diff engine walks two trees and reports only subtrees whose hashes
 //! differ, skipping identical branches entirely.
 
+pub mod builder;
 pub mod checkpoint;
 pub mod diff;
 pub mod node;
 pub mod restore;
 pub mod tree;
 
+#[doc(inline)]
+pub use builder::{TreeBuilder, TreeSnapshot};
 #[doc(inline)]
 pub use checkpoint::{deserialize_checkpoint, serialize_checkpoint};
 #[doc(inline)]

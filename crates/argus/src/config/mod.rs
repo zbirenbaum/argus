@@ -16,6 +16,7 @@ mod pause_rules;
 mod redact;
 mod storage;
 mod tls;
+pub mod tree;
 
 pub use capture::{CaptureConfig, CapturePathConfig};
 pub use durability::{DurabilityConfig, DurabilityMode, DurabilityOverride};
@@ -27,6 +28,7 @@ pub use pause_rules::{
 pub use redact::{BuiltinRedactions, RedactConfig, RedactPattern};
 pub use storage::{DigestCacheConfig, LocalBufferConfig, S3Config, StorageConfig, UploadConfig};
 pub use tls::{ProxyMode, TlsConfig, UpstreamVerify};
+pub use tree::TreeConfig;
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -113,6 +115,10 @@ pub struct SupervisorConfig {
     /// Destinations that receive every enriched event record.
     #[serde(default = "default_outputs")]
     pub outputs: Vec<OutputConfig>,
+
+    /// Merkle tree batched finalization and checkpoint tuning.
+    #[serde(default)]
+    pub tree: TreeConfig,
 }
 
 /// UID/GID to drop to before exec'ing the agent process.
@@ -143,6 +149,7 @@ impl Default for SupervisorConfig {
             enrich: EnrichConfig::default(),
             redact: RedactConfig::default(),
             outputs: default_outputs(),
+            tree: TreeConfig::default(),
         }
     }
 }
