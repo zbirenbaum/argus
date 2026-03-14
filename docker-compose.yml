@@ -1,3 +1,13 @@
+# Dev environment: build/test container + MinIO for S3 integration tests.
+#
+# The argus-arm64 image is the dev container (no supervisor entrypoint).
+# Tests launch their own supervisor instances as needed.
+#
+# Usage:
+#   docker compose up -d
+#   docker exec -w /build argus-arm64 cargo test ...
+#   docker exec -w /build argus-arm64 ./tests/validate.sh
+
 services:
   minio:
     image: minio/minio:latest
@@ -28,7 +38,7 @@ services:
 
   argus-dev:
     image: argus-arm64
-    container_name: argus-dev-compose
+    container_name: argus-arm64
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -38,11 +48,13 @@ services:
       AWS_REGION: us-east-1
       MINIO_ENDPOINT: http://minio:9000
     volumes:
-      - .:/workspace
-    working_dir: /workspace
+      - .:/build
+    working_dir: /build
     cap_add:
       - SYS_PTRACE
     security_opt:
       - seccomp:unconfined
       - apparmor:unconfined
+    # No supervisor here — this is a build/test environment.
+    # Tests launch supervisor instances on demand.
     command: sleep infinity

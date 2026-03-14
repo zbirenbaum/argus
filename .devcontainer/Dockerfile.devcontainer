@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     mold \
     clang \
     musl-tools \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js (required by Claude Code)
@@ -31,7 +32,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 RUN npm install -g @anthropic-ai/claude-code
 ENV CLAUDE_CODE_OAUTH_TOKEN=""
 
-# mitmdump for TLS MITM proxy
+# mitmdump for TLS MITM proxy (used by validation tests)
 RUN pipx install mitmproxy
 ENV PATH="/root/.local/bin:${PATH}"
 
