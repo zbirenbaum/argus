@@ -1,10 +1,8 @@
 ---
+import { EventViewer } from "@components/features/EventViewer";
 import Layout from "@/layouts/Layout.astro";
 ---
 
 <Layout title="Eden">
-  <main class="flex min-h-screen flex-col items-center justify-center p-8">
-    <h1 class="text-4xl font-bold tracking-tight">Eden</h1>
-    <p class="mt-4 text-muted-foreground">Getting started.</p>
-  </main>
+  <EventViewer client:load />
 </Layout>
