@@ -1,11 +1,12 @@
 // Rust guideline compliant 2026-02-21
 //! SQLite event store — append-only, queryable by type/path/pid/time.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
 use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// Persists events and serves queries.
 ///
@@ -66,8 +67,81 @@ impl EventStore {
         Ok(())
     }
 
-    /// Query events with optional filters.
+    /// Query events with optional filters, enriching each result with `process_name`.
     pub fn query(&self, filter: &EventFilter) -> Result<Vec<serde_json::Value>> {
+        let raw_rows = self.query_raw(filter)?;
+
+        // Collect unique PIDs to batch look up exec events.
+        let pids: Vec<i64> = {
+            let mut seen = std::collections::HashSet::new();
+            raw_rows.iter()
+                .filter_map(|v| v["pid"].as_i64())
+                .filter(|p| seen.insert(*p))
+                .collect()
+        };
+
+        let mut name_cache: HashMap<i64, String> = HashMap::new();
+        for pid in pids {
+            if let Some(name) = self.lookup_process_name(pid)? {
+                name_cache.insert(pid, name);
+            }
+        }
+
+        Ok(raw_rows.into_iter().map(|mut v| {
+            if let Some(pid) = v["pid"].as_i64() {
+                if let Some(name) = name_cache.get(&pid) {
+                    v["process_name"] = serde_json::Value::String(name.clone());
+                }
+            }
+            v
+        }).collect())
+    }
+
+    /// Parse `raw_json`, inject `process_name`, and re-serialize.
+    ///
+    /// Used by the SSE stream to enrich live events without a full query round-trip.
+    pub fn enrich_raw(&self, raw_json: &str) -> String {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(raw_json) else {
+            return raw_json.to_owned();
+        };
+
+        if let Some(pid) = v["pid"].as_i64() {
+            if let Ok(Some(name)) = self.lookup_process_name(pid) {
+                v["process_name"] = serde_json::Value::String(name);
+            }
+        }
+
+        serde_json::to_string(&v).unwrap_or_else(|_| raw_json.to_owned())
+    }
+
+    /// Latest seq number in the store.
+    pub fn max_seq(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0),
+        )?;
+        Ok(seq)
+    }
+
+    /// Total event count.
+    pub fn count(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events", [], |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Replay stored events with seq > `after_seq`, enriched with process names.
+    pub fn replay_after(&self, after_seq: i64) -> Result<Vec<String>> {
+        let filter = EventFilter { after_seq: Some(after_seq), ..Default::default() };
+        let events = self.query(&filter)?;
+        Ok(events.into_iter()
+            .filter_map(|v| serde_json::to_string(&v).ok())
+            .collect())
+    }
+
+    fn query_raw(&self, filter: &EventFilter) -> Result<Vec<serde_json::Value>> {
         let conn = self.conn.lock();
         let mut sql = "SELECT raw_json FROM events WHERE 1=1".to_string();
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -116,22 +190,29 @@ impl EventStore {
         Ok(results)
     }
 
-    /// Latest seq number in the store.
-    pub fn max_seq(&self) -> Result<i64> {
+    /// Look up the most recent exec event for `pid` and return its binary basename.
+    fn lookup_process_name(&self, pid: i64) -> Result<Option<String>> {
         let conn = self.conn.lock();
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM events", [], |r| r.get(0),
-        )?;
-        Ok(seq)
-    }
+        let result: Option<String> = conn.query_row(
+            "SELECT raw_json FROM events WHERE event_type = 'exec' AND pid = ? ORDER BY seq DESC LIMIT 1",
+            params![pid],
+            |row| row.get(0),
+        ).optional()?;
 
-    /// Total event count.
-    pub fn count(&self) -> Result<i64> {
-        let conn = self.conn.lock();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events", [], |r| r.get(0),
-        )?;
-        Ok(n)
+        let raw = match result {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let v: serde_json::Value = serde_json::from_str(&raw)
+            .context("parse exec event JSON")?;
+
+        let name = v["binary"].as_str()
+            .and_then(|b| std::path::Path::new(b).file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned);
+
+        Ok(name)
     }
 }
 
@@ -145,4 +226,73 @@ pub struct EventFilter {
     pub after_seq: Option<i64>,
     pub after_ts: Option<i64>,
     pub limit: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_temp() -> EventStore {
+        EventStore::open(Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    #[test]
+    fn test_insert_and_count() {
+        let store = open_temp();
+        let event = r#"{"seq":1,"ts_wall":1000,"agent_id":"a1","type":"write","pid":42,"path":"/tmp/x","data":"hi"}"#;
+        store.insert(event).unwrap();
+        assert_eq!(store.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_query_enrichment_no_exec() {
+        let store = open_temp();
+        let event = r#"{"seq":1,"ts_wall":1000,"agent_id":"a1","type":"write","pid":42,"path":"/tmp/x"}"#;
+        store.insert(event).unwrap();
+        let results = store.query(&EventFilter::default()).unwrap();
+        assert_eq!(results.len(), 1);
+        // No exec event for pid 42, so process_name should be absent.
+        assert!(results[0]["process_name"].is_null());
+    }
+
+    #[test]
+    fn test_query_enrichment_with_exec() {
+        let store = open_temp();
+        let exec = r#"{"seq":1,"ts_wall":900,"agent_id":"a1","type":"exec","pid":42,"binary":"/usr/bin/bash"}"#;
+        let write = r#"{"seq":2,"ts_wall":1000,"agent_id":"a1","type":"write","pid":42,"path":"/tmp/x"}"#;
+        store.insert(exec).unwrap();
+        store.insert(write).unwrap();
+
+        let results = store.query(&EventFilter {
+            event_type: Some("write".into()),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["process_name"], "bash");
+    }
+
+    #[test]
+    fn test_enrich_raw_with_exec() {
+        let store = open_temp();
+        let exec = r#"{"seq":1,"ts_wall":900,"agent_id":"a1","type":"exec","pid":7,"binary":"/usr/bin/python3"}"#;
+        store.insert(exec).unwrap();
+
+        let raw = r#"{"seq":2,"ts_wall":1000,"agent_id":"a1","type":"write","pid":7,"path":"/tmp/out"}"#;
+        let enriched = store.enrich_raw(raw);
+        let v: serde_json::Value = serde_json::from_str(&enriched).unwrap();
+        assert_eq!(v["process_name"], "python3");
+    }
+
+    #[test]
+    fn test_replay_after() {
+        let store = open_temp();
+        for i in 1i64..=5 {
+            let event = format!(
+                r#"{{"seq":{i},"ts_wall":{i}000,"agent_id":"a1","type":"write","pid":1,"path":"/f{i}"}}"#
+            );
+            store.insert(&event).unwrap();
+        }
+        let replayed = store.replay_after(3).unwrap();
+        assert_eq!(replayed.len(), 2);
+    }
 }

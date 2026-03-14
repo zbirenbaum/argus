@@ -1,14 +1,22 @@
 // Rust guideline compliant 2026-02-21
-//! API routes: event queries + supervisor proxy.
+//! API routes: event queries, SSE stream, and supervisor proxy.
 
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
+use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::BroadcastStream;
+use tower_http::cors::CorsLayer;
 
 use crate::db::{EventFilter, EventStore};
 use crate::proxy::SupervisorProxy;
@@ -16,19 +24,30 @@ use crate::proxy::SupervisorProxy;
 struct AppState {
     store: Arc<EventStore>,
     proxy: SupervisorProxy,
+    tx: broadcast::Sender<String>,
 }
 
-pub fn router(store: Arc<EventStore>, supervisor_base: String) -> Router {
+/// Build the application router with CORS and all routes.
+pub fn router(
+    store: Arc<EventStore>,
+    supervisor_base: String,
+    tx: broadcast::Sender<String>,
+) -> Router {
     let state = Arc::new(AppState {
         store,
         proxy: SupervisorProxy::new(supervisor_base),
+        tx,
     });
+
+    // Allow all origins/methods/headers — suitable for local dev dashboards.
+    let cors = CorsLayer::permissive();
 
     Router::new()
         // Query API
         .route("/events", get(query_events))
         .route("/events/count", get(event_count))
         .route("/events/latest", get(latest_seq))
+        .route("/events/stream", get(sse_stream))
         // Supervisor proxy
         .route("/agent/status", get(proxy_get))
         .route("/agent/pause", post(proxy_post))
@@ -42,6 +61,7 @@ pub fn router(store: Arc<EventStore>, supervisor_base: String) -> Router {
         .route("/rules", post(proxy_post_with_body))
         // Health
         .route("/health", get(health))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -83,6 +103,52 @@ async fn latest_seq(
             Json(json!({ "error": e.to_string() })),
         )),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamParams {
+    after_seq: Option<i64>,
+}
+
+async fn sse_stream(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<StreamParams>,
+) -> Sse<impl futures::Stream<Item = Result<SseEvent, Infallible>>> {
+    // Subscribe before replaying so no events slip through the gap.
+    let rx = state.tx.subscribe();
+
+    let replay: Vec<SseEvent> = if let Some(after_seq) = params.after_seq {
+        state.store
+            .replay_after(after_seq)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|data| SseEvent::default().data(data))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let replay_stream = tokio_stream::iter(replay.into_iter().map(Ok::<_, Infallible>));
+
+    let live_stream = BroadcastStream::new(rx)
+        .filter_map(|result| {
+            // Lagged errors mean we missed events — log and skip rather than disconnect.
+            match result {
+                Ok(raw) => Some(raw),
+                Err(_) => None,
+            }
+        })
+        .map(move |raw| {
+            let enriched = state.store.enrich_raw(&raw);
+            Ok::<_, Infallible>(SseEvent::default().data(enriched))
+        });
+
+    let stream = replay_stream.chain(live_stream);
+
+    // 15 s keep-alive prevents proxies from closing idle connections.
+    Sse::new(stream).keep_alive(
+        KeepAlive::new().interval(Duration::from_secs(15)),
+    )
 }
 
 async fn proxy_get(

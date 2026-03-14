@@ -39,6 +39,7 @@ YAML
 
     /build/target/aarch64-unknown-linux-musl/debug/argus-api \
       --supervisor 127.0.0.1:9090 --listen 0.0.0.0:8000 --db /tmp/events.db \
+      --event-log-dir /tmp/data/events \
       2>/tmp/api.log &
 
     echo "============================================" >&2

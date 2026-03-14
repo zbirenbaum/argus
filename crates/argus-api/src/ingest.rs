@@ -1,21 +1,31 @@
 // Rust guideline compliant 2026-02-21
 //! WebSocket ingest: connects to supervisor /ws, persists events.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use tokio::sync::broadcast;
 use tokio_tungstenite::connect_async;
 use tracing::{Level, event};
 
 use crate::db::EventStore;
 
-/// Connect to the supervisor WebSocket and persist events.
+/// Connect to the supervisor WebSocket, persist events, and broadcast raw JSON.
 ///
+/// On each successful connect, replays any JSONL files in `event_log_dir`
+/// so early events emitted before the WS was up are not lost.
 /// Reconnects with exponential backoff on disconnect. Runs forever
 /// until the task is cancelled.
-pub async fn run(url: &str, store: &Arc<EventStore>) {
+pub async fn run(
+    url: &str,
+    store: &Arc<EventStore>,
+    tx: broadcast::Sender<String>,
+    event_log_dir: Option<PathBuf>,
+) {
     let mut backoff = Duration::from_secs(1);
+    // Cap at 30 s to avoid making the dashboard feel stale after a supervisor restart.
     const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
     loop {
@@ -34,7 +44,29 @@ pub async fn run(url: &str, store: &Arc<EventStore>) {
                     Level::INFO,
                     "connected to supervisor",
                 );
-                handle_connection(ws, store).await;
+
+                // Replay disk events on each connect so early events
+                // emitted before the WS was up are captured.
+                if let Some(ref dir) = event_log_dir {
+                    if dir.is_dir() {
+                        match crate::replay::load_from_disk(store, dir) {
+                            Ok(n) => event!(
+                                name: "ingest.disk_replay",
+                                Level::INFO,
+                                events.replayed = n,
+                                "replayed {{events.replayed}} events from disk on connect",
+                            ),
+                            Err(e) => event!(
+                                name: "ingest.disk_replay_error",
+                                Level::WARN,
+                                error.message = %e,
+                                "disk replay failed, continuing with live stream",
+                            ),
+                        }
+                    }
+                }
+
+                handle_connection(ws, store, &tx).await;
                 event!(
                     name: "ingest.disconnected",
                     Level::WARN,
@@ -62,6 +94,7 @@ async fn handle_connection(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     store: &Arc<EventStore>,
+    tx: &broadcast::Sender<String>,
 ) {
     let (_write, mut read) = ws.split();
     let mut count: u64 = 0;
@@ -89,6 +122,8 @@ async fn handle_connection(
                 "failed to persist event",
             );
         } else {
+            // No subscribers is fine — send errors are ignored intentionally.
+            let _ = tx.send(text);
             count += 1;
             if count % 1000 == 0 {
                 event!(

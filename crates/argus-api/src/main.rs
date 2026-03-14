@@ -3,11 +3,13 @@
 //!
 //! Connects to a running supervisor's WebSocket, persists events to
 //! SQLite, and exposes a query API. Proxies control commands (pause,
-//! resume, approvals, restore) to the supervisor.
+//! resume, approvals, restore) to the supervisor. Broadcasts live
+//! events to SSE subscribers.
 
 mod db;
 mod ingest;
 mod proxy;
+mod replay;
 mod routes;
 
 use std::net::SocketAddr;
@@ -16,6 +18,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use tokio::sync::broadcast;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
@@ -38,6 +41,12 @@ struct Cli {
     /// Optional JSONL file to append all events to.
     #[arg(long)]
     jsonl: Option<PathBuf>,
+
+    /// Path to the supervisor's event log directory (e.g. /data/events).
+    /// If provided, JSONL files are replayed on each WS connect so
+    /// early events emitted before the connection are not lost.
+    #[arg(long)]
+    event_log_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -56,17 +65,22 @@ async fn main() -> Result<()> {
 
     let store = Arc::new(db::EventStore::open(&cli.db)?);
 
+    // Channel capacity of 4096 covers brief consumer lag without unbounded growth.
+    let (tx, _rx) = broadcast::channel::<String>(4096);
+
     let ingest_store = Arc::clone(&store);
+    let ingest_tx = tx.clone();
     let supervisor_url = format!("ws://{}/ws", cli.supervisor);
     let supervisor_base = format!("http://{}", cli.supervisor);
+    let event_log_dir = cli.event_log_dir.clone();
 
-    // Ingest task: connect to supervisor WebSocket, persist events.
+    // Ingest task: connect to supervisor WebSocket, persist events, broadcast.
+    // Replays disk events on each WS connect to catch early events.
     let ingest_handle = tokio::spawn(async move {
-        ingest::run(&supervisor_url, &ingest_store).await;
+        ingest::run(&supervisor_url, &ingest_store, ingest_tx, event_log_dir).await;
     });
 
-    // API server.
-    let app = routes::router(Arc::clone(&store), supervisor_base);
+    let app = routes::router(Arc::clone(&store), supervisor_base, tx);
 
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await
