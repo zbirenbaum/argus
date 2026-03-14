@@ -110,6 +110,9 @@ struct StreamParams {
     after_seq: Option<i64>,
 }
 
+// FIXME(event-consumer): SSE live stream depends on the broadcast channel which
+// is fed by the disk polling loop. This adds up to POLL_INTERVAL latency to
+// live events. Once file watching replaces polling, this will be near-instant.
 async fn sse_stream(
     State(state): State<Arc<AppState>>,
     Query(params): Query<StreamParams>,

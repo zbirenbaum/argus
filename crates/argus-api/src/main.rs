@@ -68,16 +68,33 @@ async fn main() -> Result<()> {
     // Channel capacity of 4096 covers brief consumer lag without unbounded growth.
     let (tx, _rx) = broadcast::channel::<String>(4096);
 
-    let ingest_store = Arc::clone(&store);
-    let ingest_tx = tx.clone();
     let supervisor_url = format!("ws://{}/ws", cli.supervisor);
     let supervisor_base = format!("http://{}", cli.supervisor);
-    let event_log_dir = cli.event_log_dir.clone();
 
-    // Ingest task: connect to supervisor WebSocket, persist events, broadcast.
-    // Replays disk events on each WS connect to catch early events.
-    let ingest_handle = tokio::spawn(async move {
-        ingest::run(&supervisor_url, &ingest_store, ingest_tx, event_log_dir).await;
+    // Disk polling task: reads JSONL segment files written by the supervisor's
+    // EventLogSink. This is the sole source of truth for the SQLite store.
+    let poll_handle = if let Some(ref dir) = cli.event_log_dir {
+        let poll_store = Arc::clone(&store);
+        let poll_tx = tx.clone();
+        let poll_dir = dir.clone();
+        Some(tokio::spawn(async move {
+            ingest::poll_disk(&poll_store, poll_tx, poll_dir).await;
+        }))
+    } else {
+        event!(
+            name: "argus_api.no_event_log_dir",
+            Level::WARN,
+            "no --event-log-dir provided, events will not be ingested from disk",
+        );
+        None
+    };
+
+    // WS drain task: keeps the supervisor WebSocket consumed so the
+    // BroadcastSink never backpressures the ptrace pipeline.
+    // FIXME(event-consumer): may be unnecessary — see note in ingest.rs.
+    let drain_handle = tokio::spawn({
+        let url = supervisor_url.clone();
+        async move { ingest::drain_ws(&url).await }
     });
 
     let app = routes::router(Arc::clone(&store), supervisor_base, tx);
@@ -97,7 +114,8 @@ async fn main() -> Result<()> {
         .await
         .context("API server failed")?;
 
-    ingest_handle.abort();
+    if let Some(h) = poll_handle { h.abort(); }
+    drain_handle.abort();
     Ok(())
 }
 

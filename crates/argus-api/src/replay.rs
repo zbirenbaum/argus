@@ -13,10 +13,12 @@ use crate::db::EventStore;
 /// Load all `*.jsonl` files from `dir` into `store`.
 ///
 /// Files are sorted by name so segments replay in order. Each line is
-/// inserted with `INSERT OR IGNORE`, so duplicates from a later WS
-/// stream are handled for free.
+/// inserted with `INSERT OR IGNORE`, so duplicates are handled for free.
 ///
 /// Returns the number of events successfully inserted.
+// FIXME(event-consumer): this re-reads entire files every call. Callers that
+// poll should track byte offsets per file and only read new data. See the
+// companion FIXME in ingest.rs.
 pub fn load_from_disk(store: &EventStore, dir: &Path) -> Result<u64> {
     let mut files: Vec<_> = fs::read_dir(dir)
         .with_context(|| format!("read event log dir: {}", dir.display()))?
