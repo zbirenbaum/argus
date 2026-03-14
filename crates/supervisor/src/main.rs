@@ -9,7 +9,6 @@ mod startup;
 mod wiring;
 
 use std::fs;
-use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -119,31 +118,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Forwards data from an agent pipe to supervisor stderr.
-///
-/// Agent stdout/stderr are piped so they don't mix with JSONL on
-/// stdout. This thread drains the pipe to stderr.
-pub(crate) fn spawn_drain_thread(
-    name: &str,
-    pipe_fd: OwnedFd,
-) -> std::thread::JoinHandle<()> {
-    let label = name.to_string();
-    std::thread::Builder::new()
-        .name(format!("drain-{name}"))
-        .spawn(move || {
-            let mut pipe = std::fs::File::from(pipe_fd);
-            if let Err(e) = std::io::copy(&mut pipe, &mut std::io::stderr()) {
-                event!(
-                    name: "supervisor.drain.error",
-                    Level::WARN,
-                    stream = %label,
-                    error.message = %e,
-                    "drain thread for {{stream}} failed: {{error.message}}",
-                );
-            }
-        })
-        .expect("failed to spawn drain thread")
-}
 
 /// Initializes the tracing subscriber with JSON output to stderr.
 fn init_tracing() {

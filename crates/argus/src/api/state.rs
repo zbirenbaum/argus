@@ -154,6 +154,14 @@ impl Bridge {
         let _ = self.event_tx.send(evt);
     }
 
+    /// Broadcast a pipeline event to WebSocket subscribers.
+    ///
+    /// Unlike `emit`, this does not create a new event or write to the bus.
+    /// Used by the pipeline output stage to fan events to WebSocket clients.
+    pub fn broadcast(&self, event: &Event) {
+        let _ = self.event_tx.send(event.clone());
+    }
+
     /// Subscribes to the event broadcast channel.
     pub fn subscribe_events(&self) -> broadcast::Receiver<Event> {
         self.event_tx.subscribe()

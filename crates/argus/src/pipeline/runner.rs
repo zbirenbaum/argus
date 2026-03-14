@@ -346,6 +346,7 @@ impl PipelineRunner {
                 );
                 out.redact.redact(&mut evt);
                 out.outputs.emit(&evt);
+                out.shared.broadcast(&evt);
                 out.emit_required(Record::Event(evt)).await;
                 out
             })

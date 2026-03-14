@@ -13,6 +13,9 @@ pub mod types;
 use std::net::SocketAddr;
 
 use axum::Router;
+use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 
 use axum::routing::delete;
@@ -38,7 +41,42 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/tree", get(tree_handler))
         .route("/restore", post(restore_handler))
         .route("/health", get(health_handler))
+        .route("/ws", get(ws_handler))
         .with_state(state)
+}
+
+/// WebSocket upgrade handler — streams all events to the client.
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_stream(socket, state))
+}
+
+/// Send every event from the broadcast channel as JSONL over WebSocket.
+async fn ws_stream(mut socket: WebSocket, state: SharedState) {
+    let mut rx = state.subscribe_events();
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let json = match serde_json::to_string(&event) {
+                    Ok(j) => j,
+                    Err(_) => continue,
+                };
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    name: "api.ws.lagged",
+                    skipped = n,
+                    "WebSocket consumer lagged, skipped {{skipped}} events",
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
 }
 
 /// Starts the API server on the given address.

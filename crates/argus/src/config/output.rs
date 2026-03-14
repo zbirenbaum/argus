@@ -27,12 +27,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputConfig {
-    /// Write newline-delimited JSON to stdout.
+    /// Deprecated — accepted for config compatibility but ignored.
+    ///
+    /// Events go through the bus (event log, WebSocket). The agent
+    /// process inherits the terminal's stdout directly.
     Stdout {
-        /// Flush after every event for real-time visibility.
-        ///
-        /// Defaults to true. Set to false for high-throughput pipelines
-        /// piped to a log aggregator where latency is less important.
         #[serde(default = "default_flush_every_event")]
         flush_every_event: bool,
     },

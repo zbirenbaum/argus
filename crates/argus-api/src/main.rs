@@ -34,6 +34,10 @@ struct Cli {
     /// Path to the SQLite database file.
     #[arg(long, default_value = "argus-events.db")]
     db: PathBuf,
+
+    /// Optional JSONL file to append all events to.
+    #[arg(long)]
+    jsonl: Option<PathBuf>,
 }
 
 #[tokio::main]

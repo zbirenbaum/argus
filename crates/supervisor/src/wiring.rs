@@ -43,9 +43,6 @@ pub async fn run(
         &config.workspace_dir,
         config.run_as.as_ref(),
     )?;
-    let _stdout_drain = crate::spawn_drain_thread("stdout", spawn.stdout_r);
-    let _stderr_drain = crate::spawn_drain_thread("stderr", spawn.stderr_r);
-
     crate::signals::install_handler();
 
     let (keylog_handle, keylog_cancel) = runtime.spawn_keylog_pipeline();

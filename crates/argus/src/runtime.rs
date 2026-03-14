@@ -32,7 +32,7 @@ use crate::pipeline::capture_policy::CapturePolicy;
 use crate::pipeline::context::PipelineContext;
 use crate::pipeline::durability::DurabilityLayer;
 use crate::pipeline::overflow::OverflowQueue;
-use crate::pipeline::outputs::{FileOutput, OutputList, StdoutOutput};
+use crate::pipeline::outputs::{FileOutput, OutputList};
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
 use crate::pipeline::sink::Sink;
@@ -489,9 +489,7 @@ fn build_outputs(config: &SupervisorConfig) -> OutputList {
     let mut list = OutputList::new();
     for output_config in &config.outputs {
         match output_config {
-            OutputConfig::Stdout { flush_every_event } => {
-                list.push(Box::new(StdoutOutput::with_flush_policy(*flush_every_event)));
-            }
+            OutputConfig::Stdout { .. } => {}
             OutputConfig::File { path, max_size, max_files } => {
                 match FileOutput::new(path.clone(), *max_size, *max_files) {
                     Ok(out) => list.push(Box::new(out)),

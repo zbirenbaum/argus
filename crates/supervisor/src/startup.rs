@@ -14,15 +14,11 @@ use argus::config::RunAs;
 use nix::unistd::{ForkResult, Pid, execvpe, pipe, read};
 use tracing::{Level, event};
 
-/// Handles returned from `spawn_agent` for stdio forwarding.
+/// Handles returned from `spawn_agent`.
 #[derive(Debug)]
 pub struct SpawnResult {
     pub child_pid: Pid,
     pub sync_pipe_w: RawFd,
-    /// Read end of the pipe connected to the child's stdout.
-    pub stdout_r: OwnedFd,
-    /// Read end of the pipe connected to the child's stderr.
-    pub stderr_r: OwnedFd,
 }
 
 /// Subdirectories under `data_dir` required at startup.
@@ -86,41 +82,22 @@ pub fn spawn_agent(
     // Sync pipe: child blocks on read until parent completes PTRACE_SEIZE.
     let (pipe_r, pipe_w) = pipe().context("pipe() for sync failed")?;
 
-    // Pipes for capturing the child's stdout and stderr.
-    let (stdout_r, stdout_w) = pipe().context("pipe() for stdout failed")?;
-    let (stderr_r, stderr_w) = pipe().context("pipe() for stderr failed")?;
-
     // SAFETY: fork() is called once; child blocks on pipe then execs,
     // parent returns immediately. No shared mutable state between
     // fork and exec.
+    //
+    // The child inherits stdin/stdout/stderr directly from the
+    // terminal. Ptrace captures reads from fd 0 and writes to fd 1/2
+    // as Stdio events — no pipes needed.
     match unsafe { nix::unistd::fork() }.context("fork() failed")? {
         ForkResult::Child => {
             drop(pipe_w);
-            drop(stdout_r);
-            drop(stderr_r);
-
-            // Redirect child stdout/stderr to pipes before exec.
-            // SAFETY: dup2 is async-signal-safe; called between
-            // fork and exec in the child process.
-            unsafe {
-                libc::dup2(stdout_w.as_raw_fd(), libc::STDOUT_FILENO);
-                libc::dup2(stderr_w.as_raw_fd(), libc::STDERR_FILENO);
-            }
-            drop(stdout_w);
-            drop(stderr_w);
-
             child_setup(&c_program, &c_argv, &c_env, working_dir, pipe_r, run_as);
         }
         ForkResult::Parent { child } => {
-            // Extract the raw fd before dropping — the tracer loop
-            // takes ownership and will close it after PTRACE_SEIZE.
             let raw_w = pipe_w.as_raw_fd();
-            // Leak ownership so the fd stays open for the tracer.
             std::mem::forget(pipe_w);
             drop(pipe_r);
-            // Close write ends — only the child writes to these.
-            drop(stdout_w);
-            drop(stderr_w);
 
             event!(
                 name: "supervisor.agent.spawned",
@@ -132,8 +109,6 @@ pub fn spawn_agent(
             Ok(SpawnResult {
                 child_pid: child,
                 sync_pipe_w: raw_w,
-                stdout_r,
-                stderr_r,
             })
         }
     }

@@ -5,10 +5,8 @@
 //! registration order. Errors from individual outputs are logged and
 //! discarded so that one failing destination does not block others.
 
-pub(crate) mod stdout;
 pub(crate) mod file;
 
-pub(crate) use stdout::StdoutOutput;
 pub(crate) use file::FileOutput;
 
 use tracing::{Level, event};
