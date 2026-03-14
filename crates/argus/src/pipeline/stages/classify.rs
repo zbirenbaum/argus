@@ -223,6 +223,27 @@ impl ClassifyStage {
     pub fn on_exit(&self, pid: Pid) {
         self.fd_tables.remove(&pid);
     }
+
+    /// Stream-compatible classification.
+    ///
+    /// Resumes passthroughs internally and returns `None` for them.
+    /// Returns `Some(ClassifiedEvent)` only for interesting events
+    /// that need downstream processing.
+    pub async fn process(&self, stop: RawSyscallStop) -> Option<ClassifiedEvent> {
+        let classified = self.classify(stop).await;
+        if matches!(classified.classification, Classification::Passthrough) {
+            let trace_exit = self.pending.contains_key(&classified.pid);
+            let signal = match &classified.raw.stop_type {
+                StopType::Signal { signal, .. } => {
+                    nix::sys::signal::Signal::try_from(*signal).ok()
+                }
+                _ => None,
+            };
+            self.handle.resume(classified.pid, trace_exit, signal);
+            return None;
+        }
+        Some(classified)
+    }
 }
 
 /// Read the executable path for a pid from `/proc/{pid}/exe`.

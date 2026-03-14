@@ -409,6 +409,16 @@ impl PtraceHandle {
         self.directive(PipelineDirective::WriteMemory { pid, addr, data, reply: reply_tx });
         reply_rx.await?
     }
+
+    /// Resume the tracee, optionally tracing the syscall exit.
+    pub fn resume(&self, pid: Pid, trace_exit: bool, signal: Option<nix::sys::signal::Signal>) {
+        self.directive(PipelineDirective::Resume { pid, trace_exit, signal });
+    }
+
+    /// Inject an error return and resume the tracee.
+    pub fn inject_error(&self, pid: Pid, errno: i32) {
+        self.directive(PipelineDirective::InjectError { pid, errno });
+    }
 }
 
 /// Async stream of `RawSyscallStop` events from the ptrace thread.

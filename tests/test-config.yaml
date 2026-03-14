@@ -1,3 +1,8 @@
 agent_command: ["true"]
 workspace_dir: /tmp/argus-test-workspace
 data_dir: /tmp/argus-test-data
+listen_addr: "127.0.0.1:19090"
+tls:
+  mitm_proxy_port: 18080
+tree:
+  batch_size: 1

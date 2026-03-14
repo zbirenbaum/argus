@@ -25,7 +25,7 @@ use crate::pipeline::RecordBus;
 use crate::pipeline::overflow::OverflowQueue;
 use crate::pipeline::record::Record;
 use crate::pipeline::stall::StallState;
-use crate::snapshot::builder::TreeSnapshot;
+use crate::snapshot::MerkleTree;
 
 /// Broadcast channel capacity for API event subscribers.
 ///
@@ -47,7 +47,7 @@ pub struct Bridge {
     seq_gen: SequenceGenerator,
     event_tx: broadcast::Sender<Event>,
     /// Latest Merkle tree snapshot, swapped on every mutating event.
-    tree: ArcSwap<TreeSnapshot>,
+    tree: ArcSwap<MerkleTree>,
     /// CAS backend for content reads and restore operations.
     cas: Arc<dyn Cas>,
     /// Maps event seq → tree_hash for point-in-time restore lookups.
@@ -93,7 +93,7 @@ impl Bridge {
             pending_approvals: DashMap::new(),
             seq_gen: SequenceGenerator::default(),
             event_tx,
-            tree: ArcSwap::from_pointee(TreeSnapshot::empty()),
+            tree: ArcSwap::from_pointee(MerkleTree::new()),
             cas,
             tree_hashes: DashMap::new(),
             bus,
@@ -105,12 +105,12 @@ impl Bridge {
     /// Atomically swap the latest tree snapshot.
     ///
     /// Called by the pipeline runner at batch-size cadence.
-    pub fn store_tree_snapshot(&self, snapshot: TreeSnapshot) {
-        self.tree.store(Arc::new(snapshot));
+    pub fn store_tree(&self, tree: MerkleTree) {
+        self.tree.store(Arc::new(tree));
     }
 
     /// Load the latest tree snapshot.
-    pub fn load_tree(&self) -> arc_swap::Guard<Arc<TreeSnapshot>> {
+    pub fn load_tree(&self) -> arc_swap::Guard<Arc<MerkleTree>> {
         self.tree.load()
     }
 
@@ -422,17 +422,13 @@ mod tests {
 
     #[test]
     fn store_and_load_tree() {
-        use crate::config::TreeConfig;
-        use crate::snapshot::builder::TreeBuilder;
-
         let bridge = Bridge::new("test".into(), test_cas(), test_bus());
-        let mut builder = TreeBuilder::new(TreeConfig::default());
-        builder.update(
+        let mut tree = crate::snapshot::MerkleTree::new();
+        tree.update(
             std::path::PathBuf::from("a.txt"),
             crate::cas::ContentHash::from_data(b"hello"),
         );
-        let snapshot = builder.finalize();
-        bridge.store_tree_snapshot(snapshot);
+        bridge.store_tree(tree);
 
         let loaded = bridge.load_tree();
         assert_eq!(loaded.file_count(), 1);

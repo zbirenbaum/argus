@@ -77,11 +77,12 @@ record() {
 }
 
 cleanup_workspace() {
-    # Kill any stale supervisor to free port 9090.
+    # Kill any stale supervisor and mitmdump to free ports 9090 and 8080.
     pkill -9 -x supervisor 2>/dev/null || true
-    # Wait for port to be released so the next supervisor can bind.
+    pkill -9 -x mitmdump 2>/dev/null || true
+    # Wait for API port to be released so the next supervisor can bind.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if ! curl -sf --max-time 0.2 http://127.0.0.1:9090/agent/status >/dev/null 2>&1; then
+        if ! curl -sf --max-time 0.2 http://127.0.0.1:19090/agent/status >/dev/null 2>&1; then
             break
         fi
         sleep 0.1
@@ -89,6 +90,9 @@ cleanup_workspace() {
     sleep 0.2
     rm -f /tmp/argus-test-workspace/test.txt /tmp/argus-test-workspace/shared.txt /tmp/argus-test-workspace/tool-output.txt
     rm -f /tmp/tool.py /tmp/concurrent_write
+    # Clear event log so previous test events don't leak into later tests.
+    rm -rf "$TEST_DATA"/events
+    mkdir -p "$TEST_DATA"/events
 }
 
 # --- Tests ---
@@ -474,7 +478,8 @@ CFGEOF
     if [ "$http_req_count" -ge 1 ] && [ "$http_resp_count" -ge 1 ]; then
         echo "  mitmdump: http_request=$http_req_count http_response=$http_resp_count"
     else
-        echo "  WARN: no http_request/http_response events (mitmdump may not be installed)"
+        echo "  FAIL: no http_request/http_response events (mitmdump not installed or not proxying)"
+        ok=false
     fi
 
     # Clean up temp certs.
@@ -523,7 +528,7 @@ test_9() {
 
     # Pause the agent via API.
     local pause_resp
-    pause_resp=$(curl -sf -X POST http://127.0.0.1:9090/agent/pause 2>/dev/null)
+    pause_resp=$(curl -sf -X POST http://127.0.0.1:19090/agent/pause 2>/dev/null)
     if [ $? -ne 0 ]; then
         echo "  FAIL: could not reach pause API"
         kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
@@ -533,7 +538,7 @@ test_9() {
 
     # Check status reports paused.
     local status
-    status=$(curl -sf http://127.0.0.1:9090/agent/status 2>/dev/null)
+    status=$(curl -sf http://127.0.0.1:19090/agent/status 2>/dev/null)
     if ! echo "$status" | grep -q '"paused"'; then
         echo "  FAIL: status not paused after pause request"
         ok=false
@@ -548,7 +553,7 @@ test_9() {
     fi
 
     # Resume.
-    curl -sf -X POST http://127.0.0.1:9090/agent/resume > /dev/null 2>&1
+    curl -sf -X POST http://127.0.0.1:19090/agent/resume > /dev/null 2>&1
 
     # Wait for agent to finish.
     wait "$sup_pid" 2>/dev/null
@@ -559,12 +564,14 @@ test_9() {
         ok=false
     fi
 
-    # Check for pause/resume events.
-    local events
-    events=$(cat "$events_file")
+    # Check for pause/resume events in both stdout and event log.
+    # API-originated events (pause/resume) go through the RecordBus
+    # to the event log, not through the pipeline's stdout OutputList.
+    local all_events
+    all_events=$(cat "$events_file"; cat "$TEST_DATA"/events/*.jsonl 2>/dev/null)
     local pause_count resume_count
-    pause_count=$(echo "$events" | jq -s '[.[] | select(.type == "agent_pause")] | length')
-    resume_count=$(echo "$events" | jq -s '[.[] | select(.type == "agent_resume")] | length')
+    pause_count=$(echo "$all_events" | jq -s '[.[] | select(.type == "agent_pause")] | length')
+    resume_count=$(echo "$all_events" | jq -s '[.[] | select(.type == "agent_resume")] | length')
 
     if [ "$pause_count" -lt 1 ]; then
         echo "  FAIL: missing agent_pause event"
@@ -616,7 +623,7 @@ test_10() {
     local action_id=""
     while [ -z "$action_id" ] && [ "$waited" -lt 40 ]; do
         sleep 0.3
-        action_id=$(curl -sf http://127.0.0.1:9090/approvals/pending 2>/dev/null \
+        action_id=$(curl -sf http://127.0.0.1:19090/approvals/pending 2>/dev/null \
             | jq -r '.pending[0].action_id // empty' 2>/dev/null)
         waited=$((waited + 1))
     done
@@ -630,7 +637,7 @@ test_10() {
 
     # Deny the unlink — rm should get EPERM.
     local deny_resp
-    deny_resp=$(curl -sf -X POST "http://127.0.0.1:9090/approvals/${action_id}/deny" 2>/dev/null)
+    deny_resp=$(curl -sf -X POST "http://127.0.0.1:19090/approvals/${action_id}/deny" 2>/dev/null)
     if [ $? -ne 0 ]; then
         echo "  FAIL: deny request failed"
         kill "$sup_pid" 2>/dev/null; wait "$sup_pid" 2>/dev/null
@@ -657,12 +664,12 @@ test_10() {
         fi
     fi
 
-    # Check events.
-    local events
-    events=$(cat "$events_file")
+    # Check events in both stdout and event log.
+    local all_events
+    all_events=$(cat "$events_file"; cat "$TEST_DATA"/events/*.jsonl 2>/dev/null)
     local pending_count denied_count
-    pending_count=$(echo "$events" | jq -s '[.[] | select(.type == "pending_approval")] | length')
-    denied_count=$(echo "$events" | jq -s '[.[] | select(.type == "approval_denied")] | length')
+    pending_count=$(echo "$all_events" | jq -s '[.[] | select(.type == "pending_approval")] | length')
+    denied_count=$(echo "$all_events" | jq -s '[.[] | select(.type == "approval_denied")] | length')
 
     if [ "$pending_count" -lt 1 ]; then
         echo "  FAIL: missing pending_approval event"
@@ -730,29 +737,33 @@ test_11() {
     fi
 
     # --- Verify /tree endpoint works ---
+    # The tree is finalized on an idle timeout after the last mutation,
+    # so poll until file_count > 0 or give up after 10 seconds.
     local tree_resp tree_file_count tree_hash
-    tree_resp=$(curl -sf http://127.0.0.1:9090/tree 2>/dev/null)
-    if [ $? -ne 0 ] || [ -z "$tree_resp" ]; then
-        echo "  FAIL: /tree endpoint failed"
+    tree_file_count=0
+    tree_hash=""
+    local tree_waited=0
+    while [ "$tree_file_count" -lt 1 ] && [ "$tree_waited" -lt 20 ]; do
+        sleep 0.5
+        tree_resp=$(curl -sf http://127.0.0.1:19090/tree 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$tree_resp" ]; then
+            tree_file_count=$(echo "$tree_resp" | jq '.file_count')
+            tree_hash=$(echo "$tree_resp" | jq -r '.tree_hash // empty')
+        fi
+        tree_waited=$((tree_waited + 1))
+    done
+    if [ "$tree_file_count" -lt 1 ]; then
+        echo "  FAIL: tree file_count=$tree_file_count, expected >= 1 (waited ${tree_waited}x0.5s)"
         ok=false
-        tree_file_count=0
-        tree_hash=""
-    else
-        tree_file_count=$(echo "$tree_resp" | jq '.file_count')
-        tree_hash=$(echo "$tree_resp" | jq -r '.tree_hash // empty')
-        if [ "$tree_file_count" -lt 1 ]; then
-            echo "  FAIL: tree file_count=$tree_file_count, expected >= 1"
-            ok=false
-        fi
-        if [ -z "$tree_hash" ]; then
-            echo "  FAIL: tree response missing tree_hash"
-            ok=false
-        fi
+    fi
+    if [ -z "$tree_hash" ]; then
+        echo "  FAIL: tree response missing tree_hash"
+        ok=false
     fi
 
     # --- Full restore to v1 ---
     local restore_resp
-    restore_resp=$(curl -sf -X POST http://127.0.0.1:9090/restore \
+    restore_resp=$(curl -sf -X POST http://127.0.0.1:19090/restore \
         -H 'Content-Type: application/json' \
         -d "{\"seq\": $first_write_seq, \"mode\": \"full\", \"target\": \"$restore_dir/full\"}" 2>/dev/null)
 
@@ -787,7 +798,7 @@ test_11() {
     # --- Selective restore of snap.txt to v1 ---
     # Tree stores absolute paths stripped of leading /.
     local selective_resp selective_files
-    selective_resp=$(curl -sf -X POST http://127.0.0.1:9090/restore \
+    selective_resp=$(curl -sf -X POST http://127.0.0.1:19090/restore \
         -H 'Content-Type: application/json' \
         -d "{\"seq\": $first_write_seq, \"mode\": \"selective\", \"target\": \"$restore_dir/selective\", \"paths\": [\"tmp/argus-test-workspace/snap.txt\"]}" 2>/dev/null)
 

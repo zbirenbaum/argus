@@ -237,6 +237,16 @@ impl CaptureStage {
         }
     }
 
+    /// Stream-compatible capture with internal tracee resume.
+    ///
+    /// Captures content then resumes the tracee so downstream stages
+    /// do not need access to the ptrace handle.
+    pub async fn process(&self, event: ClassifiedEvent) -> CapturedEvent {
+        let captured = self.capture(event).await;
+        self.handle.resume(captured.pid, false, None);
+        captured
+    }
+
     async fn capture_stream(
         &self,
         pid: Pid,

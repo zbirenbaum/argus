@@ -67,6 +67,109 @@ pub fn parse_flow_line(line: &str) -> Result<MitmdumpFlow> {
     serde_json::from_str(line).context("parse mitmdump flow JSON")
 }
 
+/// Content blob produced during flow processing.
+///
+/// Each blob carries its hash and raw bytes for the caller to persist
+/// through the pipeline rather than emitting directly to a bus.
+#[derive(Debug, Clone)]
+pub struct FlowContent {
+    /// Content-addressed hash of the data.
+    pub hash: ContentHash,
+    /// Raw bytes to store in CAS.
+    pub data: Vec<u8>,
+}
+
+/// Process a flow without bus interaction.
+///
+/// Returns the processed flow and all content blobs (headers, bodies)
+/// for the caller to persist through the pipeline.
+///
+/// # Errors
+///
+/// Returns an error if base64 decoding fails.
+pub fn process_flow_detached(
+    flow: &MitmdumpFlow,
+    pid: u32,
+) -> Result<(ProcessedFlow, Vec<FlowContent>)> {
+    let mut content = Vec::new();
+
+    let req_headers_hash = hash_headers(&flow.request.headers, &mut content)?;
+    let req_body_hash = hash_body(flow.request.body.as_deref(), &mut content)?;
+
+    let resp_event = match &flow.response {
+        Some(resp) => {
+            let resp_headers_hash = hash_headers(&resp.headers, &mut content)?;
+            let resp_body_hash = hash_body(resp.body.as_deref(), &mut content)?;
+
+            Some(HttpResponse {
+                pid,
+                status: resp.status_code,
+                headers_hash: resp_headers_hash,
+                body_hash: resp_body_hash,
+                headers: None,
+                body: None,
+            })
+        }
+        None => None,
+    };
+
+    event!(
+        name: "net.flow.processed",
+        Level::DEBUG,
+        flow.method = %flow.request.method,
+        flow.url = %flow.request.url,
+        "processed HTTP flow",
+    );
+
+    let http_req = HttpRequest {
+        pid,
+        method: flow.request.method.clone(),
+        url: flow.request.url.clone(),
+        headers_hash: req_headers_hash,
+        body_hash: req_body_hash,
+        headers: None,
+        body: None,
+    };
+
+    Ok((ProcessedFlow { request: http_req, response: resp_event }, content))
+}
+
+/// Serialize headers, hash, and collect the blob without emitting to a bus.
+fn hash_headers(
+    headers: &[(String, String)],
+    out: &mut Vec<FlowContent>,
+) -> Result<Option<String>> {
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let data = serde_json::to_vec(headers).context("serialize headers")?;
+    let hash = ContentHash::from_data(&data);
+    out.push(FlowContent { hash, data });
+    Ok(Some(hash.to_string()))
+}
+
+/// Decode base64 body, hash, and collect the blob without emitting to a bus.
+fn hash_body(
+    body_b64: Option<&str>,
+    out: &mut Vec<FlowContent>,
+) -> Result<Option<String>> {
+    let Some(encoded) = body_b64 else {
+        return Ok(None);
+    };
+    if encoded.is_empty() {
+        return Ok(None);
+    }
+
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode base64 body")?;
+
+    let hash = ContentHash::from_data(&decoded);
+    out.push(FlowContent { hash, data: decoded });
+    Ok(Some(hash.to_string()))
+}
+
 /// Parse and process a mitmdump flow, emitting Content records to the bus.
 ///
 /// Headers are serialized as JSON and emitted as Content records. Bodies are

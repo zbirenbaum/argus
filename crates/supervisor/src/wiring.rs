@@ -3,11 +3,10 @@
 //!
 //! Owns process lifecycle, API server, and shutdown coordination only.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, event};
 
 use argus::api;
@@ -49,8 +48,8 @@ pub async fn run(
 
     crate::signals::install_handler();
 
-    let (keylog_handle, keylog_stop) = runtime.spawn_keylog_pipeline()?;
-    let proxy = runtime.spawn_proxy_pipeline(flow_path)?;
+    let (keylog_handle, keylog_cancel) = runtime.spawn_keylog_pipeline();
+    let proxy = runtime.spawn_proxy_pipeline(flow_path);
 
     runtime.emit_initial_state();
 
@@ -72,13 +71,13 @@ pub async fn run(
     event!(Level::DEBUG, "wiring: pipeline.run() returned, beginning shutdown");
 
     shutdown(
-        keylog_stop,
+        keylog_cancel,
         keylog_handle,
         proxy,
         mitmdump.as_mut(),
         ptrace_thread,
         api_shutdown_tx,
-    )?;
+    ).await?;
 
     Ok(())
 }
@@ -109,24 +108,22 @@ fn spawn_api_server(
 }
 
 /// Shuts down all subsystems in dependency order.
-fn shutdown(
-    keylog_stop: Arc<AtomicBool>,
-    keylog_handle: JoinHandle<()>,
-    proxy: Option<(JoinHandle<()>, Arc<AtomicBool>)>,
+async fn shutdown(
+    keylog_cancel: CancellationToken,
+    keylog_handle: tokio::task::JoinHandle<()>,
+    proxy: Option<(tokio::task::JoinHandle<()>, CancellationToken)>,
     mitmdump: Option<&mut net::MitmdumpHandle>,
     ptrace_thread: JoinHandle<()>,
     api_shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
-    use std::sync::atomic::Ordering;
-
-    // Stop TLS pipelines before mitmdump exits so they can drain final data.
-    keylog_stop.store(true, Ordering::Release);
-    if let Some((_, ref proxy_stop)) = proxy {
-        proxy_stop.store(true, Ordering::Release);
+    // Cancel TLS pipelines before mitmdump exits so they can drain final data.
+    keylog_cancel.cancel();
+    if let Some((_, ref proxy_cancel)) = proxy {
+        proxy_cancel.cancel();
     }
-    let _ = keylog_handle.join();
+    let _ = keylog_handle.await;
     if let Some((proxy_handle, _)) = proxy {
-        let _ = proxy_handle.join();
+        let _ = proxy_handle.await;
     }
     event!(Level::DEBUG, "shutdown: keylog and proxy pipelines stopped");
 

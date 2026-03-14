@@ -1,10 +1,17 @@
 // Rust guideline compliant 2026-02-21
-//! Pipeline runner: wires all stages and drives the event processing loop.
+//! Pipeline runner: pure stream combinator chain.
 //!
-//! [`PipelineRunner`] owns every pipeline stage and the [`PtraceStream`]
-//! source. It runs the main processing loop until the traced process exits,
-//! forwarding each stop through classify → rules → approval → capture →
-//! tree → stamp → redact → outputs (user-facing) + bus (internal sinks).
+//! The ptrace event stream is processed through two composed stages:
+//!
+//! 1. **Core pipeline** (`unfold`): ptrace → record → pause → classify →
+//!    policy → capture → tree → stamp. Yields `Event` values.
+//!
+//! 2. **Output pipeline** (`fold`): redact → outputs → bus (with retry).
+//!    Consumes events, threads output state by value.
+//!
+//! No `Arc<Mutex<>>` anywhere. `unfold` owns all core state; `fold`
+//! owns all output state. Natural backpressure: if the output stage
+//! blocks (retry loop), `unfold` stops polling the ptrace stream.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,270 +22,92 @@ use futures::StreamExt;
 use tracing::event;
 use tracing::Level;
 
-use crate::api::routes::submit_pending_approval;
 use crate::api::state::SharedState;
-use crate::events::{ApprovalDecision, EventPayload};
-use crate::events::control;
-use crate::pipeline::{EmitResult, PtraceStream, RawStopRecorder, RecordBus};
-use crate::pipeline::stall::StallState;
-use crate::pipeline::classified::Classification;
-use crate::pipeline::directive::PipelineDirective;
+use crate::cas::ContentHash;
+use crate::pipeline::{EmitResult, PtraceStream, RawStopRecorder, RecordBus, Record};
 use crate::pipeline::outputs::OutputList;
-use crate::pipeline::raw_stop::StopType;
-use crate::pipeline::stages::{
-    ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
-};
-use crate::pipeline::stages::check_rules::RuleAction;
+use crate::pipeline::stall::StallState;
+use crate::pipeline::stages::{CaptureStage, ClassifyStage, PolicyGate, StampStage, TreeStage};
+use crate::pipeline::stages::policy_gate::PolicyOutcome;
 use crate::pipeline::stages::redact::RedactStage;
 
-/// Owns all pipeline stages and drives the main processing loop.
-///
-/// Construct via [`PipelineRunner::new`], then call [`PipelineRunner::run`].
-/// The runner blocks until [`PtraceStream`] signals that the traced process
-/// has exited and yields no more stops.
-pub struct PipelineRunner {
+/// Core pipeline state threaded through `unfold`.
+struct CoreState {
     ptrace: PtraceStream,
     classify: ClassifyStage,
-    rules: CheckRulesStage,
-    approvals: ApprovalStage,
+    policy_gate: PolicyGate,
     capture: CaptureStage,
     tree: TreeStage,
     stamp: StampStage,
-    bus: RecordBus,
-    outputs: OutputList,
-    redact: RedactStage,
     recorder: Option<RawStopRecorder>,
     paused: Arc<AtomicBool>,
     shared: SharedState,
+    /// Tracks time since last tree mutation for idle-timeout finalization.
+    last_tree_mutation: Option<Instant>,
+    /// How long to wait with no mutations before flushing the tree.
+    tree_idle_flush: Duration,
+    /// Sequence number of the most recently stamped event.
+    last_seq: u64,
+    /// Mutations since last CAS persist.
+    dirty_since_persist: u64,
+    /// How many mutations between CAS persists.
+    persist_batch_size: u64,
+    /// CAS root hash from the most recent persist — what MerkleTree::load expects.
+    last_cas_hash: Option<ContentHash>,
 }
 
-impl PipelineRunner {
-    /// Construct a new pipeline runner with the given stages and bus.
-    ///
-    /// Called by `SupervisorRuntime::into_pipeline`; not part of the
-    /// public API.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        ptrace: PtraceStream,
-        classify: ClassifyStage,
-        rules: CheckRulesStage,
-        approvals: ApprovalStage,
-        capture: CaptureStage,
-        tree: TreeStage,
-        stamp: StampStage,
-        bus: RecordBus,
-        outputs: OutputList,
-        redact: RedactStage,
-        recorder: Option<RawStopRecorder>,
-        paused: Arc<AtomicBool>,
-        shared: SharedState,
-    ) -> Self {
-        Self {
-            ptrace, classify, rules, approvals, capture,
-            tree, stamp, bus, outputs, redact, recorder, paused, shared,
+impl CoreState {
+    async fn wait_if_paused(&self) {
+        while self.paused.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
-    /// Run the pipeline until the traced process exits.
-    ///
-    /// Consumes `self`; the caller should proceed with shutdown after this
-    /// returns.
-    pub async fn run(mut self) {
-        event!(name: "pipeline.ptrace.started", Level::INFO, "ptrace pipeline running");
-        while let Some(stop) = self.ptrace.next().await {
-            if let Some(ref mut rec) = self.recorder {
-                rec.record(&stop);
-            }
-
-            // While paused, don't deliver any directives — the tracee
-            // stays frozen because the ptrace thread is waiting for a
-            // Resume/InjectError that we withhold.
-            self.wait_if_paused().await;
-
-            let classified = self.classify.classify(stop).await;
-            let pid_raw = classified.pid.as_raw();
-            let cls_name = classified.syscall_name();
-            event!(
-                name: "pipeline.ptrace.classified",
-                Level::DEBUG,
-                pid = pid_raw,
-                classification = cls_name.as_str(),
-                "classified syscall stop",
-            );
-
-            // Passthrough stops need no further processing; resume immediately
-            // to minimize latency on the hot path. Use ptrace::syscall only
-            // when a pending entry exists (openat, dup, socket, pipe) so the
-            // exit stop is delivered for fd-table correlation. Otherwise use
-            // ptrace::cont to avoid per-syscall overhead on all threads.
-            if matches!(classified.classification, Classification::Passthrough) {
-                let trace_exit = self.classify.pending.contains_key(&classified.pid);
-
-                // Re-inject pending signals so the tracee actually receives
-                // them (e.g. SIGCHLD for child-process notification).
-                let signal = match &classified.raw.stop_type {
-                    StopType::Signal { signal, .. } => {
-                        nix::sys::signal::Signal::try_from(*signal).ok()
-                    }
-                    _ => None,
-                };
-
-                event!(
-                    name: "pipeline.ptrace.passthrough",
-                    Level::TRACE,
-                    pid = pid_raw,
-                    ?signal,
-                    "passthrough, resuming immediately",
-                );
-                self.ptrace.directive(PipelineDirective::Resume {
-                    pid: classified.pid,
-                    trace_exit,
-                    signal,
-                });
-                continue;
-            }
-
-            if let Some(rule_match) = self.rules.check_block(&classified) {
-                match rule_match.action {
-                    RuleAction::Block => {
-                        self.ptrace.directive(PipelineDirective::InjectError {
-                            pid: classified.pid,
-                            errno: libc::EPERM,
-                        });
-                        let mut blocked = self.stamp.stamp_blocked(
-                            classified.pid.as_raw() as u32,
-                            classified.syscall_name(),
-                            classified.primary_path(),
-                            // description is the last use of rule_match; move instead of clone
-                            rule_match.description,
-                        );
-                        self.redact.redact(&mut blocked);
-                        self.outputs.emit(&blocked);
-                        self.emit_required(crate::pipeline::Record::Event(blocked)).await;
-                        continue;
-                    }
-                    RuleAction::Pause => {
-                        let pid_raw = classified.pid.as_raw() as u32;
-                        let syscall = classified.syscall_name();
-                        let path = classified.primary_path();
-
-                        // Emit the WebSocket notification first (clones needed here
-                        // because submit_pending_approval also needs these values).
-                        self.shared.emit(EventPayload::PendingApproval(
-                            control::PendingApproval {
-                                pid: pid_raw,
-                                syscall: syscall.clone(),
-                                path: path.clone(),
-                                binary: None,
-                                rule_name: rule_match.description.clone(),
-                            },
-                        ));
-
-                        // Move syscall, path, and description into the last consumer
-                        // to avoid three extra allocations on every pause-before-action.
-                        let (_action_id, rx) = submit_pending_approval(
-                            &self.shared,
-                            pid_raw,
-                            format!("pid:{pid_raw}"),
-                            syscall,
-                            path,
-                            rule_match.description,
-                        );
-
-                        // Block until the API delivers a decision.
-                        // The API handler emits ApprovalGranted/ApprovalDenied
-                        // events, so the runner only needs to act on the verdict.
-                        let decision = rx.await.unwrap_or(ApprovalDecision::Deny);
-
-                        if decision == ApprovalDecision::Deny {
-                            self.ptrace.directive(PipelineDirective::InjectError {
-                                pid: classified.pid,
-                                errno: libc::EPERM,
-                            });
-                            continue;
-                        }
-                        // Approved — fall through to capture/tree/stamp.
-                    }
-                }
-            }
-
-            let captured = self.capture.capture(classified).await;
-            let has_content = !matches!(captured.content, crate::pipeline::captured::CapturedContent::None);
-            event!(
-                name: "pipeline.ptrace.captured",
-                Level::DEBUG,
-                pid = captured.pid.as_raw(),
-                has_content,
-                "content capture complete",
-            );
-            self.ptrace.directive(PipelineDirective::Resume {
-                pid: captured.pid,
-                trace_exit: false,
-                signal: None,
-            });
-
-            let tree_hash = self.tree.update(&captured);
-            let has_tree_hash = tree_hash.is_some();
-            event!(
-                name: "pipeline.ptrace.tree_updated",
-                Level::DEBUG,
-                pid = captured.pid.as_raw(),
-                has_tree_hash,
-                "tree stage complete",
-            );
-
-            // Finalize and publish snapshot at batch-size cadence to avoid
-            // an O(n) deep clone on every event.
-            let cas_tree_hash = if self.tree.should_finalize() {
-                let snapshot = self.tree.finalize();
-                let root = snapshot.root_hash();
-                self.shared.store_tree_snapshot(snapshot);
-                Some(root)
-            } else {
-                None
-            };
-
-            if let Some(mut evt) = self.stamp.stamp(captured, tree_hash) {
-                event!(
-                    name: "pipeline.ptrace.emitted",
-                    Level::DEBUG,
-                    event.seq = evt.seq,
-                    event.type_ = evt.payload.event_type_tag(),
-                    "event emitted to bus and outputs",
-                );
-                // Use the CAS storage hash (not root_hash) for restore
-                // lookups since MerkleTree::load expects the CAS hash.
-                if let Some(ref th) = cas_tree_hash {
-                    self.shared.insert_tree_hash(evt.seq, th.to_string());
-                }
-                // Apply redaction before delivering to user-facing outputs.
-                self.redact.redact(&mut evt);
-                // Enriched user-facing output (stdout, file, etc.).
-                self.outputs.emit(&evt);
-                // Internal sinks (event log, index, broadcast).
-                self.emit_required(crate::pipeline::Record::Event(evt)).await;
-            }
+    /// Persist the tree to CAS and store in SharedState.
+    fn flush_tree(&mut self) {
+        if self.tree.file_count() == 0 {
+            return;
         }
-
-        event!(name: "pipeline.ptrace.stopped", Level::INFO, "ptrace pipeline finished, shutting down outputs and bus");
-        // Flush enriched outputs first, then internal sinks. The runtime hands
-        // ownership of both to the runner via into_pipeline, so shutdown must
-        // happen here rather than in the caller.
-        let _ = self.outputs.shutdown();
-        self.bus.shutdown_all();
+        if let Ok(cas_hash) = self.tree.persist() {
+            self.last_cas_hash = Some(cas_hash);
+            self.shared.insert_tree_hash(self.last_seq, cas_hash.to_string());
+            self.shared.store_tree(self.tree.snapshot());
+            self.dirty_since_persist = 0;
+            event!(
+                name: "pipeline.tree.flushed",
+                Level::DEBUG,
+                cas_hash = %cas_hash,
+                last_seq = self.last_seq,
+                "tree flushed to CAS and shared state",
+            );
+        }
     }
 
-    /// Emit a record, retrying with exponential backoff if required sinks fail.
+    /// Check if idle-timeout has elapsed and flush if so.
+    fn maybe_idle_flush(&mut self) {
+        if let Some(last) = self.last_tree_mutation {
+            if last.elapsed() >= self.tree_idle_flush {
+                self.flush_tree();
+                self.last_tree_mutation = None;
+            }
+        }
+    }
+}
+
+/// Output pipeline state threaded through `fold`.
+struct OutputState {
+    redact: RedactStage,
+    outputs: OutputList,
+    bus: RecordBus,
+    shared: SharedState,
+}
+
+impl OutputState {
+    /// Emit with exponential-backoff retry for required sinks.
     ///
-    /// The tracee stays frozen (ptrace-stopped) for the entire duration because
-    /// the ptrace thread is blocked waiting for a directive that this method
-    /// withholds until all required sinks succeed. This is the core durability
-    /// guarantee: required events are never dropped.
-    ///
-    /// Initial backoff starts at 1 s and doubles each attempt up to 60 s,
-    /// matching typical S3 and downstream recovery windows.
-    async fn emit_required(&mut self, record: crate::pipeline::Record) {
-        // 1 s initial, 60 s cap — sized for S3 transient outages.
+    /// The tracee stays frozen for the entire retry duration because
+    /// `unfold` won't produce the next event until `fold` returns.
+    async fn emit_required(&self, record: Record) {
         let mut backoff = Duration::from_secs(1);
         const MAX_BACKOFF: Duration = Duration::from_secs(60);
         let mut retry_count: u32 = 0;
@@ -322,11 +151,213 @@ impl PipelineRunner {
             }
         }
     }
+}
 
-    /// Spin-wait while the pause flag is set, yielding to the runtime.
-    async fn wait_if_paused(&self) {
-        while self.paused.load(Ordering::Acquire) {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+/// Owns all pipeline stages and drives the stream combinator chain.
+///
+/// Construct via [`PipelineRunner::new`], then call [`PipelineRunner::run`].
+pub struct PipelineRunner {
+    ptrace: PtraceStream,
+    classify: ClassifyStage,
+    policy_gate: PolicyGate,
+    capture: CaptureStage,
+    tree: TreeStage,
+    stamp: StampStage,
+    bus: RecordBus,
+    outputs: OutputList,
+    redact: RedactStage,
+    recorder: Option<RawStopRecorder>,
+    paused: Arc<AtomicBool>,
+    shared: SharedState,
+    persist_batch_size: u64,
+}
+
+/// Default idle timeout before tree flush — 5 seconds with no mutations.
+const TREE_IDLE_FLUSH: Duration = Duration::from_secs(5);
+
+impl PipelineRunner {
+    /// Construct a new pipeline runner with the given stages and bus.
+    #[expect(clippy::too_many_arguments, reason = "pipeline wiring requires many components")]
+    pub(crate) fn new(
+        ptrace: PtraceStream,
+        classify: ClassifyStage,
+        policy_gate: PolicyGate,
+        capture: CaptureStage,
+        tree: TreeStage,
+        stamp: StampStage,
+        bus: RecordBus,
+        outputs: OutputList,
+        redact: RedactStage,
+        recorder: Option<RawStopRecorder>,
+        paused: Arc<AtomicBool>,
+        shared: SharedState,
+        persist_batch_size: u64,
+    ) -> Self {
+        Self {
+            ptrace, classify, policy_gate, capture,
+            tree, stamp, bus, outputs, redact, recorder, paused, shared,
+            persist_batch_size,
         }
+    }
+
+    /// Run the pipeline until the traced process exits.
+    ///
+    /// Consumes `self`. The pipeline is two composed stream stages:
+    ///
+    /// - `unfold` threads `CoreState` through each iteration, yielding
+    ///   `Event` values. When the ptrace stream ends, `CoreState` is
+    ///   returned via a `oneshot` channel so the shutdown path can
+    ///   finalize the tree.
+    ///
+    /// - `fold` threads `OutputState` through each event, applying
+    ///   redact → outputs → bus with retry. Natural backpressure:
+    ///   when `fold` blocks on retry, `unfold` stops polling ptrace.
+    pub async fn run(self) {
+        event!(name: "pipeline.ptrace.started", Level::INFO, "ptrace pipeline running");
+
+        // Channel to recover CoreState after the stream ends so we can
+        // finalize the tree. unfold drops its state when it returns None,
+        // so we send it out just before.
+        let (core_tx, core_rx) = tokio::sync::oneshot::channel::<CoreState>();
+
+        let core = CoreState {
+            ptrace: self.ptrace,
+            classify: self.classify,
+            policy_gate: self.policy_gate,
+            capture: self.capture,
+            tree: self.tree,
+            stamp: self.stamp,
+            recorder: self.recorder,
+            paused: self.paused,
+            shared: self.shared.clone(),
+            last_tree_mutation: None,
+            tree_idle_flush: TREE_IDLE_FLUSH,
+            last_seq: 0,
+            dirty_since_persist: 0,
+            persist_batch_size: self.persist_batch_size,
+            last_cas_hash: None,
+        };
+
+        // Wrap the oneshot in Option so the closure can take() it once.
+        let core_tx = Some(core_tx);
+
+        // ── Core pipeline: unfold produces Event stream ──
+        let events = futures::stream::unfold((core, core_tx), |(mut s, mut tx)| async move {
+            loop {
+                // If a tree mutation is pending, race ptrace.next() against
+                // the idle-flush deadline so the snapshot is published even
+                // when the tracee is idle (e.g. sleeping with no syscalls).
+                let stop = if let Some(last) = s.last_tree_mutation {
+                    let remaining = s.tree_idle_flush.saturating_sub(last.elapsed());
+                    match tokio::time::timeout(remaining, s.ptrace.next()).await {
+                        Ok(Some(stop)) => stop,
+                        Ok(None) => {
+                            // Stream ended.
+                            if let Some(tx) = tx.take() { let _ = tx.send(s); }
+                            return None;
+                        }
+                        Err(_) => {
+                            // Idle timeout elapsed — flush tree and retry.
+                            s.flush_tree();
+                            s.last_tree_mutation = None;
+                            continue;
+                        }
+                    }
+                } else {
+                    match s.ptrace.next().await {
+                        Some(stop) => stop,
+                        None => {
+                            if let Some(tx) = tx.take() { let _ = tx.send(s); }
+                            return None;
+                        }
+                    }
+                };
+
+                if let Some(ref mut rec) = s.recorder {
+                    rec.record(&stop);
+                }
+
+                s.wait_if_paused().await;
+
+                let Some(classified) = s.classify.process(stop).await else {
+                    continue;
+                };
+
+                match s.policy_gate.evaluate(classified).await {
+                    PolicyOutcome::Blocked { pid, syscall, path, reason } => {
+                        let evt = s.stamp.stamp_blocked(pid, syscall, path, reason);
+                        return Some((evt, (s, tx)));
+                    }
+                    PolicyOutcome::Approved(ce) => {
+                        let captured = s.capture.process(ce).await;
+                        let (captured, tree_hash) = s.tree.process(captured);
+
+                        // Track mutation time for idle-flush of the snapshot.
+                        if tree_hash.is_some() {
+                            s.last_tree_mutation = Some(Instant::now());
+                        }
+
+                        // Persist to CAS + update SharedState at batch
+                        // boundaries. persist() stores TreeObjects to CAS
+                        // so restore can load them. snapshot() clones the
+                        // BTreeMap — O(file_count), batched to amortize.
+                        s.dirty_since_persist += u64::from(tree_hash.is_some());
+                        if s.dirty_since_persist >= s.persist_batch_size {
+                            if let Ok(cas_hash) = s.tree.persist() {
+                                s.shared.store_tree(s.tree.snapshot());
+                                // CAS hash is what MerkleTree::load expects.
+                                s.last_cas_hash = Some(cas_hash);
+                            }
+                            s.dirty_since_persist = 0;
+                            s.last_tree_mutation = None;
+                        }
+
+                        if let Some(evt) = s.stamp.stamp(captured, tree_hash) {
+                            s.last_seq = evt.seq;
+                            // Map seq to the CAS root hash so /restore
+                            // can load the tree via MerkleTree::load.
+                            if let Some(ref cas_hash) = s.last_cas_hash {
+                                s.shared.insert_tree_hash(evt.seq, cas_hash.to_string());
+                            }
+                            return Some((evt, (s, tx)));
+                        }
+                        continue;
+                    }
+                }
+            }
+        });
+
+        // ── Output pipeline: fold consumes Event stream ──
+        let output = OutputState {
+            redact: self.redact,
+            outputs: self.outputs,
+            bus: self.bus,
+            shared: self.shared,
+        };
+
+        let mut out = events
+            .fold(output, |mut out, mut evt| async move {
+                event!(
+                    name: "pipeline.ptrace.emitted",
+                    Level::DEBUG,
+                    event.seq = evt.seq,
+                    event.type_ = evt.payload.event_type_tag(),
+                    "event emitted to outputs and bus",
+                );
+                out.redact.redact(&mut evt);
+                out.outputs.emit(&evt);
+                out.emit_required(Record::Event(evt)).await;
+                out
+            })
+            .await;
+
+        // ── Shutdown: finalize tree and flush ──
+        if let Ok(mut core) = core_rx.await {
+            core.flush_tree();
+        }
+
+        event!(name: "pipeline.ptrace.stopped", Level::INFO, "ptrace pipeline finished, shutting down outputs and bus");
+        let _ = out.outputs.shutdown();
+        out.bus.shutdown_all();
     }
 }

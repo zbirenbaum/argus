@@ -30,4 +30,5 @@ compact_str = { version = "0.8", features = ["serde"] }
 dashmap = "6.1.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 parking_lot = "0.12"
+tokio-util = "0.7"
 rusqlite = { version = "0.32", features = ["bundled"] }

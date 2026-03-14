@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use anyhow::{Context, Result};
 use compact_str::CompactString;
 use dashmap::DashMap;
@@ -19,7 +21,6 @@ use tokio::sync::broadcast;
 use tracing::{Level, event};
 
 use crate::api::state::{SharedState, new_shared_state_with_overflow};
-use crate::approver::Approvers;
 use crate::cas::{Cas, ContentHash, LocalCas};
 use crate::config::{OutputConfig, SupervisorConfig};
 use crate::events::{Event, EventPayload, SequenceGenerator};
@@ -39,7 +40,7 @@ use crate::pipeline::sinks::{
     BroadcastSink, EventLogSink, IndexSink, LocalCasSink, RemoteCasSink,
 };
 use crate::pipeline::stages::{
-    ApprovalStage, CaptureStage, CheckRulesStage, ClassifyStage, StampStage, TreeStage,
+    CaptureStage, ClassifyStage, PolicyGate, StampStage, TreeStage,
 };
 use crate::pipeline::stages::redact::RedactStage;
 use crate::pipeline::ptrace_thread::PtraceStream;
@@ -248,65 +249,42 @@ impl SupervisorRuntime {
         log_required_failures(self.ctx.bus.emit(Record::Event(evt)), "runtime");
     }
 
-    /// Spawn the keylog pipeline thread.
+    /// Spawn the keylog pipeline as a tokio task.
     ///
-    /// Returns `(join_handle, stop_flag)`. Set `stop_flag` to `true` and
-    /// join the handle during shutdown to drain final TLS key data.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the OS fails to create the thread.
-    pub fn spawn_keylog_pipeline(&self) -> Result<(JoinHandle<()>, Arc<AtomicBool>)> {
+    /// Returns `(join_handle, cancel_token)`. Cancel the token and await
+    /// the handle during shutdown to drain final TLS key data.
+    pub fn spawn_keylog_pipeline(&self) -> (tokio::task::JoinHandle<()>, CancellationToken) {
         let keylog_path = self.config.tls.keylog_path.clone();
         let ctx = self.ctx.clone();
         let outputs = build_outputs(&self.config);
         let redact = RedactStage::new(&self.config.redact);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
+        let cancel = CancellationToken::new();
 
-        let handle = thread::Builder::new()
-            .name("keylog-pipeline".into())
-            .spawn(move || {
-                crate::pipeline::keylog_pipeline::run(
-                    keylog_path, ctx, outputs, redact, stop_clone, TLS_POLL_INTERVAL,
-                );
-            })
-            .context("failed to spawn keylog pipeline thread")?;
+        let handle = tokio::spawn(crate::pipeline::keylog_pipeline::run(
+            keylog_path, ctx, outputs, redact, cancel.clone(), TLS_POLL_INTERVAL,
+        ));
 
-        Ok((handle, stop))
+        (handle, cancel)
     }
 
-    /// Spawn the proxy pipeline thread if a flow path is configured.
+    /// Spawn the proxy pipeline as a tokio task if a flow path is configured.
     ///
-    /// Returns `Ok(None)` when no flow path is provided (mitmdump not running).
-    /// Otherwise returns `Ok(Some((join_handle, stop_flag)))`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the OS fails to create the thread.
+    /// Returns `None` when no flow path is provided (mitmdump not running).
     pub fn spawn_proxy_pipeline(
         &self,
         flow_path: Option<PathBuf>,
-    ) -> Result<Option<(JoinHandle<()>, Arc<AtomicBool>)>> {
-        let Some(path) = flow_path else {
-            return Ok(None);
-        };
+    ) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
+        let path = flow_path?;
         let ctx = self.ctx.clone();
         let outputs = build_outputs(&self.config);
         let redact = RedactStage::new(&self.config.redact);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop.clone();
+        let cancel = CancellationToken::new();
 
-        let handle = thread::Builder::new()
-            .name("proxy-pipeline".into())
-            .spawn(move || {
-                crate::pipeline::proxy_pipeline::run(
-                    Some(path), ctx, outputs, redact, stop_clone, TLS_POLL_INTERVAL,
-                );
-            })
-            .context("failed to spawn proxy pipeline thread")?;
+        let handle = tokio::spawn(crate::pipeline::proxy_pipeline::run(
+            Some(path), ctx, outputs, redact, cancel.clone(), TLS_POLL_INTERVAL,
+        ));
 
-        Ok(Some((handle, stop)))
+        Some((handle, cancel))
     }
 
     /// Spawn a background thread that periodically drains the overflow queue.
@@ -398,8 +376,11 @@ impl SupervisorRuntime {
             proxy_addr,
             file_state.clone(),
         );
-        let rules_stage = CheckRulesStage::new(self.shared.rules_handle());
-        let approvals = ApprovalStage::new(Approvers::new());
+        let policy_gate = PolicyGate::new(
+            handle.clone(),
+            self.shared.rules_handle(),
+            self.shared.clone(),
+        );
 
         let policy = CapturePolicy::default_full();
         let capture_stage = CaptureStage::new(
@@ -415,8 +396,7 @@ impl SupervisorRuntime {
         // (which is cheap — it is just a path wrapper with no open file handles).
         let tree_cas = LocalCas::new(self.config.data_dir.join("cas"))
             .context("failed to initialize tree-stage CAS")?;
-        let tree_durability = DurabilityLayer::new(tree_cas, self.upload_pool, None);
-        let tree_stage = TreeStage::new(self.config.tree.clone(), tree_durability);
+        let tree_stage = TreeStage::new(tree_cas);
         let stamp_stage = StampStage::new(self.ctx.seq.clone(), self.ctx.agent_id.clone(), self.config.enrich.clone());
 
         let recorder: Option<RawStopRecorder> = None;
@@ -424,8 +404,7 @@ impl SupervisorRuntime {
         let runner = PipelineRunner::new(
             ptrace_stream,
             classify,
-            rules_stage,
-            approvals,
+            policy_gate,
             capture_stage,
             tree_stage,
             stamp_stage,
@@ -435,6 +414,7 @@ impl SupervisorRuntime {
             recorder,
             self.shared.pause_flag(),
             self.shared,
+            self.config.tree.batch_size,
         );
 
         Ok((runner, seize_rx, ptrace_thread))

@@ -265,6 +265,16 @@ fn start_mitmdump_inner(
         let _ = handle.stop();
     })?;
 
+    // A stale mitmdump on the same port makes the readiness probe pass
+    // even when our child failed to bind and exited. Verify our child
+    // is still alive after the probe.
+    if !handle.is_running() {
+        bail!(
+            "mitmdump exited immediately after spawn — \
+             port {port} may be held by a stale process"
+        );
+    }
+
     Ok(handle)
 }
 

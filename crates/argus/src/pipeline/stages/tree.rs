@@ -1,103 +1,88 @@
 // Rust guideline compliant 2026-02-21
 //! Merkle tree update stage.
 //!
-//! Applies mutating events to the in-memory [`TreeBuilder`] and periodically
-//! emits checkpoint records so downstream sinks can persist durable snapshots.
-//!
-//! The pipeline runner is single-threaded (one event at a time), so no mutex
-//! is needed — [`TreeBuilder`] is owned directly.
+//! Applies mutating events to the in-memory [`MerkleTree`] and persists
+//! the tree to CAS when the runner requests it. The runner controls
+//! persist timing (batch boundaries, idle flush, shutdown).
 
+use anyhow::Result;
 use tracing::event;
 use tracing::Level;
 
-use crate::cas::ContentHash;
-use crate::config::TreeConfig;
+use crate::cas::{Cas, ContentHash, LocalCas};
 use crate::pipeline::captured::{CapturedContent, CapturedEvent};
 use crate::pipeline::classified::Classification;
-use crate::pipeline::durability::DurabilityLayer;
-use crate::snapshot::builder::{TreeBuilder, TreeSnapshot};
+use crate::snapshot::MerkleTree;
 
-/// Stage that maintains the in-memory Merkle tree and persists checkpoints.
+/// Stage that maintains the in-memory Merkle tree.
 pub struct TreeStage {
-    builder: TreeBuilder,
-    durability: DurabilityLayer,
-    events_since_checkpoint: u64,
-    checkpoint_interval: u64,
+    tree: MerkleTree,
+    cas: LocalCas,
 }
 
 impl TreeStage {
-    /// Create a new stage from config and a durability layer.
-    pub fn new(config: TreeConfig, durability: DurabilityLayer) -> Self {
-        let checkpoint_interval = config.checkpoint_interval;
-        Self {
-            builder: TreeBuilder::new(config),
-            durability,
-            events_since_checkpoint: 0,
-            checkpoint_interval,
-        }
+    /// Create a new stage with an empty tree and a CAS backend.
+    pub fn new(cas: LocalCas) -> Self {
+        Self { tree: MerkleTree::new(), cas }
     }
 
     /// Apply a captured event to the tree; return the new root hash if mutated.
-    ///
-    /// Emits a checkpoint record every `checkpoint_interval` mutations.
     pub fn update(&mut self, event: &CapturedEvent) -> Option<ContentHash> {
         let path = mutated_path(&event.classification)?;
         let hash = content_hash(event);
 
-        let path_display = path.display().to_string();
-
         if let Some(h) = hash {
-            self.builder.update(path, h);
+            self.tree.update(path.clone(), h);
         } else {
-            // Deletions and unlink events remove the path from the tree.
-            self.builder.remove(&path);
+            self.tree.remove(&path);
         }
 
-        let root = self.builder.root_hash();
+        let root = self.tree.root_hash();
         event!(
             name: "pipeline.tree.update",
             Level::DEBUG,
-            path = path_display,
+            path = %path.display(),
             root_hash = %root,
             "tree updated",
         );
 
-        // Persist checkpoint after every N mutations.
-        self.events_since_checkpoint += 1;
-        if self.events_since_checkpoint >= self.checkpoint_interval {
-            self.events_since_checkpoint = 0;
-            let seq = self.events_since_checkpoint;
-            let snapshot = self.builder.finalize();
-            persist_checkpoint(seq, &snapshot, &self.durability);
-        }
-
         Some(root)
     }
 
-    /// Returns `true` when accumulated mutations reach the configured threshold.
-    #[must_use]
-    pub fn should_finalize(&self) -> bool {
-        self.builder.should_finalize()
+    /// Stream-compatible tree update returning the event alongside the hash.
+    pub fn process(&mut self, event: CapturedEvent) -> (CapturedEvent, Option<ContentHash>) {
+        let tree_hash = self.update(&event);
+        (event, tree_hash)
     }
 
-    /// Force hash computation and return an immutable snapshot.
-    pub fn finalize(&mut self) -> TreeSnapshot {
-        self.builder.finalize()
-    }
-}
-
-/// Serialize and persist a checkpoint to the durability layer.
-fn persist_checkpoint(seq: u64, snapshot: &TreeSnapshot, durability: &DurabilityLayer) {
-    if let Ok(data) = bincode::serialize(snapshot) {
-        let hash = ContentHash::from_data(&data);
-        let _ = durability.persist_with_hash(hash.clone(), &data);
-        durability.upload_async(hash, data);
+    /// Persist the tree to CAS and return the CAS root hash.
+    ///
+    /// The returned hash is the one that `MerkleTree::load()` expects —
+    /// use it for `insert_tree_hash` so `/restore` can find it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if CAS writes fail.
+    pub fn persist(&self) -> Result<ContentHash> {
+        let cas_hash = self.tree.store(&self.cas)?;
         event!(
-            name: "tree_stage.checkpoint",
+            name: "pipeline.tree.persisted",
             Level::DEBUG,
-            seq,
-            "persisted checkpoint at event {{seq}}",
+            cas_hash = %cas_hash,
+            file_count = self.tree.file_count(),
+            "tree persisted to CAS",
         );
+        Ok(cas_hash)
+    }
+
+    /// Clone the current tree for SharedState storage.
+    pub fn snapshot(&self) -> MerkleTree {
+        self.tree.clone()
+    }
+
+    /// Number of tracked files.
+    pub fn file_count(&self) -> usize {
+        self.tree.file_count()
     }
 }
 
@@ -109,17 +94,12 @@ fn mutated_path(c: &Classification) -> Option<std::path::PathBuf> {
         | Classification::FileChmod { path, .. }
         | Classification::FileTruncate { path, .. } => Some(path.clone()),
         Classification::FileUnlink { path }
-        | Classification::FileRmdir { path } => {
-            // Deletions are still tracked as mutations.
-            Some(path.clone())
-        }
+        | Classification::FileRmdir { path } => Some(path.clone()),
         _ => None,
     }
 }
 
 /// Extract the content hash from a captured event for tree storage.
-///
-/// Returns `None` for deletions — callers use `None` to remove the path.
 fn content_hash(event: &CapturedEvent) -> Option<ContentHash> {
     match &event.content {
         CapturedContent::FileWrite { after_hash, .. } => *after_hash,

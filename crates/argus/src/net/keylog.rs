@@ -99,6 +99,49 @@ impl KeylogWatcher {
         Ok(new_lines)
     }
 
+    /// Build TlsKeys events from new lines without bus interaction.
+    ///
+    /// Returns each event paired with its content hash and raw bytes
+    /// for the caller to persist through the pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the keylog file fails.
+    pub fn poll_new_lines(
+        &mut self,
+        pid: u32,
+        fd: i32,
+    ) -> Result<Vec<(TlsKeys, ContentHash, Vec<u8>)>> {
+        let lines = self.read_new_lines()?;
+        let mut results = Vec::with_capacity(lines.len());
+
+        for line in &lines {
+            let raw = format!("{} {} {}", line.label, line.client_random, line.secret);
+            let data = raw.into_bytes();
+            let hash = ContentHash::from_data(&data);
+            event!(
+                name: "net.keylog.captured",
+                Level::DEBUG,
+                keylog.label = %line.label,
+                keylog.hash = %hash,
+                "captured TLS key material",
+            );
+
+            results.push((
+                TlsKeys {
+                    pid,
+                    fd,
+                    sni: None,
+                    keylog_line_hash: Some(hash.to_string()),
+                },
+                hash,
+                data,
+            ));
+        }
+
+        Ok(results)
+    }
+
     /// Emit new keylog lines as Content records to the bus and build TlsKeys events.
     ///
     /// Each line is hashed and emitted as a Content record so the bus can

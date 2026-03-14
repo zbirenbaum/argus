@@ -18,7 +18,7 @@ use crate::events::EventPayload;
 use crate::events::network::{HttpRequest, HttpResponse};
 use crate::pipeline::bus::RecordBus;
 
-use super::flow_parser::{parse_flow_line, process_flow};
+use super::flow_parser::{parse_flow_line, process_flow, process_flow_detached};
 
 /// Result of processing a single flow into event payloads.
 #[derive(Debug)]
@@ -44,6 +44,88 @@ impl FlowWatcher {
     /// Create a watcher for the given flow output file path.
     pub fn new(path: PathBuf) -> Self {
         Self { path, offset: 0 }
+    }
+
+    /// Read and process new flows without bus interaction.
+    ///
+    /// Returns flow events and their associated content blobs for the
+    /// caller to persist through the pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if file I/O fails.
+    pub fn poll_new_flows(
+        &mut self,
+        pid: u32,
+    ) -> Result<Vec<(FlowEvents, Vec<super::flow_parser::FlowContent>)>> {
+        let file = match std::fs::File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new());
+            }
+            Err(e) => {
+                return Err(e).context("open flow output file");
+            }
+        };
+
+        let mut reader = BufReader::new(file);
+        reader
+            .seek(SeekFrom::Start(self.offset))
+            .context("seek in flow output file")?;
+
+        let mut results = Vec::new();
+        let mut buf = String::new();
+
+        loop {
+            buf.clear();
+            let bytes_read = reader
+                .read_line(&mut buf)
+                .context("read flow output line")?;
+            if bytes_read == 0 {
+                break;
+            }
+            self.offset += bytes_read as u64;
+
+            let trimmed = buf.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let flow = match parse_flow_line(trimmed) {
+                Ok(f) => f,
+                Err(e) => {
+                    event!(
+                        name: "net.flow_watcher.parse_error",
+                        Level::WARN,
+                        error.message = %e,
+                        "skipping malformed flow line: {{error.message}}",
+                    );
+                    continue;
+                }
+            };
+
+            match process_flow_detached(&flow, pid) {
+                Ok((processed, content)) => {
+                    results.push((
+                        FlowEvents {
+                            request: processed.request,
+                            response: processed.response,
+                        },
+                        content,
+                    ));
+                }
+                Err(e) => {
+                    event!(
+                        name: "net.flow_watcher.process_error",
+                        Level::WARN,
+                        error.message = %e,
+                        "failed to process flow: {{error.message}}",
+                    );
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// Read and process new flows from the file.

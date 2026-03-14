@@ -11,7 +11,7 @@
 mod ca;
 mod dedup;
 mod env;
-mod flow_parser;
+pub(crate) mod flow_parser;
 mod flow_watcher;
 mod keylog;
 mod mitmdump;

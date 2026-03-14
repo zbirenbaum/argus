@@ -16,6 +16,8 @@ pub(crate) mod keylog_pipeline;
 pub(crate) mod proxy_pipeline;
 #[cfg(test)]
 pub(crate) mod mock_ptrace;
+#[cfg(test)]
+mod validation_tests;
 pub(crate) mod captured;
 pub(crate) mod classified;
 pub(crate) mod directive;
@@ -30,6 +32,7 @@ pub(crate) mod stall;
 pub(crate) mod sink;
 pub(crate) mod sinks;
 pub(crate) mod stages;
+pub(crate) mod streams;
 
 // Only re-export what external crates actually use.
 pub use runner::PipelineRunner;
