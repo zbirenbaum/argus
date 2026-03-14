@@ -4,6 +4,7 @@ members = [
     "crates/argus",
     "crates/supervisor",
     "crates/cli",
+    "crates/argus-api",
 ]
 
 [workspace.package]

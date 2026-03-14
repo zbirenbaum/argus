@@ -1,0 +1,24 @@
+[package]
+name = "argus-api"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "argus-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rusqlite = { workspace = true }
+parking_lot.workspace = true
+futures = "0.3"
