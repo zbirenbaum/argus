@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# argus — run any command under the Argus supervisor.
+#
+# Usage:
+#   argus run claude
+#   argus run claude --dangerously-skip-permissions
+#   argus run bash
+#   argus run python my_script.py
+#   argus build              # rebuild the Docker image
+set -euo pipefail
+
+IMAGE="argus-claude"
+CONTAINER="argus-run"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+cmd_build() {
+  echo "Building $IMAGE image..."
+  docker build -t "$IMAGE" -f "$REPO_ROOT/deploy/Dockerfile" "$REPO_ROOT"
+}
+
+cmd_run() {
+  if [ $# -eq 0 ]; then
+    echo "Usage: argus run <command> [args...]" >&2
+    exit 1
+  fi
+
+  # Build image if it doesn't exist
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "Image $IMAGE not found, building..."
+    cmd_build
+  fi
+
+  # Kill any previous run
+  docker rm -f "$CONTAINER" 2>/dev/null || true
+
+  exec docker run -it --rm --name "$CONTAINER" \
+    --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
+    -v "$HOME/.claude:/home/agent/.claude" \
+    -v "$HOME/.claude.json:/home/agent/.claude.json" \
+    -e HOME=/home/agent \
+    -e RUST_LOG=off \
+    -p 9090:9090 \
+    -p 8000:8000 \
+    "$IMAGE" "$@"
+}
+
+case "${1:-}" in
+  build) shift; cmd_build "$@" ;;
+  run)   shift; cmd_run "$@" ;;
+  *)
+    echo "Usage: argus <build|run> [args...]" >&2
+    echo "  argus run claude    — run claude under the supervisor" >&2
+    echo "  argus build         — rebuild the Docker image" >&2
+    exit 1
+    ;;
+esac

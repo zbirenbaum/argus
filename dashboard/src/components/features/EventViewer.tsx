@@ -1,14 +1,12 @@
 import {
-  cleanupStream,
   clearSelection,
-  connected,
   events,
   getEventBySeq,
-  initialize,
   processes,
   selectEvent,
   selectedSeq,
 } from "@stores/events.store";
+import { formatTimeMs as formatTime } from "@lib/format";
 import { cn } from "@utils/cn";
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { For, Show } from "solid-js/web";
@@ -47,22 +45,17 @@ const OVERSCAN = 20;
 
 // --- Helpers ---
 
-function formatTime(tsWall: string): string {
-  try {
-    const d = new Date(tsWall);
-    const h = String(d.getHours()).padStart(2, "0");
-    const m = String(d.getMinutes()).padStart(2, "0");
-    const s = String(d.getSeconds()).padStart(2, "0");
-    const ms = String(d.getMilliseconds()).padStart(3, "0");
-    return `${h}:${m}:${s}.${ms}`;
-  } catch {
-    return tsWall;
-  }
-}
-
 const FS_TYPES = new Set([
-  "read", "write", "rename", "unlink", "mkdir",
-  "rmdir", "chmod", "truncate", "link", "symlink",
+  "read",
+  "write",
+  "rename",
+  "unlink",
+  "mkdir",
+  "rmdir",
+  "chmod",
+  "truncate",
+  "link",
+  "symlink",
 ]);
 
 function eventContext(event: ArgusEvent): string | undefined {
@@ -82,14 +75,6 @@ function eventContext(event: ArgusEvent): string | undefined {
 // --- Main component ---
 
 export function EventViewer() {
-  onMount(() => {
-    void initialize();
-  });
-
-  onCleanup(() => {
-    cleanupStream();
-  });
-
   const selectedEvent = createMemo<ArgusEvent | undefined>(() => {
     const seq = selectedSeq();
     if (seq === null) return undefined;
@@ -97,12 +82,11 @@ export function EventViewer() {
   });
 
   return (
-    <div class="flex h-screen w-full flex-col">
+    <div class="flex h-full w-full flex-col">
       <div class="flex min-h-0 flex-1">
         <VirtualSidebar />
         <DetailPanel event={selectedEvent()} />
       </div>
-      <LiveTicker />
     </div>
   );
 }
@@ -239,14 +223,33 @@ function VirtualSidebar() {
       </div>
       <Show when={flatRows().length > 0} fallback={<EmptyState />}>
         <div style={{ height: `${totalHeight()}px`, position: "relative" }}>
-          <div style={{ transform: `translateY(${offsetY()}px)`, position: "absolute", left: "0", right: "0" }}>
+          <div
+            style={{
+              transform: `translateY(${offsetY()}px)`,
+              position: "absolute",
+              left: "0",
+              right: "0",
+            }}
+          >
             <For each={visibleRows()}>
               {(row) => {
                 if (row.kind === "pid-header") {
-                  return <PidHeaderRowView row={row} isOpen={openSections().has(row.key)} onToggle={() => toggleSection(row.key)} />;
+                  return (
+                    <PidHeaderRowView
+                      row={row}
+                      isOpen={openSections().has(row.key)}
+                      onToggle={() => toggleSection(row.key)}
+                    />
+                  );
                 }
                 if (row.kind === "type-header") {
-                  return <TypeHeaderRowView row={row} isOpen={openSections().has(row.key)} onToggle={() => toggleSection(row.key)} />;
+                  return (
+                    <TypeHeaderRowView
+                      row={row}
+                      isOpen={openSections().has(row.key)}
+                      onToggle={() => toggleSection(row.key)}
+                    />
+                  );
                 }
                 return <EventRowView event={row.event} />;
               }}
@@ -325,9 +328,7 @@ function TypeHeaderRowView(props: { row: TypeHeaderRow; isOpen: boolean; onToggl
         <path d="M9 18l6-6-6-6" />
       </svg>
       <span class="text-xs">{props.row.type}</span>
-      <span class="ml-auto text-xs text-[hsl(var(--muted-foreground))]">
-        {props.row.count}
-      </span>
+      <span class="ml-auto text-xs text-[hsl(var(--muted-foreground))]">{props.row.count}</span>
     </button>
   );
 }
@@ -360,66 +361,6 @@ function EventRowView(props: { event: ArgusEvent }) {
       <Show when={context()}>
         {(ctx) => (
           <span class="truncate font-mono text-[hsl(var(--muted-foreground))]">{ctx()}</span>
-        )}
-      </Show>
-    </button>
-  );
-}
-
-// --- Live ticker ---
-
-function LiveTicker() {
-  const recentEvents = createMemo(() => {
-    const len = events.length;
-    if (len === 0) return [];
-    const start = Math.max(0, len - 4);
-    return events.slice(start, len);
-  });
-
-  return (
-    <div
-      class={cn(
-        "flex shrink-0 items-center gap-1 border-t px-2 py-1",
-        "border-[hsl(var(--border))] bg-[hsl(var(--background))]",
-      )}
-    >
-      <div
-        class={cn(
-          "mr-2 h-2 w-2 shrink-0 rounded-full",
-          connected() ? "bg-green-500" : "bg-red-500",
-        )}
-      />
-      <Show when={recentEvents().length > 0} fallback={
-        <span class="text-xs text-[hsl(var(--muted-foreground))]">Waiting for events...</span>
-      }>
-        <For each={recentEvents()}>
-          {(event) => <TickerEvent event={event} />}
-        </For>
-      </Show>
-      <span class="ml-auto shrink-0 text-xs font-mono text-[hsl(var(--muted-foreground))]">
-        {events.length} total
-      </span>
-    </div>
-  );
-}
-
-function TickerEvent(props: { event: ArgusEvent }) {
-  const context = () => eventContext(props.event);
-
-  return (
-    <button
-      type="button"
-      class={cn(
-        "flex items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs",
-        "bg-[hsl(var(--secondary))] hover:bg-[hsl(var(--muted))] transition-colors cursor-pointer",
-      )}
-      onClick={() => selectEvent(props.event.seq)}
-    >
-      <span class="font-mono text-[hsl(var(--muted-foreground))]">#{props.event.seq}</span>
-      <span class="font-semibold">{props.event.type}</span>
-      <Show when={context()}>
-        {(ctx) => (
-          <span class="max-w-[120px] truncate font-mono text-[hsl(var(--muted-foreground))]">{ctx()}</span>
         )}
       </Show>
     </button>

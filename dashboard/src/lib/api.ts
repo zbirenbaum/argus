@@ -15,6 +15,22 @@ export async function fetchEvents(afterSeq?: number): Promise<ArgusEvent[]> {
   return data.events;
 }
 
+export async function restoreFile(
+  path: string,
+  contentHash: string,
+): Promise<{ bytes_written: number }> {
+  const res = await fetch(`${API_BASE}/restore/file`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, content_hash: contentHash }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error((body as Record<string, string>).error ?? `Restore failed: ${res.status}`);
+  }
+  return res.json() as Promise<{ bytes_written: number }>;
+}
+
 export function createEventStream(afterSeq?: number): EventSource {
   const params = new URLSearchParams();
   if (afterSeq !== undefined) {

@@ -82,7 +82,8 @@ pub struct FlowContent {
 /// Process a flow without bus interaction.
 ///
 /// Returns the processed flow and all content blobs (headers, bodies)
-/// for the caller to persist through the pipeline.
+/// for the caller to persist through the pipeline. Headers and bodies
+/// are also inlined into the event payloads for direct consumption.
 ///
 /// # Errors
 ///
@@ -106,8 +107,8 @@ pub fn process_flow_detached(
                 status: resp.status_code,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
-                headers: None,
-                body: None,
+                headers: inline_headers(&resp.headers),
+                body: inline_body(resp.body.as_deref()),
             })
         }
         None => None,
@@ -127,11 +128,33 @@ pub fn process_flow_detached(
         url: flow.request.url.clone(),
         headers_hash: req_headers_hash,
         body_hash: req_body_hash,
-        headers: None,
-        body: None,
+        headers: inline_headers(&flow.request.headers),
+        body: inline_body(flow.request.body.as_deref()),
     };
 
     Ok((ProcessedFlow { request: http_req, response: resp_event }, content))
+}
+
+/// Serialize headers as a JSON string for inline embedding in events.
+fn inline_headers(headers: &[(String, String)]) -> Option<String> {
+    if headers.is_empty() {
+        return None;
+    }
+    serde_json::to_string(headers).ok()
+}
+
+/// Decode a base64-encoded body and return it as a UTF-8 string.
+/// Returns `None` if the body is absent, empty, or not valid UTF-8.
+fn inline_body(body_b64: Option<&str>) -> Option<String> {
+    let encoded = body_b64?;
+    if encoded.is_empty() {
+        return None;
+    }
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 /// Serialize headers, hash, and collect the blob without emitting to a bus.
@@ -197,8 +220,8 @@ pub fn process_flow(
                 status: resp.status_code,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
-                headers: None,
-                body: None,
+                headers: inline_headers(&resp.headers),
+                body: inline_body(resp.body.as_deref()),
             })
         }
         None => None,
@@ -218,8 +241,8 @@ pub fn process_flow(
         url: flow.request.url.clone(),
         headers_hash: req_headers_hash,
         body_hash: req_body_hash,
-        headers: None,
-        body: None,
+        headers: inline_headers(&flow.request.headers),
+        body: inline_body(flow.request.body.as_deref()),
     };
 
     Ok(ProcessedFlow {
@@ -344,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn process_flow_emits_hashes() {
+    fn process_flow_emits_hashes_and_inlines() {
         let bus = noop_bus();
         let json = flow_json("POST", "https://api.example.com/data", 200);
         let flow = parse_flow_line(&json).unwrap();
@@ -354,10 +377,15 @@ mod tests {
         assert_eq!(result.request.pid, 42);
         assert!(result.request.body_hash.is_some());
         assert!(result.request.headers_hash.is_some());
+        // Inline fields are populated
+        assert!(result.request.headers.is_some());
+        assert_eq!(result.request.body.as_deref(), Some("hello"));
 
         let resp = result.response.unwrap();
         assert_eq!(resp.status, 200);
         assert!(resp.body_hash.is_some());
+        assert!(resp.headers.is_some());
+        assert_eq!(resp.body.as_deref(), Some("world"));
     }
 
     #[test]

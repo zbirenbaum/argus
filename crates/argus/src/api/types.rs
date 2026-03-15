@@ -185,6 +185,22 @@ pub struct RestoreResponse {
     pub bytes_restored: u64,
 }
 
+/// Request body for `POST /restore/file`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RestoreFileRequest {
+    /// Absolute path to write the file to.
+    pub path: String,
+    /// CAS content hash of the desired file version.
+    pub content_hash: String,
+}
+
+/// Response body for `POST /restore/file`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestoreFileResponse {
+    /// Number of bytes written.
+    pub bytes_written: u64,
+}
+
 /// Response body for `GET /tree`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeSnapshotResponse {

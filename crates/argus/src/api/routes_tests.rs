@@ -1,7 +1,9 @@
+// Rust guideline compliant 2026-02-21
 use super::*;
 use crate::api::build_router;
 use crate::api::state::new_shared_state;
-use crate::cas::MemoryCas;
+use crate::api::types::RestoreFileResponse;
+use crate::cas::{Cas, MemoryCas};
 use crate::events::EventPayload;
 use crate::pipeline::RecordBus;
 use axum::body::Body;
@@ -13,6 +15,13 @@ use tower::ServiceExt;
 
 fn test_cas() -> Arc<dyn crate::cas::Cas> {
     Arc::new(MemoryCas::new())
+}
+
+fn test_cas_with_content(content: &[u8]) -> (Arc<dyn crate::cas::Cas>, String) {
+    let cas = Arc::new(MemoryCas::new());
+    let hash = cas.put(content).unwrap();
+    let hash_str = hash.to_string();
+    (cas, hash_str)
 }
 
 fn test_bus() -> RecordBus {
@@ -397,4 +406,80 @@ async fn delete_rule_emits_rules_updated_event() {
         }
         other => panic!("expected RulesUpdated, got {other:?}"),
     }
+}
+
+// --- restore/file tests ---
+
+#[tokio::test]
+async fn restore_file_writes_content_from_cas() {
+    let content = b"hello from cas";
+    let (cas, hash_str) = test_cas_with_content(content);
+    let state = new_shared_state("test-agent".into(), cas, test_bus());
+    let app = build_router(state);
+
+    // Write to a temp path so the test is hermetic.
+    let dest = std::env::temp_dir().join("argus-restore-file-test.txt");
+    let body = serde_json::json!({
+        "path": dest.to_str().unwrap(),
+        "content_hash": hash_str,
+    })
+    .to_string();
+
+    let (status, resp_body) = post_json(&app, "/restore/file", &body).await;
+    assert_eq!(status, StatusCode::OK, "unexpected error: {resp_body}");
+
+    let resp: RestoreFileResponse = serde_json::from_str(&resp_body).unwrap();
+    assert_eq!(resp.bytes_written, content.len() as u64);
+
+    let written = std::fs::read(&dest).unwrap();
+    assert_eq!(written, content);
+
+    let _ = std::fs::remove_file(dest);
+}
+
+#[tokio::test]
+async fn restore_file_bad_hash_returns_400() {
+    let app = test_router();
+    let body = serde_json::json!({
+        "path": "/tmp/irrelevant",
+        "content_hash": "not-a-valid-hash",
+    })
+    .to_string();
+
+    let (status, resp_body) = post_json(&app, "/restore/file", &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400, got {resp_body}");
+}
+
+#[tokio::test]
+async fn restore_file_missing_from_cas_returns_500() {
+    let app = test_router();
+    // A syntactically valid sha256:hex hash that won't exist in the empty CAS.
+    let absent_hash = format!("sha256:{}", "a".repeat(64));
+    let dest = std::env::temp_dir().join("argus-restore-absent.txt");
+    let body = serde_json::json!({
+        "path": dest.to_str().unwrap(),
+        "content_hash": absent_hash,
+    })
+    .to_string();
+
+    let (status, _) = post_json(&app, "/restore/file", &body).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn restore_file_rejects_path_outside_workspace() {
+    let content = b"sneaky";
+    let (cas, hash_str) = test_cas_with_content(content);
+    let state = new_shared_state("test-agent".into(), cas, test_bus());
+    let app = build_router(state);
+
+    let body = serde_json::json!({
+        "path": "/etc/passwd",
+        "content_hash": hash_str,
+    })
+    .to_string();
+
+    let (status, resp_body) = post_json(&app, "/restore/file", &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400, got {resp_body}");
+    assert!(resp_body.contains("must be under /workspace or /tmp"));
 }

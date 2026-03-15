@@ -53,10 +53,11 @@ pub fn router(
         .route("/agent/pause", post(proxy_post))
         .route("/agent/resume", post(proxy_post))
         .route("/approvals/pending", get(proxy_get))
-        .route("/approvals/{action_id}/approve", post(proxy_post_with_path))
-        .route("/approvals/{action_id}/deny", post(proxy_post_with_path))
+        .route("/approvals/{action_id}/approve", post(proxy_post))
+        .route("/approvals/{action_id}/deny", post(proxy_post))
         .route("/tree", get(proxy_get))
         .route("/restore", post(proxy_post_with_body))
+        .route("/restore/file", post(proxy_post_with_body))
         .route("/rules", get(proxy_get))
         .route("/rules", post(proxy_post_with_body))
         // Health
@@ -154,57 +155,36 @@ async fn sse_stream(
     )
 }
 
+/// Convert a proxy result into an axum response, forwarding the upstream status code.
+fn proxy_result(
+    result: Result<crate::proxy::ProxyResponse, String>,
+) -> (StatusCode, Json<Value>) {
+    match result {
+        Ok(r) => (r.status, Json(r.body)),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": format!("supervisor: {e}") }))),
+    }
+}
+
 async fn proxy_get(
     State(state): State<Arc<AppState>>,
     uri: axum::http::Uri,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match state.proxy.get(uri.path()).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("supervisor: {e}") })),
-        )),
-    }
+) -> (StatusCode, Json<Value>) {
+    proxy_result(state.proxy.get(uri.path()).await)
 }
 
 async fn proxy_post(
     State(state): State<Arc<AppState>>,
     uri: axum::http::Uri,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match state.proxy.post(uri.path(), None).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("supervisor: {e}") })),
-        )),
-    }
-}
-
-async fn proxy_post_with_path(
-    State(state): State<Arc<AppState>>,
-    uri: axum::http::Uri,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match state.proxy.post(uri.path(), None).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("supervisor: {e}") })),
-        )),
-    }
+) -> (StatusCode, Json<Value>) {
+    proxy_result(state.proxy.post(uri.path(), None).await)
 }
 
 async fn proxy_post_with_body(
     State(state): State<Arc<AppState>>,
     uri: axum::http::Uri,
     Json(body): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    match state.proxy.post(uri.path(), Some(body)).await {
-        Ok(v) => Ok(Json(v)),
-        Err(e) => Err((
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("supervisor: {e}") })),
-        )),
-    }
+) -> (StatusCode, Json<Value>) {
+    proxy_result(state.proxy.post(uri.path(), Some(body)).await)
 }
 
 async fn health() -> Json<Value> {

@@ -28,6 +28,25 @@ impl TreeStage {
 
     /// Apply a captured event to the tree; return the new root hash if mutated.
     pub fn update(&mut self, event: &CapturedEvent) -> Option<ContentHash> {
+        // Renames need special handling: move entry from old_path to new_path.
+        if let Classification::FileRename { ref old_path, ref new_path } = event.classification {
+            let hash = self.tree.get(old_path).copied();
+            self.tree.remove(old_path);
+            if let Some(h) = hash {
+                self.tree.update(new_path.clone(), h);
+            }
+            let root = self.tree.root_hash();
+            event!(
+                name: "pipeline.tree.rename",
+                Level::DEBUG,
+                old_path = %old_path.display(),
+                new_path = %new_path.display(),
+                root_hash = %root,
+                "tree renamed",
+            );
+            return Some(root);
+        }
+
         let path = mutated_path(&event.classification)?;
         let hash = content_hash(event);
 
@@ -107,5 +126,100 @@ fn content_hash(event: &CapturedEvent) -> Option<ContentHash> {
         CapturedContent::FileRead { content_hash, .. } => *content_hash,
         CapturedContent::FileDelete { content_hash, .. } => *content_hash,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cas::LocalCas;
+    use nix::unistd::Pid;
+    use std::path::PathBuf;
+
+    fn make_stage() -> TreeStage {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cas = LocalCas::new(dir.path().to_path_buf()).unwrap();
+        TreeStage::new(cas)
+    }
+
+    fn dummy_hash() -> ContentHash {
+        ContentHash::from_data(b"test content")
+    }
+
+    fn write_event(path: &str, hash: ContentHash) -> CapturedEvent {
+        CapturedEvent {
+            pid: Pid::from_raw(1),
+            classification: Classification::FileWrite {
+                path: PathBuf::from(path),
+                fd: 3,
+                buf_addr: 0,
+                len: 10,
+            },
+            content: CapturedContent::FileWrite {
+                before_hash: None,
+                after_hash: Some(hash),
+                data: None,
+                size: 10,
+            },
+        }
+    }
+
+    fn rename_event(old: &str, new: &str) -> CapturedEvent {
+        CapturedEvent {
+            pid: Pid::from_raw(1),
+            classification: Classification::FileRename {
+                old_path: PathBuf::from(old),
+                new_path: PathBuf::from(new),
+            },
+            content: CapturedContent::None,
+        }
+    }
+
+    #[test]
+    fn rename_moves_entry_in_tree() {
+        let mut stage = make_stage();
+        let hash = dummy_hash();
+
+        // Write to .tmp file
+        stage.update(&write_event("/workspace/foo.txt.tmp", hash));
+        assert_eq!(stage.file_count(), 1);
+        assert!(stage.tree.get(&PathBuf::from("/workspace/foo.txt.tmp")).is_some());
+
+        // Rename .tmp → final
+        let root = stage.update(&rename_event("/workspace/foo.txt.tmp", "/workspace/foo.txt"));
+        assert!(root.is_some());
+        assert_eq!(stage.file_count(), 1);
+        assert!(stage.tree.get(&PathBuf::from("/workspace/foo.txt.tmp")).is_none());
+        assert_eq!(
+            stage.tree.get(&PathBuf::from("/workspace/foo.txt")),
+            Some(&hash),
+        );
+    }
+
+    #[test]
+    fn rename_nonexistent_is_noop() {
+        let mut stage = make_stage();
+        let root = stage.update(&rename_event("/workspace/gone.tmp", "/workspace/gone.txt"));
+        assert!(root.is_some());
+        assert_eq!(stage.file_count(), 0);
+    }
+
+    #[test]
+    fn rename_overwrites_existing_target() {
+        let mut stage = make_stage();
+        let hash_a = ContentHash::from_data(b"aaa");
+        let hash_b = ContentHash::from_data(b"bbb");
+
+        stage.update(&write_event("/workspace/old.txt", hash_a));
+        stage.update(&write_event("/workspace/new.txt", hash_b));
+        assert_eq!(stage.file_count(), 2);
+
+        // Rename old → new should overwrite new with old's hash
+        stage.update(&rename_event("/workspace/old.txt", "/workspace/new.txt"));
+        assert_eq!(stage.file_count(), 1);
+        assert_eq!(
+            stage.tree.get(&PathBuf::from("/workspace/new.txt")),
+            Some(&hash_a),
+        );
     }
 }

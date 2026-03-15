@@ -15,8 +15,9 @@ use crate::api::errors::ApiError;
 use crate::api::state::{SharedState, resolve_approval};
 use crate::api::types::{
     ApproveResponse, DenyResponse, HealthResponse, PauseResponse, PendingAction,
-    PendingApprovalsResponse, RestoreRequest, RestoreResponse, ResumeResponse,
-    RulesAppliedResponse, StatusResponse, TreeFileEntry, TreeSnapshotResponse,
+    PendingApprovalsResponse, RestoreFileRequest, RestoreFileResponse, RestoreRequest,
+    RestoreResponse, ResumeResponse, RulesAppliedResponse, StatusResponse, TreeFileEntry,
+    TreeSnapshotResponse,
 };
 use crate::cas::ContentHash;
 use crate::config::RuleSet;
@@ -331,6 +332,84 @@ pub async fn restore_handler(
         tree_hash: tree_hash_str,
         files_restored: stats.files_restored,
         bytes_restored: stats.bytes_restored,
+    }))
+}
+
+/// `POST /restore/file` — restore a single file directly from CAS by content hash.
+///
+/// Bypasses the Merkle tree lookup, which breaks for files that went through
+/// a `.tmp` → rename chain: the UI tracks the final path but the tree stores
+/// the `.tmp` path at the captured seq. Taking path + content_hash directly
+/// avoids that ambiguity.
+///
+/// Writes atomically: content lands in a sibling temp file, then is renamed
+/// into place so the agent never sees a partial write.
+///
+/// # Errors
+///
+/// Returns `400 Bad Request` if `content_hash` is malformed, or `500` if
+/// the CAS lookup or write fails.
+pub async fn restore_file_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<RestoreFileRequest>,
+) -> Result<Json<RestoreFileResponse>, ApiError> {
+    let dest = PathBuf::from(&req.path);
+
+    // Path traversal guard: only allow writes under /workspace or /tmp.
+    let canonical = dest.canonicalize().unwrap_or_else(|_| dest.clone());
+    if !canonical.starts_with("/workspace") && !canonical.starts_with("/tmp") {
+        return Err(ApiError::InvalidBody {
+            reason: format!("path must be under /workspace or /tmp, got: {}", dest.display()),
+        });
+    }
+
+    let hash = ContentHash::try_from(req.content_hash.clone()).map_err(|e| {
+        ApiError::InvalidBody {
+            reason: format!("invalid content_hash: {e}"),
+        }
+    })?;
+
+    let cas = state.cas();
+    let content = tokio::task::spawn_blocking(move || cas.get(&hash))
+        .await
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("CAS task panicked: {e}"),
+        })?
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("CAS lookup failed: {e}"),
+        })?;
+
+    // Create parent directories so the restore works even if the path is new.
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| ApiError::RestoreFailed {
+                reason: format!("failed to create parent directories: {e}"),
+            })?;
+    }
+
+    // Write to a sibling temp file in the same directory, then rename
+    // atomically — same filesystem guarantees rename is atomic on Linux.
+    let tmp_path = dest.with_extension(format!(
+        "argus-restore-{}.tmp",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+
+    tokio::fs::write(&tmp_path, &content)
+        .await
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("failed to write temp file: {e}"),
+        })?;
+
+    if let Err(e) = tokio::fs::rename(&tmp_path, &dest).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(ApiError::RestoreFailed {
+            reason: format!("failed to rename temp file to destination: {e}"),
+        });
+    }
+
+    Ok(Json(RestoreFileResponse {
+        bytes_written: content.len() as u64,
     }))
 }
 

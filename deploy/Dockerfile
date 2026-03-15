@@ -1,15 +1,17 @@
-# Argus supervisor — drop-in container instrumentation layer.
+# Argus supervisor + API — traced Claude Code environment.
 #
-# Usage as a base layer (zero-code instrumentation):
-#   FROM your-app-image
-#   COPY --from=argus-supervisor /usr/local/bin/supervisor /usr/local/bin/supervisor
-#   COPY --from=argus-supervisor /usr/local/bin/mitmdump /usr/local/bin/mitmdump
-#   ENTRYPOINT ["supervisor", "--"]
-#   CMD ["your-original-command"]
+# Build:
+#   docker build -t argus-claude -f deploy/Dockerfile .
 #
-# Usage standalone:
-#   docker run --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-#     argus-supervisor -- your-command
+# Run:
+#   docker run -it --rm --name argus-claude \
+#     --cap-add SYS_PTRACE \
+#     --security-opt seccomp=unconfined \
+#     --security-opt apparmor=unconfined \
+#     -v ~/.claude:/home/agent/.claude \
+#     -v ~/.claude.json:/home/agent/.claude.json \
+#     -p 9090:9090 -p 8000:8000 \
+#     argus-claude
 
 FROM rust:1.94-bookworm AS builder
 
@@ -18,23 +20,78 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY scripts/ scripts/
 
-RUN cargo build --release --bin supervisor
+RUN cargo build --release --bin supervisor --bin argus-api
 
+# ── runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
+    git \
     python3-minimal \
     python3-pip \
     pipx \
     && rm -rf /var/lib/apt/lists/*
 
-# mitmproxy for TLS interception (supervisor spawns mitmdump automatically)
+# Node.js (Claude Code requires >= 18)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# mitmproxy for TLS interception
 RUN pipx install mitmproxy
 ENV PATH="/root/.local/bin:${PATH}"
 
-COPY --from=builder /build/target/release/supervisor /usr/local/bin/supervisor
+# Agent user (supervisor drops to uid 1000 via run_as)
+RUN useradd -m -s /bin/bash -u 1000 agent
 
-# Supervisor runs as PID 1, traces the CMD, exits when agent exits.
-VOLUME ["/data"]
-ENTRYPOINT ["/usr/local/bin/supervisor", "--"]
+COPY --from=builder /build/target/release/supervisor /usr/local/bin/supervisor
+COPY --from=builder /build/target/release/argus-api /usr/local/bin/argus-api
+
+# Supervisor config: full proxy capture, unsafe certs, API on 9090
+RUN cat > /etc/argus.yaml <<'EOF'
+workspace_dir: /workspace
+data_dir: /data
+listen_addr: "0.0.0.0:9090"
+run_as:
+  uid: 1000
+tls:
+  proxy_mode: env
+  upstream_insecure: true
+tree:
+  batch_size: 1
+capture:
+  content:
+    paths:
+      - "/workspace/**"
+EOF
+
+RUN mkdir -p /data /workspace && chown -R agent:agent /workspace
+
+VOLUME ["/data", "/workspace"]
+WORKDIR /workspace
+
+EXPOSE 9090 8000
+
+COPY <<'ENTRY' /entrypoint.sh
+#!/bin/bash
+set -eu
+
+# Start argus-api in background (connects to supervisor WS on :9090)
+argus-api \
+  --supervisor 127.0.0.1:9090 \
+  --listen 0.0.0.0:8000 \
+  --db /data/events.db \
+  --event-log-dir /data/events \
+  2>/data/api.log &
+
+exec supervisor --config /etc/argus.yaml -- "$@"
+ENTRY
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["claude", "--dangerously-skip-permissions"]
