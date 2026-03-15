@@ -369,7 +369,7 @@ pub async fn restore_file_handler(
         }
     })?;
 
-    let cas = state.cas();
+    let cas = state.cas().clone();
     let content = tokio::task::spawn_blocking(move || cas.get(&hash))
         .await
         .map_err(|e| ApiError::RestoreFailed {

@@ -9,7 +9,7 @@ use anyhow::Result;
 use tracing::event;
 use tracing::Level;
 
-use crate::cas::{Cas, ContentHash, LocalCas};
+use crate::cas::{ContentHash, LocalCas};
 use crate::pipeline::captured::{CapturedContent, CapturedEvent};
 use crate::pipeline::classified::Classification;
 use crate::snapshot::MerkleTree;
