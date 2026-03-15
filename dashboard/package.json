@@ -34,14 +34,14 @@
     "typescript": "^5.8.2"
   },
   "simple-git-hooks": {
-    "pre-commit": "bunx lint-staged"
+    "pre-commit": "cd dashboard && bunx lint-staged"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,astro}": [
-      "biome check --write --no-errors-on-unmatched"
+      "bunx biome check --write --no-errors-on-unmatched"
     ],
     "*.{json,css,md}": [
-      "biome format --write --no-errors-on-unmatched"
+      "bunx biome format --write --no-errors-on-unmatched"
     ]
   }
 }
