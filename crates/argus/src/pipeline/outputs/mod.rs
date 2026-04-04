@@ -6,8 +6,10 @@
 //! discarded so that one failing destination does not block others.
 
 pub(crate) mod file;
+pub(crate) mod stdout;
 
 pub(crate) use file::FileOutput;
+pub(crate) use stdout::StdoutOutput;
 
 use tracing::{Level, event};
 

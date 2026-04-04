@@ -6,7 +6,7 @@
 //! `Bridge` struct.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::Utc;
 
 use std::path::PathBuf;
@@ -16,8 +16,8 @@ use crate::api::state::{SharedState, resolve_approval};
 use crate::api::types::{
     ApproveResponse, DenyResponse, HealthResponse, PauseResponse, PendingAction,
     PendingApprovalsResponse, RestoreFileRequest, RestoreFileResponse, RestoreRequest,
-    RestoreResponse, ResumeResponse, RulesAppliedResponse, StatusResponse, TreeFileEntry,
-    TreeSnapshotResponse,
+    RestoreResponse, ResumeResponse, RulesAppliedResponse, SnapshotsResponse, StatusResponse,
+    TreeFileEntry, TreeQueryParams, TreeSnapshotResponse,
 };
 use crate::cas::ContentHash;
 use crate::config::RuleSet;
@@ -244,10 +244,56 @@ pub async fn delete_rule_handler(
     }))
 }
 
-/// `GET /tree` — current filesystem tree snapshot.
+/// `GET /tree` — filesystem tree snapshot.
+///
+/// Without query parameters, returns the current live tree. With
+/// `?seq=N`, loads the tree at that event sequence from CAS.
+///
+/// # Errors
+///
+/// Returns 404 if no tree hash exists for the given seq, or 500
+/// if the CAS load fails.
 pub async fn tree_handler(
     State(state): State<SharedState>,
-) -> Json<TreeSnapshotResponse> {
+    Query(params): Query<TreeQueryParams>,
+) -> Result<Json<TreeSnapshotResponse>, ApiError> {
+    if let Some(seq) = params.seq {
+        let tree_hash_str = state.get_tree_hash(seq).ok_or(ApiError::SeqNotFound { seq })?;
+
+        let tree_hash = ContentHash::try_from(tree_hash_str.clone()).map_err(|e| {
+            ApiError::RestoreFailed {
+                reason: format!("invalid tree hash: {e}"),
+            }
+        })?;
+
+        let cas = state.cas().clone();
+        let tree = tokio::task::spawn_blocking(move || {
+            crate::snapshot::MerkleTree::load(&tree_hash, cas.as_ref())
+        })
+        .await
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("task panicked: {e}"),
+        })?
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("tree load failed: {e}"),
+        })?;
+
+        let files: Vec<TreeFileEntry> = tree
+            .files()
+            .map(|(path, hash)| TreeFileEntry {
+                path: path.display().to_string(),
+                hash: hash.to_string(),
+            })
+            .collect();
+
+        return Ok(Json(TreeSnapshotResponse {
+            tree_hash: tree_hash_str,
+            seq,
+            file_count: tree.file_count(),
+            files,
+        }));
+    }
+
     let tree = state.load_tree();
     let files: Vec<TreeFileEntry> = tree
         .files()
@@ -257,11 +303,52 @@ pub async fn tree_handler(
         })
         .collect();
 
-    Json(TreeSnapshotResponse {
+    Ok(Json(TreeSnapshotResponse {
         tree_hash: tree.root_hash().to_string(),
         seq: state.event_seq(),
         file_count: tree.file_count(),
         files,
+    }))
+}
+
+/// `GET /snapshots` — list all browsable snapshots.
+pub async fn snapshots_handler(
+    State(state): State<SharedState>,
+) -> Json<SnapshotsResponse> {
+    let snapshots = state.load_snapshots();
+    Json(SnapshotsResponse {
+        snapshots: (**snapshots).clone(),
+    })
+}
+
+/// `GET /cas/{hash}` — raw file content from CAS.
+///
+/// Returns UTF-8 text content. Binary files are not supported.
+///
+/// # Errors
+///
+/// Returns 400 if the hash is malformed, 404/500 if the CAS
+/// lookup fails or the content is not valid UTF-8.
+pub async fn cas_content_handler(
+    State(state): State<SharedState>,
+    Path(hash_str): Path<String>,
+) -> Result<String, ApiError> {
+    let hash = ContentHash::try_from(hash_str).map_err(|e| ApiError::InvalidBody {
+        reason: format!("invalid hash: {e}"),
+    })?;
+
+    let cas = state.cas().clone();
+    let content = tokio::task::spawn_blocking(move || cas.get(&hash))
+        .await
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("CAS task panicked: {e}"),
+        })?
+        .map_err(|e| ApiError::RestoreFailed {
+            reason: format!("CAS lookup failed: {e}"),
+        })?;
+
+    String::from_utf8(content).map_err(|_| ApiError::RestoreFailed {
+        reason: "content is not valid UTF-8".into(),
     })
 }
 

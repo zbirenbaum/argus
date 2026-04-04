@@ -23,8 +23,8 @@ use super::flow_parser::{parse_flow_line, process_flow, process_flow_detached};
 /// Result of processing a single flow into event payloads.
 #[derive(Debug)]
 pub struct FlowEvents {
-    /// The HTTP request event payload.
-    pub request: HttpRequest,
+    /// The HTTP request event payload, absent for response-only flows.
+    pub request: Option<HttpRequest>,
     /// The HTTP response event payload, if a response was captured.
     pub response: Option<HttpResponse>,
 }
@@ -213,7 +213,9 @@ impl FlowWatcher {
     pub fn into_event_payloads(flows: Vec<FlowEvents>) -> Vec<EventPayload> {
         let mut payloads = Vec::with_capacity(flows.len() * 2);
         for flow in flows {
-            payloads.push(EventPayload::HttpRequest(flow.request));
+            if let Some(req) = flow.request {
+                payloads.push(EventPayload::HttpRequest(req));
+            }
             if let Some(resp) = flow.response {
                 payloads.push(EventPayload::HttpResponse(resp));
             }
@@ -254,8 +256,8 @@ mod tests {
         let mut watcher = FlowWatcher::new(flow_path.clone());
         let first = watcher.process_new_flows(&bus, 42).unwrap();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].request.method, "GET");
-        assert_eq!(first[0].request.pid, 42);
+        assert_eq!(first[0].request.as_ref().unwrap().method, "GET");
+        assert_eq!(first[0].request.as_ref().unwrap().pid, 42);
         assert!(first[0].response.is_some());
 
         use std::io::Write;
@@ -267,7 +269,7 @@ mod tests {
 
         let second = watcher.process_new_flows(&bus, 42).unwrap();
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].request.method, "POST");
+        assert_eq!(second[0].request.as_ref().unwrap().method, "POST");
     }
 
     #[test]
@@ -310,24 +312,26 @@ mod tests {
 
         let mut watcher = FlowWatcher::new(flow_path);
         let flows = watcher.process_new_flows(&bus, 1).unwrap();
-        assert!(flows[0].request.body_hash.is_some());
+        assert!(flows[0].request.as_ref().unwrap().body_hash.is_some());
     }
 
     #[test]
     fn into_event_payloads_creates_correct_variants() {
         let events = vec![FlowEvents {
-            request: HttpRequest {
+            request: Some(HttpRequest {
                 pid: 1,
                 method: "GET".into(),
                 url: "https://x.com".into(),
+                flow_id: None,
                 headers_hash: None,
                 body_hash: None,
                 headers: None,
                 body: None,
-            },
+            }),
             response: Some(HttpResponse {
                 pid: 1,
                 status: 200,
+                flow_id: None,
                 headers_hash: None,
                 body_hash: None,
                 headers: None,
@@ -344,20 +348,41 @@ mod tests {
     #[test]
     fn no_response_yields_request_only() {
         let events = vec![FlowEvents {
-            request: HttpRequest {
+            request: Some(HttpRequest {
                 pid: 1,
                 method: "GET".into(),
                 url: "https://x.com".into(),
+                flow_id: None,
                 headers_hash: None,
                 body_hash: None,
                 headers: None,
                 body: None,
-            },
+            }),
             response: None,
         }];
 
         let payloads = FlowWatcher::into_event_payloads(events);
         assert_eq!(payloads.len(), 1);
+    }
+
+    #[test]
+    fn response_only_yields_response_only() {
+        let events = vec![FlowEvents {
+            request: None,
+            response: Some(HttpResponse {
+                pid: 1,
+                status: 200,
+                flow_id: Some("test-flow".into()),
+                headers_hash: None,
+                body_hash: None,
+                headers: None,
+                body: None,
+            }),
+        }];
+
+        let payloads = FlowWatcher::into_event_payloads(events);
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(&payloads[0], EventPayload::HttpResponse(_)));
     }
 
     #[test]

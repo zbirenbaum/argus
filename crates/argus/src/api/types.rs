@@ -223,6 +223,34 @@ pub struct TreeFileEntry {
     pub hash: String,
 }
 
+/// Query parameters for `GET /tree`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TreeQueryParams {
+    /// Event sequence number to look up a past tree state.
+    #[serde(default)]
+    pub seq: Option<u64>,
+}
+
+/// Browsable snapshot recorded at time or change boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotEntry {
+    /// Event sequence number at snapshot time.
+    pub seq: u64,
+    /// ISO 8601 wall-clock timestamp.
+    pub ts_wall: String,
+    /// CAS root tree hash for this snapshot.
+    pub tree_hash: String,
+    /// Number of tracked files at snapshot time.
+    pub file_count: usize,
+}
+
+/// Response body for `GET /snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotsResponse {
+    /// All recorded snapshots, oldest first.
+    pub snapshots: Vec<SnapshotEntry>,
+}
+
 /// Internal pending approval stored in shared state.
 #[derive(Debug)]
 pub struct PendingApprovalEntry {

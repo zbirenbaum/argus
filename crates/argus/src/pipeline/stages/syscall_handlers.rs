@@ -143,8 +143,17 @@ async fn handle_openat(
 
 fn handle_close(stage: &ClassifyStage, pid: Pid, args: SyscallArgs) -> Classification {
     let fd = args.arg0 as i32;
+    // Capture pipe inode before removing the fd so we can update the registry.
+    let pipe_inode = stage.fd_tables.get(&pid)
+        .and_then(|t| match t.get(fd) {
+            Some(FdTarget::Pipe { inode, .. }) => Some(*inode),
+            _ => None,
+        });
     if let Some(mut table) = stage.fd_tables.get_mut(&pid) {
         table.remove(fd);
+    }
+    if let Some(inode) = pipe_inode {
+        stage.pipe_registry.lock().on_close(pid.as_raw() as u32, fd, inode);
     }
     Classification::FileClose { fd }
 }

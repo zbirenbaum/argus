@@ -39,9 +39,9 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    init_tracing();
     let mut config = load_config(&cli)?;
     config.validate()?;
+    init_tracing(&config.data_dir)?;
 
     event!(
         name: "supervisor.start",
@@ -119,16 +119,35 @@ fn main() -> Result<()> {
 }
 
 
-/// Initializes the tracing subscriber with JSON output to stderr.
-fn init_tracing() {
+/// Initializes the tracing subscriber with JSON output to a log file.
+///
+/// Writes to `{data_dir}/supervisor.log`. Creates the directory if needed.
+///
+/// # Errors
+///
+/// Returns an error if the log file cannot be created.
+fn init_tracing(data_dir: &std::path::Path) -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let log_path = data_dir.join("supervisor.log");
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
-        .with_writer(std::io::stderr)
+        .with_writer(log_file)
         .init();
+
+    Ok(())
 }
 
 /// Loads and merges config from the YAML file with CLI overrides.

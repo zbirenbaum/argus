@@ -14,7 +14,7 @@ use nix::unistd::Pid;
 
 use crate::cas::ContentHash;
 use crate::state::fd_table::{FdTarget, PipeEnd};
-use crate::state::{FdTable, PipeRegistry, PtyRegistry};
+use crate::state::{FdTable, PipeRegistry, ProcessTree, PtyRegistry};
 use crate::pipeline::classified::{ClassifiedEvent, Classification};
 use crate::pipeline::ptrace_thread::PtraceHandle;
 use crate::pipeline::raw_stop::{RawSyscallStop, StopType};
@@ -40,6 +40,7 @@ pub struct ClassifyStage {
     pub fd_tables: Arc<DashMap<Pid, FdTable>>,
     pub pipe_registry: Arc<parking_lot::Mutex<PipeRegistry>>,
     pub pty_registry: Arc<parking_lot::Mutex<PtyRegistry>>,
+    pub process_tree: parking_lot::Mutex<ProcessTree>,
     /// Syscall entries awaiting their exit stop for fd/state updates.
     pub pending: DashMap<Pid, PendingEntry>,
     /// Whether transparent connect() rewriting is active.
@@ -67,6 +68,7 @@ impl ClassifyStage {
     ) -> Self {
         Self {
             handle, fd_tables, pipe_registry, pty_registry,
+            process_tree: parking_lot::Mutex::new(ProcessTree::new()),
             pending: DashMap::new(),
             transparent_mode, proxy_addr, file_state,
         }
@@ -87,7 +89,7 @@ impl ClassifyStage {
                 Classification::ProcessFork { parent: *parent, child: *child }
             }
             StopType::Exec { pid: p } => {
-                self.on_exec(*p)
+                self.on_program_replace(*p)
             }
             StopType::Exit { pid: p, exit_code } => {
                 self.on_exit(*p);
@@ -150,6 +152,9 @@ impl ClassifyStage {
                 let actual_new_fd = new_fd.unwrap_or(return_value as i32);
                 if let Some(mut table) = self.fd_tables.get_mut(&pid) {
                     table.dup(old_fd, actual_new_fd);
+                    self.pipe_registry.lock().on_dup(
+                        pid.as_raw() as u32, old_fd, actual_new_fd, &table,
+                    );
                 }
                 Classification::FdDup { old_fd, new_fd: actual_new_fd }
             }
@@ -198,30 +203,43 @@ impl ClassifyStage {
         Classification::PipeCreate { read_fd, write_fd, inode }
     }
 
-    /// Copy the parent's fd table to the new child on fork.
+    /// Copy the parent's fd table to the new child on fork and update process tree.
     pub fn on_fork(&self, parent: Pid, child: Pid) {
         let cloned = self.fd_tables.get(&parent).map(|t| t.clone_for_fork());
         if let Some(table) = cloned {
+            self.pipe_registry.lock().on_fork(child.as_raw() as u32, &table);
             self.fd_tables.insert(child, table);
         }
+
+        let parent_pid = parent.as_raw() as u32;
+        let child_pid = child.as_raw() as u32;
+        let mut tree = self.process_tree.lock();
+        let (binary, argv, cwd) = tree.get_process(parent_pid)
+            .map(|p| (p.binary.clone(), p.argv.clone(), p.cwd.clone()))
+            .unwrap_or_default();
+        tree.add_process(child_pid, parent_pid, binary, argv, cwd, FdTable::new());
     }
 
-    /// Drop cloexec fds after exec and classify the exec stop.
+    /// Drop cloexec fds after program replacement and classify the stop.
     ///
     /// Binary and argv are read from /proc directly since the old image
-    /// has already been replaced by execve by the time we see this stop.
-    pub fn on_exec(&self, pid: Pid) -> Classification {
+    /// has already been replaced by the time we see this stop.
+    pub fn on_program_replace(&self, pid: Pid) -> Classification {
         if let Some(mut table) = self.fd_tables.get_mut(&pid) {
             table.close_cloexec();
         }
         let binary = read_proc_exe(pid);
         let argv = read_cmdline(pid);
+        self.process_tree.lock().update_on_program_replace(
+            pid.as_raw() as u32, binary.clone(), argv.clone(),
+        );
         Classification::ProcessExec { binary, argv, envp: Vec::new() }
     }
 
-    /// Remove the fd table entry when a process exits.
+    /// Remove the fd table entry when a process exits and update process tree.
     pub fn on_exit(&self, pid: Pid) {
         self.fd_tables.remove(&pid);
+        self.process_tree.lock().mark_exited(pid.as_raw() as u32);
     }
 
     /// Stream-compatible classification.

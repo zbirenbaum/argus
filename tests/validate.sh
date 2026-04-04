@@ -40,8 +40,9 @@ RESULTS=()
 # --- Helpers ---
 
 run_supervisor() {
-    # Run supervisor, capture stdout (events) and log stderr.
-    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" "$@" 2>/tmp/supervisor_debug.log
+    # Run supervisor, capture stdout events (filter out non-JSON child output).
+    "$SUPERVISOR" --agent-id "validate-$$" --config "$TEST_CONFIG" "$@" 2>/tmp/supervisor_debug.log \
+        | grep --line-buffered '^\{' || true
 }
 
 assert_event_type() {
@@ -977,7 +978,7 @@ print(f'zombies={zombies}')
 
     # Verify we got exit events for the child processes.
     local events
-    events=$(cat "$events_file")
+    events=$(grep '^\{' "$events_file" || true)
     local exit_count
     exit_count=$(echo "$events" | jq -s '[.[] | select(.type == "exit")] | length')
     if [ "$exit_count" -lt 10 ]; then

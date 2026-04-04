@@ -1,5 +1,7 @@
-import { createMemo, createSignal } from "solid-js";
+import type { SnapshotEntry, TreeSnapshotFile } from "@lib/api";
+import { fetchCasContent, fetchSnapshots, fetchTreeAt } from "@lib/api";
 import { events } from "@stores/events.store";
+import { createMemo, createSignal } from "solid-js";
 
 // --- Types ---
 
@@ -42,6 +44,17 @@ const [selectedVersionIdx, setSelectedVersionIdx] = createSignal<number | null>(
 const [compareVersionIdx, setCompareVersionIdx] = createSignal<number | null>(null);
 const [workspaceRoot, setWorkspaceRoot] = createSignal<string | null>(null);
 
+// --- Snapshot browsing state ---
+
+/** 'live' shows real-time event-derived tree; a number selects a snapshot seq. */
+const [snapshotMode, setSnapshotMode] = createSignal<"live" | number>("live");
+const [snapshots, setSnapshots] = createSignal<SnapshotEntry[]>([]);
+const [snapshotTreeFiles, setSnapshotTreeFiles] = createSignal<TreeSnapshotFile[] | null>(null);
+const [snapshotFileContent, setSnapshotFileContent] = createSignal<string | null>(null);
+const [snapshotFileHash, setSnapshotFileHash] = createSignal<string | null>(null);
+
+let snapshotPollInterval: ReturnType<typeof setInterval> | null = null;
+
 // --- Write coalescing ---
 
 /** Threshold in ms — writes to the same path within this window are one version. */
@@ -60,10 +73,10 @@ function coalesceWrites(versions: Version[]): Version[] {
   if (versions.length <= 1) return versions;
 
   const result: Version[] = [];
-  let burstEnd = versions[0]!;
+  let burstEnd = versions[0] as Version;
 
   for (let i = 1; i < versions.length; i++) {
-    const cur = versions[i]!;
+    const cur = versions[i] as Version;
     const gap = parseTs(cur.ts_wall) - parseTs(burstEnd.ts_wall);
     if (gap <= COALESCE_MS) {
       // Same burst — advance to this write (keep the latest)
@@ -81,6 +94,7 @@ function coalesceWrites(versions: Version[]): Version[] {
 // --- Derived state ---
 
 /** Build a map of path → FileEntry from the event stream. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: event processing handles many event types
 export const fileMap = createMemo<Map<string, FileEntry>>(() => {
   const root = workspaceRoot();
   const map = new Map<string, FileEntry>();
@@ -88,10 +102,10 @@ export const fileMap = createMemo<Map<string, FileEntry>>(() => {
   // Auto-detect workspace from agent_start event
   for (const event of events) {
     if (event.type === "agent_start") {
-      const summary = event["config_summary"] as string | undefined;
+      const summary = event.config_summary;
       if (summary && !root) {
         const match = summary.match(/workspace=([^\s,]+)/);
-        if (match) setWorkspaceRoot(match[1]!);
+        if (match?.[1]) setWorkspaceRoot(match[1]);
       }
       break;
     }
@@ -110,9 +124,9 @@ export const fileMap = createMemo<Map<string, FileEntry>>(() => {
       const version: Version = {
         seq: event.seq,
         ts_wall: event.ts_wall,
-        afterHash: (event["after_hash"] as string) ?? null,
-        data: (event["data"] as string) ?? null,
-        size: Number(event["size"] ?? 0),
+        afterHash: event.after_hash ?? null,
+        data: event.data ?? null,
+        size: Number(event.size ?? 0),
         fromRename: false,
       };
 
@@ -124,10 +138,11 @@ export const fileMap = createMemo<Map<string, FileEntry>>(() => {
       entry.versions.push(version);
       entry.deleted = false;
     } else if (type === "rename") {
-      const oldPath = event["old_path"] as string | undefined;
-      const newPath = event["new_path"] as string | undefined;
+      const oldPath = event.old_path;
+      const newPath = event.new_path;
       if (!oldPath || !newPath) continue;
-      if (effectiveRoot && !newPath.startsWith(effectiveRoot) && !oldPath.startsWith(effectiveRoot)) continue;
+      if (effectiveRoot && !newPath.startsWith(effectiveRoot) && !oldPath.startsWith(effectiveRoot))
+        continue;
 
       let targetEntry = map.get(newPath);
       if (!targetEntry) {
@@ -185,6 +200,7 @@ export const fileMap = createMemo<Map<string, FileEntry>>(() => {
 });
 
 /** Build a tree structure from the file map for sidebar rendering. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: tree building is inherently recursive
 export const fileTree = createMemo<TreeNode>(() => {
   const root = workspaceRoot() ?? "/";
   const map = fileMap();
@@ -199,7 +215,7 @@ export const fileTree = createMemo<TreeNode>(() => {
   };
 
   for (const entry of map.values()) {
-    const relPath = entry.path.startsWith(root + "/")
+    const relPath = entry.path.startsWith(`${root}/`)
       ? entry.path.slice(root.length + 1)
       : entry.path.slice(root.length);
     if (!relPath) continue;
@@ -208,12 +224,12 @@ export const fileTree = createMemo<TreeNode>(() => {
     let current = rootNode;
 
     for (let i = 0; i < parts.length; i++) {
-      const part = parts[i]!;
+      const part = parts[i] as string;
       const isLast = i === parts.length - 1;
 
       let child = current.children.find((c) => c.name === part);
       if (!child) {
-        const childPath = root + "/" + parts.slice(0, i + 1).join("/");
+        const childPath = `${root}/${parts.slice(0, i + 1).join("/")}`;
         child = {
           name: part,
           path: childPath,
@@ -294,7 +310,167 @@ export function clearFileSelection() {
   setCompareVersionIdx(null);
 }
 
-export { selectedPath, selectedVersionIdx, compareVersionIdx, workspaceRoot, setWorkspaceRoot };
+export {
+  compareVersionIdx,
+  selectedPath,
+  selectedVersionIdx,
+  setWorkspaceRoot,
+  snapshotFileContent,
+  snapshotFileHash,
+  snapshotMode,
+  snapshots,
+  workspaceRoot,
+};
+
+// --- Snapshot browsing ---
+
+/** Build a tree structure from snapshot API files for sidebar rendering. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: tree building is inherently recursive
+export const snapshotFileTree = createMemo<TreeNode | null>(() => {
+  const files = snapshotTreeFiles();
+  if (!files) return null;
+
+  const root = workspaceRoot() ?? "/";
+  const rootNode: TreeNode = {
+    name: root.split("/").pop() || root,
+    path: root,
+    isDir: true,
+    deleted: false,
+    children: [],
+    fileEntry: null,
+  };
+
+  for (const file of files) {
+    const relPath = file.path.startsWith(`${root}/`)
+      ? file.path.slice(root.length + 1)
+      : file.path.startsWith(root)
+        ? file.path.slice(root.length)
+        : file.path;
+    if (!relPath) continue;
+
+    const parts = relPath.split("/");
+    let current = rootNode;
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i] as string;
+      const isLast = i === parts.length - 1;
+
+      let child = current.children.find((c) => c.name === part);
+      if (!child) {
+        const childPath = `${root}/${parts.slice(0, i + 1).join("/")}`;
+        child = {
+          name: part,
+          path: childPath,
+          isDir: !isLast,
+          deleted: false,
+          children: [],
+          fileEntry: null,
+        };
+        current.children.push(child);
+      }
+
+      if (isLast) {
+        child.fileEntry = {
+          path: file.path,
+          versions: [],
+          renames: [],
+          deleted: false,
+        };
+        child.isDir = false;
+      }
+
+      current = child;
+    }
+  }
+
+  function sortTree(node: TreeNode) {
+    node.children.sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    for (const child of node.children) {
+      sortTree(child);
+    }
+  }
+  sortTree(rootNode);
+
+  return rootNode;
+});
+
+/** Snapshot file hash lookup by path. */
+const snapshotHashMap = createMemo<Map<string, string>>(() => {
+  const files = snapshotTreeFiles();
+  if (!files) return new Map();
+  const map = new Map<string, string>();
+  for (const f of files) {
+    map.set(f.path, f.hash);
+  }
+  return map;
+});
+
+/** Start polling for snapshot list updates. */
+export async function startSnapshotPolling() {
+  const poll = async () => {
+    try {
+      const snaps = await fetchSnapshots();
+      setSnapshots(snaps);
+    } catch {
+      // ignore fetch errors — dashboard may load before supervisor
+    }
+  };
+  await poll();
+  snapshotPollInterval = setInterval(poll, 5000);
+}
+
+/** Stop snapshot polling. */
+export function stopSnapshotPolling() {
+  if (snapshotPollInterval) {
+    clearInterval(snapshotPollInterval);
+    snapshotPollInterval = null;
+  }
+}
+
+/** Switch to a snapshot or back to live mode. */
+export async function selectSnapshot(mode: "live" | number) {
+  if (mode === "live") {
+    setSnapshotMode("live");
+    setSnapshotTreeFiles(null);
+    setSnapshotFileContent(null);
+    setSnapshotFileHash(null);
+    clearFileSelection();
+    return;
+  }
+  setSnapshotMode(mode);
+  setSnapshotFileContent(null);
+  setSnapshotFileHash(null);
+  clearFileSelection();
+  try {
+    const tree = await fetchTreeAt(mode);
+    setSnapshotTreeFiles(tree.files);
+  } catch {
+    setSnapshotTreeFiles(null);
+  }
+}
+
+/** Select a file in snapshot browsing mode and fetch its content from CAS. */
+export async function selectSnapshotFile(path: string) {
+  setSelectedPath(path);
+  setSelectedVersionIdx(null);
+  setCompareVersionIdx(null);
+  const hash = snapshotHashMap().get(path);
+  if (!hash) {
+    setSnapshotFileContent(null);
+    setSnapshotFileHash(null);
+    return;
+  }
+  setSnapshotFileHash(hash);
+  try {
+    const content = await fetchCasContent(hash);
+    setSnapshotFileContent(content);
+  } catch {
+    setSnapshotFileContent(null);
+  }
+}
 
 // --- Diff utility ---
 
@@ -309,6 +485,7 @@ export interface DiffLine {
 const DIFF_LINE_LIMIT = 5000;
 
 /** LCS-based unified diff. O(n*m) — guarded to avoid freezing on large files. */
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: diff algorithm is inherently complex
 export function computeDiff(oldText: string, newText: string): DiffLine[] {
   const oldLines = oldText.split("\n");
   const newLines = newText.split("\n");
@@ -317,7 +494,12 @@ export function computeDiff(oldText: string, newText: string): DiffLine[] {
 
   if (m > DIFF_LINE_LIMIT || n > DIFF_LINE_LIMIT) {
     return [
-      { type: "remove", line: `[file too large for inline diff (${m} / ${n} lines)]`, oldLineNo: null, newLineNo: null },
+      {
+        type: "remove",
+        line: `[file too large for inline diff (${m} / ${n} lines)]`,
+        oldLineNo: null,
+        newLineNo: null,
+      },
     ];
   }
 
@@ -326,9 +508,9 @@ export function computeDiff(oldText: string, newText: string): DiffLine[] {
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
       if (oldLines[i - 1] === newLines[j - 1]) {
-        dp[i]![j] = dp[i - 1]![j - 1]! + 1;
+        (dp[i] as number[])[j] = (dp[i - 1]?.[j - 1] ?? 0) + 1;
       } else {
-        dp[i]![j] = Math.max(dp[i - 1]![j]!, dp[i]![j - 1]!);
+        (dp[i] as number[])[j] = Math.max(dp[i - 1]?.[j] ?? 0, dp[i]?.[j - 1] ?? 0);
       }
     }
   }
@@ -339,14 +521,14 @@ export function computeDiff(oldText: string, newText: string): DiffLine[] {
 
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && oldLines[i - 1] === newLines[j - 1]) {
-      result.push({ type: "same", line: oldLines[i - 1]!, oldLineNo: i, newLineNo: j });
+      result.push({ type: "same", line: oldLines[i - 1] ?? "", oldLineNo: i, newLineNo: j });
       i--;
       j--;
-    } else if (j > 0 && (i === 0 || dp[i]![j - 1]! >= dp[i - 1]![j]!)) {
-      result.push({ type: "add", line: newLines[j - 1]!, oldLineNo: null, newLineNo: j });
+    } else if (j > 0 && (i === 0 || (dp[i]?.[j - 1] ?? 0) >= (dp[i - 1]?.[j] ?? 0))) {
+      result.push({ type: "add", line: newLines[j - 1] ?? "", oldLineNo: null, newLineNo: j });
       j--;
     } else {
-      result.push({ type: "remove", line: oldLines[i - 1]!, oldLineNo: i, newLineNo: null });
+      result.push({ type: "remove", line: oldLines[i - 1] ?? "", oldLineNo: i, newLineNo: null });
       i--;
     }
   }

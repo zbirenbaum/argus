@@ -25,7 +25,7 @@ Opinionated conventions for Bun + TypeScript, with SolidJS + Astro context.
 
 ```json
 {
-  "name": "eden",
+  "name": "argus",
   "private": true,
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
@@ -46,7 +46,7 @@ Opinionated conventions for Bun + TypeScript, with SolidJS + Astro context.
 ### Canonical Folder Tree
 
 ```
-eden/
+argus/
   apps/
     web/                    # Astro + SolidJS frontend
       src/
@@ -83,7 +83,7 @@ eden/
 
 ```json
 {
-  "name": "@eden/types",
+  "name": "@argus/types",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -100,8 +100,8 @@ Consumer `package.json`:
 ```json
 {
   "dependencies": {
-    "@eden/types": "workspace:*",
-    "@eden/utils": "workspace:*"
+    "@argus/types": "workspace:*",
+    "@argus/utils": "workspace:*"
   }
 }
 ```
@@ -225,7 +225,7 @@ packages/types/src/
   common.ts         # Utility types (Result<T>, Paginated<T>, etc.)
 ```
 
-- Cross-package types live in `packages/types/` — imported as `@eden/types`
+- Cross-package types live in `packages/types/` — imported as `@argus/types`
 - App-local types live in `apps/web/src/types/`
 - Component prop types are **co-located with the component**, not extracted to types/
 - API contract types live in `packages/types/src/api.ts` so frontend and backend share one definition
@@ -321,7 +321,7 @@ import { describe, it, expect } from "bun:test";
 
 ```json
 {
-  "name": "@eden/web",
+  "name": "@argus/web",
   "private": true,
   "type": "module",
   "scripts": {
@@ -361,8 +361,8 @@ import { createSignal } from "solid-js";
 import { z } from "zod";
 
 // 3. Internal workspace packages
-import type { User } from "@eden/types";
-import { formatDate } from "@eden/utils";
+import type { User } from "@argus/types";
+import { formatDate } from "@argus/utils";
 
 // 4. App-level aliases
 import { api } from "@lib/api";

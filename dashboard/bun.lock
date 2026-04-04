@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "eden-frontend",
+      "name": "argus-dashboard",
       "dependencies": {
         "@astrojs/solid-js": "^5.1.3",
         "astro": "^5.18.0",

@@ -21,9 +21,10 @@ use axum::routing::{get, post};
 use axum::routing::delete;
 
 use crate::api::routes::{
-    approve_handler, delete_rule_handler, deny_handler, get_rules_handler, health_handler,
-    pause_handler, pending_approvals_handler, restore_file_handler, restore_handler,
-    resume_handler, set_rules_handler, status_handler, tree_handler,
+    approve_handler, cas_content_handler, delete_rule_handler, deny_handler, get_rules_handler,
+    health_handler, pause_handler, pending_approvals_handler, restore_file_handler,
+    restore_handler, resume_handler, set_rules_handler, snapshots_handler, status_handler,
+    tree_handler,
 };
 use crate::api::state::SharedState;
 
@@ -39,6 +40,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/rules", get(get_rules_handler).post(set_rules_handler))
         .route("/rules/{index}", delete(delete_rule_handler))
         .route("/tree", get(tree_handler))
+        .route("/snapshots", get(snapshots_handler))
+        .route("/cas/{hash}", get(cas_content_handler))
         .route("/restore", post(restore_handler))
         .route("/restore/file", post(restore_file_handler))
         .route("/health", get(health_handler))

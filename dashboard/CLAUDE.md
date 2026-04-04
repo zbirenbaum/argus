@@ -1,4 +1,4 @@
-# Eden Frontend
+# Argus Dashboard
 
 ## Before Starting Any Task
 

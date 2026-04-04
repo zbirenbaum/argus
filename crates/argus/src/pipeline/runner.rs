@@ -54,6 +54,14 @@ struct CoreState {
     persist_batch_size: u64,
     /// CAS root hash from the most recent persist — what MerkleTree::load expects.
     last_cas_hash: Option<ContentHash>,
+    /// When the last browsable snapshot was recorded.
+    last_snapshot_time: Instant,
+    /// Tree mutations since the last browsable snapshot.
+    changes_since_snapshot: u64,
+    /// Time between automatic browsable snapshots (0 = disabled).
+    snapshot_interval: Duration,
+    /// Mutations between automatic browsable snapshots (0 = disabled).
+    snapshot_change_threshold: u64,
 }
 
 impl CoreState {
@@ -90,6 +98,46 @@ impl CoreState {
                 self.flush_tree();
                 self.last_tree_mutation = None;
             }
+        }
+    }
+
+    /// Record a browsable snapshot if a time or change threshold is met.
+    fn maybe_take_snapshot(&mut self) {
+        if self.changes_since_snapshot == 0 {
+            return;
+        }
+
+        let time_trigger = self.snapshot_interval > Duration::ZERO
+            && self.last_snapshot_time.elapsed() >= self.snapshot_interval;
+        let change_trigger = self.snapshot_change_threshold > 0
+            && self.changes_since_snapshot >= self.snapshot_change_threshold;
+
+        if !time_trigger && !change_trigger {
+            return;
+        }
+
+        // Ensure tree is persisted to CAS before recording the snapshot.
+        if self.dirty_since_persist > 0 {
+            self.flush_tree();
+        }
+
+        if let Some(ref cas_hash) = self.last_cas_hash {
+            let entry = crate::api::types::SnapshotEntry {
+                seq: self.last_seq,
+                ts_wall: chrono::Utc::now().to_rfc3339(),
+                tree_hash: cas_hash.to_string(),
+                file_count: self.tree.file_count(),
+            };
+            event!(
+                name: "pipeline.snapshot.recorded",
+                Level::INFO,
+                snapshot.seq = entry.seq,
+                snapshot.file_count = entry.file_count,
+                "browsable snapshot recorded at seq={{snapshot.seq}}",
+            );
+            self.shared.push_snapshot(entry);
+            self.changes_since_snapshot = 0;
+            self.last_snapshot_time = Instant::now();
         }
     }
 }
@@ -170,6 +218,8 @@ pub struct PipelineRunner {
     paused: Arc<AtomicBool>,
     shared: SharedState,
     persist_batch_size: u64,
+    snapshot_interval: Duration,
+    snapshot_change_threshold: u64,
 }
 
 /// Default idle timeout before tree flush — 5 seconds with no mutations.
@@ -192,11 +242,13 @@ impl PipelineRunner {
         paused: Arc<AtomicBool>,
         shared: SharedState,
         persist_batch_size: u64,
+        snapshot_interval: Duration,
+        snapshot_change_threshold: u64,
     ) -> Self {
         Self {
             ptrace, classify, policy_gate, capture,
             tree, stamp, bus, outputs, redact, recorder, paused, shared,
-            persist_batch_size,
+            persist_batch_size, snapshot_interval, snapshot_change_threshold,
         }
     }
 
@@ -236,6 +288,10 @@ impl PipelineRunner {
             dirty_since_persist: 0,
             persist_batch_size: self.persist_batch_size,
             last_cas_hash: None,
+            last_snapshot_time: Instant::now(),
+            changes_since_snapshot: 0,
+            snapshot_interval: self.snapshot_interval,
+            snapshot_change_threshold: self.snapshot_change_threshold,
         };
 
         // Wrap the oneshot in Option so the closure can take() it once.
@@ -244,22 +300,30 @@ impl PipelineRunner {
         // ── Core pipeline: unfold produces Event stream ──
         let events = futures::stream::unfold((core, core_tx), |(mut s, mut tx)| async move {
             loop {
-                // If a tree mutation is pending, race ptrace.next() against
-                // the idle-flush deadline so the snapshot is published even
-                // when the tracee is idle (e.g. sleeping with no syscalls).
-                let stop = if let Some(last) = s.last_tree_mutation {
-                    let remaining = s.tree_idle_flush.saturating_sub(last.elapsed());
-                    match tokio::time::timeout(remaining, s.ptrace.next()).await {
+                // Compute the minimum timeout across all pending timers:
+                // idle flush (5s after last mutation) and snapshot interval.
+                let mut timeout = Duration::MAX;
+                if let Some(last) = s.last_tree_mutation {
+                    timeout = timeout.min(s.tree_idle_flush.saturating_sub(last.elapsed()));
+                }
+                if s.changes_since_snapshot > 0 && s.snapshot_interval > Duration::ZERO {
+                    timeout = timeout.min(
+                        s.snapshot_interval.saturating_sub(s.last_snapshot_time.elapsed()),
+                    );
+                }
+
+                let stop = if timeout < Duration::MAX {
+                    match tokio::time::timeout(timeout, s.ptrace.next()).await {
                         Ok(Some(stop)) => stop,
                         Ok(None) => {
-                            // Stream ended.
                             if let Some(tx) = tx.take() { let _ = tx.send(s); }
                             return None;
                         }
                         Err(_) => {
-                            // Idle timeout elapsed — flush tree and retry.
-                            s.flush_tree();
-                            s.last_tree_mutation = None;
+                            // Timer fired — run both checks; each is a no-op
+                            // when its own condition is not met.
+                            s.maybe_idle_flush();
+                            s.maybe_take_snapshot();
                             continue;
                         }
                     }
@@ -295,6 +359,7 @@ impl PipelineRunner {
                         // Track mutation time for idle-flush of the snapshot.
                         if tree_hash.is_some() {
                             s.last_tree_mutation = Some(Instant::now());
+                            s.changes_since_snapshot += 1;
                         }
 
                         // Persist to CAS + update SharedState at batch
@@ -311,6 +376,9 @@ impl PipelineRunner {
                             s.dirty_since_persist = 0;
                             s.last_tree_mutation = None;
                         }
+
+                        // Check if change-count threshold triggers a snapshot.
+                        s.maybe_take_snapshot();
 
                         if let Some(evt) = s.stamp.stamp(captured, tree_hash) {
                             s.last_seq = evt.seq;

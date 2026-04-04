@@ -88,6 +88,8 @@ argus-api \
   --db /data/events.db \
   --event-log-dir /data/events \
   2>/data/api.log &
+API_PID=$!
+trap "kill $API_PID 2>/dev/null; wait $API_PID 2>/dev/null" EXIT
 
 exec supervisor --config /etc/argus.yaml -- "$@"
 ENTRY

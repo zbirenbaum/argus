@@ -1,3 +1,4 @@
+import { formatTimeMs as formatTime } from "@lib/format";
 import {
   clearSelection,
   events,
@@ -5,9 +6,8 @@ import {
   selectEvent,
   selectedSeq,
 } from "@stores/events.store";
-import { formatTimeMs as formatTime } from "@lib/format";
 import { cn } from "@utils/cn";
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { createMemo, createSignal, type JSX, onCleanup, onMount } from "solid-js";
 import { For, Match, Show, Switch } from "solid-js/web";
 import type { ArgusEvent } from "@/types/events";
 
@@ -104,33 +104,43 @@ function NetworkSidebar() {
   const [viewportHeight, setViewportHeight] = createSignal(0);
   const [filter, setFilter] = createSignal("");
 
-  // Build HTTP transactions: pair requests with responses
+  // Build HTTP transactions: pair requests with responses via flow_id
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: pairing logic requires many branches
   const transactions = createMemo<HttpTransaction[]>(() => {
     const netEvents = events.filter((e) => NET_TYPES.has(e.type));
-    const txns: HttpTransaction[] = [];
-    let i = 0;
-    while (i < netEvents.length) {
-      const ev = netEvents[i]!;
-      if (ev.type === "http_request") {
-        // Look ahead for a matching http_response (same pid, next event)
-        const next = netEvents[i + 1];
-        if (next && next.type === "http_response" && next.pid === ev.pid) {
-          txns.push({ request: ev, response: next });
-          i += 2;
-        } else {
-          txns.push({ request: ev, response: undefined });
-          i += 1;
-        }
-      } else if (ev.type === "http_response") {
-        // Orphaned response
-        txns.push({ request: ev, response: undefined });
-        i += 1;
-      } else {
-        // socket/connect/accept/tls_keys — show as standalone
-        txns.push({ request: ev, response: undefined });
-        i += 1;
+
+    // Index responses by flow_id for O(1) lookup
+    const responseByFlowId = new Map<string, ArgusEvent>();
+    for (const ev of netEvents) {
+      if (ev.type === "http_response" && typeof ev.flow_id === "string") {
+        responseByFlowId.set(ev.flow_id, ev);
       }
     }
+
+    const pairedResponseSeqs = new Set<number>();
+    const txns: HttpTransaction[] = [];
+
+    // First pass: pair requests with responses
+    for (const ev of netEvents) {
+      if (ev.type === "http_request") {
+        const flowId = ev.flow_id;
+        const matched = flowId ? responseByFlowId.get(flowId) : undefined;
+        if (matched) {
+          pairedResponseSeqs.add(matched.seq);
+        }
+        txns.push({ request: ev, response: matched });
+      }
+    }
+
+    // Second pass: orphaned responses and non-HTTP events
+    for (const ev of netEvents) {
+      if (ev.type === "http_response" && !pairedResponseSeqs.has(ev.seq)) {
+        txns.push({ request: ev, response: undefined });
+      } else if (ev.type !== "http_request" && ev.type !== "http_response") {
+        txns.push({ request: ev, response: undefined });
+      }
+    }
+
     return txns;
   });
 
@@ -138,8 +148,8 @@ function NetworkSidebar() {
     const q = filter().toLowerCase();
     if (!q) return transactions();
     return transactions().filter((txn) => {
-      const url = String(txn.request["url"] ?? "").toLowerCase();
-      const method = String(txn.request["method"] ?? txn.request.type).toLowerCase();
+      const url = String(txn.request.url ?? "").toLowerCase();
+      const method = String(txn.request.method ?? txn.request.type).toLowerCase();
       const host = url ? urlHost(url).toLowerCase() : "";
       return (
         url.includes(q) || method.includes(q) || host.includes(q) || txn.request.type.includes(q)
@@ -182,6 +192,7 @@ function NetworkSidebar() {
       {/* Filter bar */}
       <div class="flex items-center gap-2 border-b border-[hsl(var(--border))] px-3 py-2">
         <svg
+          aria-label="Search"
           class="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))]"
           viewBox="0 0 24 24"
           fill="none"
@@ -248,9 +259,9 @@ function NetworkSidebar() {
 
 function TransactionRow(props: { txn: HttpTransaction }) {
   const isHttpReq = () => props.txn.request.type === "http_request";
-  const method = () => String(props.txn.request["method"] ?? props.txn.request.type).toUpperCase();
-  const url = () => String(props.txn.request["url"] ?? "");
-  const status = () => (props.txn.response ? Number(props.txn.response["status"] ?? 0) : 0);
+  const method = () => String(props.txn.request.method ?? props.txn.request.type).toUpperCase();
+  const url = () => String(props.txn.request.url ?? "");
+  const status = () => (props.txn.response ? Number(props.txn.response.status ?? 0) : 0);
   const isSelected = () => {
     const seq = selectedSeq();
     return (
@@ -291,10 +302,17 @@ function TransactionRow(props: { txn: HttpTransaction }) {
         </span>
       </Show>
 
-      <Show when={isHttpReq() && status() > 0} fallback={<span class="w-10 shrink-0" />}>
-        <span class={cn("w-10 shrink-0 font-mono font-semibold", statusColor(status()))}>
-          {status()}
-        </span>
+      <Show when={isHttpReq()} fallback={<span class="w-10 shrink-0" />}>
+        <Show
+          when={status() > 0}
+          fallback={
+            <span class="w-10 shrink-0 text-[hsl(var(--muted-foreground))] italic">...</span>
+          }
+        >
+          <span class={cn("w-10 shrink-0 font-mono font-semibold", statusColor(status()))}>
+            {status()}
+          </span>
+        </Show>
       </Show>
 
       <Show
@@ -302,9 +320,9 @@ function TransactionRow(props: { txn: HttpTransaction }) {
         fallback={
           <span class="flex-1 truncate font-mono text-[hsl(var(--muted-foreground))]">
             {props.txn.request.type === "connect"
-              ? `${props.txn.request["remote_addr"]}:${props.txn.request["remote_port"]}`
+              ? `${props.txn.request.remote_addr}:${props.txn.request.remote_port}`
               : props.txn.request.type === "socket"
-                ? `${props.txn.request["domain"]} ${props.txn.request["sock_type"]}`
+                ? `${props.txn.request.domain} ${props.txn.request.sock_type}`
                 : ""}
           </span>
         }
@@ -371,17 +389,28 @@ function formatBody(raw: unknown): string {
 }
 
 function HttpRequestDetail(props: { event: ArgusEvent }) {
-  const method = () => String(props.event["method"] ?? "");
-  const url = () => String(props.event["url"] ?? "");
-  const reqHeaders = () => parseHeaders(props.event["headers"]);
-  const reqBody = () => props.event["body"] as string | undefined;
+  const method = () => String(props.event.method ?? "");
+  const url = () => String(props.event.url ?? "");
+  const reqHeaders = () => parseHeaders(props.event.headers);
+  const reqBody = () => props.event.body;
 
-  // Find matching response (next event with same pid)
+  // Find matching response via flow_id, fall back to positional
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: matching logic with fallback
   const matchingResponse = createMemo(() => {
+    const flowId = props.event.flow_id;
+    if (flowId) {
+      for (const ev of events) {
+        if (ev.type === "http_response" && ev.flow_id === flowId) {
+          return ev;
+        }
+      }
+    }
+    // Legacy fallback: next event with same pid
     const seq = props.event.seq;
     for (let i = 0; i < events.length; i++) {
-      if (events[i]!.seq === seq && i + 1 < events.length) {
-        const next = events[i + 1]!;
+      if (events[i]?.seq === seq && i + 1 < events.length) {
+        const next = events[i + 1];
+        if (!next) break;
         if (next.type === "http_response" && next.pid === props.event.pid) {
           return next;
         }
@@ -414,27 +443,29 @@ function HttpRequestDetail(props: { event: ArgusEvent }) {
       <Show when={reqBody()}>
         {(body) => (
           <Section title="Request Body">
-            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs">{formatBody(body())}</pre>
+            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs">
+              {formatBody(body())}
+            </pre>
           </Section>
         )}
       </Show>
 
-      <Show when={matchingResponse()}>
-        {(resp) => <ResponseSection resp={resp()} />}
-      </Show>
+      <Show when={matchingResponse()}>{(resp) => <ResponseSection resp={resp()} />}</Show>
     </div>
   );
 }
 
 function ResponseSection(props: { resp: ArgusEvent }) {
-  const status = () => Number(props.resp["status"] ?? 0);
-  const respHeaders = () => parseHeaders(props.resp["headers"]);
-  const respBody = () => props.resp["body"] as string | undefined;
+  const status = () => Number(props.resp.status ?? 0);
+  const respHeaders = () => parseHeaders(props.resp.headers);
+  const respBody = () => props.resp.body;
 
   return (
     <div class="mt-6 border-t border-[hsl(var(--border))] pt-4 space-y-4">
       <div class="flex items-baseline gap-3">
-        <span class="text-sm font-semibold uppercase text-[hsl(var(--muted-foreground))]">Response</span>
+        <span class="text-sm font-semibold uppercase text-[hsl(var(--muted-foreground))]">
+          Response
+        </span>
         <span class={cn("text-lg font-bold font-mono", statusColor(status()))}>{status()}</span>
       </div>
 
@@ -447,7 +478,9 @@ function ResponseSection(props: { resp: ArgusEvent }) {
       <Show when={respBody()}>
         {(body) => (
           <Section title="Response Body">
-            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs max-h-[600px] overflow-y-auto">{formatBody(body())}</pre>
+            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs max-h-[600px] overflow-y-auto">
+              {formatBody(body())}
+            </pre>
           </Section>
         )}
       </Show>
@@ -456,14 +489,16 @@ function ResponseSection(props: { resp: ArgusEvent }) {
 }
 
 function HttpResponseDetail(props: { event: ArgusEvent }) {
-  const status = () => Number(props.event["status"] ?? 0);
-  const headers = () => parseHeaders(props.event["headers"]);
-  const body = () => props.event["body"] as string | undefined;
+  const status = () => Number(props.event.status ?? 0);
+  const headers = () => parseHeaders(props.event.headers);
+  const body = () => props.event.body;
 
   return (
     <div class="space-y-4">
       <div class="flex items-baseline gap-3">
-        <span class="text-sm font-semibold uppercase text-[hsl(var(--muted-foreground))]">Response</span>
+        <span class="text-sm font-semibold uppercase text-[hsl(var(--muted-foreground))]">
+          Response
+        </span>
         <span class={cn("text-lg font-bold font-mono", statusColor(status()))}>{status()}</span>
       </div>
 
@@ -482,7 +517,9 @@ function HttpResponseDetail(props: { event: ArgusEvent }) {
       <Show when={body()}>
         {(b) => (
           <Section title="Body">
-            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs max-h-[600px] overflow-y-auto">{formatBody(b())}</pre>
+            <pre class="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs max-h-[600px] overflow-y-auto">
+              {formatBody(b())}
+            </pre>
           </Section>
         )}
       </Show>
@@ -528,7 +565,7 @@ function GenericDetail(props: { event: ArgusEvent }) {
   );
 }
 
-function Section(props: { title: string; children: any }) {
+function Section(props: { title: string; children: JSX.Element }) {
   return (
     <div>
       <h3 class="mb-1 text-xs font-semibold uppercase tracking-wider text-[hsl(var(--muted-foreground))]">

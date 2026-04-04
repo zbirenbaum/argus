@@ -14,6 +14,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::broadcast;
 use tokio_tungstenite::connect_async;
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, event};
 
 use crate::db::EventStore;
@@ -23,27 +24,42 @@ use crate::db::EventStore;
 // current 500ms poll means the dashboard can lag up to 500ms behind reality.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Max consecutive reconnect failures before assuming the supervisor is gone.
+const MAX_RECONNECT_ATTEMPTS: u32 = 3;
+
 /// Polls JSONL segment files on disk and inserts new events into the store.
 ///
 /// Broadcasts each newly inserted event's raw JSON on `tx` for the SSE
-/// stream. Runs forever until cancelled.
+/// stream. Runs until the cancellation token is triggered.
 pub async fn poll_disk(
     store: &Arc<EventStore>,
     tx: broadcast::Sender<String>,
     event_log_dir: PathBuf,
+    cancel: CancellationToken,
 ) {
     // FIXME(event-consumer): load_from_disk re-reads entire files every poll.
     // Track per-file byte offset so we only read new lines. For now this is
     // acceptable because INSERT OR IGNORE makes re-reads idempotent, but it
     // wastes I/O on large segment files.
     loop {
+        tokio::select! {
+            () = cancel.cancelled() => {
+                event!(
+                    name: "ingest.poll_disk.shutdown",
+                    Level::INFO,
+                    "disk poll shutting down",
+                );
+                break;
+            }
+            () = tokio::time::sleep(POLL_INTERVAL) => {}
+        }
+
         if event_log_dir.is_dir() {
             let prev_max = store.max_seq().unwrap_or(0);
 
             match crate::replay::load_from_disk(store, &event_log_dir) {
                 Ok(n) => {
                     if n > 0 {
-                        // Broadcast any events that are new since last poll.
                         broadcast_new_events(store, &tx, prev_max);
                     }
                 }
@@ -57,8 +73,6 @@ pub async fn poll_disk(
                 }
             }
         }
-
-        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -80,16 +94,21 @@ fn broadcast_new_events(
 ///
 /// The supervisor's `BroadcastSink` will block the ptrace pipeline if no
 /// consumer reads from the WS. This task keeps the connection drained by
-/// reading and discarding all messages.
+/// reading and discarding all messages. When the supervisor goes away
+/// (WS drops and reconnect fails repeatedly), cancels the token to
+/// trigger graceful shutdown of argus-api.
 // FIXME(event-consumer): evaluate whether the supervisor actually backpressures
 // when no WS client is connected. If BroadcastSink silently drops with zero
 // subscribers (which it does — see broadcast::Sender::send), this entire drain
 // task is unnecessary and can be removed. Kept for safety until confirmed.
-pub async fn drain_ws(url: &str) {
-    let mut backoff = Duration::from_secs(1);
-    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+pub async fn drain_ws(url: &str, cancel: CancellationToken) {
+    let mut consecutive_failures: u32 = 0;
 
     loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+
         event!(
             name: "ingest.ws_drain.connecting",
             Level::DEBUG,
@@ -99,17 +118,23 @@ pub async fn drain_ws(url: &str) {
 
         match connect_async(url).await {
             Ok((ws, _)) => {
-                backoff = Duration::from_secs(1);
+                consecutive_failures = 0;
                 event!(
                     name: "ingest.ws_drain.connected",
                     Level::DEBUG,
                     "WS drain connected",
                 );
                 let (_write, mut read) = ws.split();
-                // Read and discard all messages until disconnect.
-                while let Some(msg) = read.next().await {
-                    if msg.is_err() {
-                        break;
+                // Read and discard all messages until disconnect or cancellation.
+                loop {
+                    tokio::select! {
+                        () = cancel.cancelled() => break,
+                        msg = read.next() => {
+                            match msg {
+                                Some(Ok(_)) => {}
+                                _ => break,
+                            }
+                        }
                     }
                 }
                 event!(
@@ -118,10 +143,27 @@ pub async fn drain_ws(url: &str) {
                     "WS drain disconnected",
                 );
             }
-            Err(_) => {}
+            Err(_) => {
+                consecutive_failures += 1;
+            }
         }
 
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        if consecutive_failures >= MAX_RECONNECT_ATTEMPTS {
+            event!(
+                name: "ingest.ws_drain.supervisor_gone",
+                Level::INFO,
+                attempts = MAX_RECONNECT_ATTEMPTS,
+                "supervisor unreachable after {{attempts}} attempts, shutting down",
+            );
+            cancel.cancel();
+            break;
+        }
+
+        // Exponential backoff: 1s, 2s, 4s capped at 4s.
+        let backoff = Duration::from_secs(1 << consecutive_failures.min(2));
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            () = tokio::time::sleep(backoff) => {}
+        }
     }
 }

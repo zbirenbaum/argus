@@ -6,6 +6,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, atomic::AtomicBool};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -112,6 +113,8 @@ pub fn build_harness(mock: MockPtraceThread, stops: Vec<RawSyscallStop>, rules: 
         paused,
         shared.clone(),
         1, // persist_batch_size=1 so every write persists to CAS
+        Duration::ZERO, // snapshots disabled in tests
+        0,
     );
 
     TestHarness { sink, shared, runner, _tmp: tmp }

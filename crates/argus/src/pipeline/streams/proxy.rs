@@ -69,7 +69,9 @@ impl Stream for ProxyStream {
             Ok(flows) => {
                 // Flatten FlowEvents into individual EventPayload items.
                 for (flow, content) in flows {
-                    self.buffer.push((EventPayload::HttpRequest(flow.request), content.clone()));
+                    if let Some(req) = flow.request {
+                        self.buffer.push((EventPayload::HttpRequest(req), content.clone()));
+                    }
                     if let Some(resp) = flow.response {
                         self.buffer.push((EventPayload::HttpResponse(resp), content));
                     }

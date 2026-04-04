@@ -279,11 +279,11 @@ fn all_variants_round_trip() {
         }),
         EventPayload::HttpRequest(network::HttpRequest {
             pid: 1, method: "GET".into(), url: "/".into(),
-            headers_hash: None, body_hash: None,
+            flow_id: None, headers_hash: None, body_hash: None,
             headers: None, body: None,
         }),
         EventPayload::HttpResponse(network::HttpResponse {
-            pid: 1, status: 200, headers_hash: None, body_hash: None,
+            pid: 1, status: 200, flow_id: None, headers_hash: None, body_hash: None,
             headers: None, body: None,
         }),
         EventPayload::AgentStart(control::AgentStart {

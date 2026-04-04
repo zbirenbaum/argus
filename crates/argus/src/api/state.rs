@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::broadcast;
 
-use crate::api::types::PendingApprovalEntry;
+use crate::api::types::{PendingApprovalEntry, SnapshotEntry};
 use crate::cas::Cas;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
@@ -58,6 +58,8 @@ pub struct Bridge {
     overflow: Option<Arc<OverflowQueue>>,
     /// Current sink stall state, if any required sinks are failing.
     stall: ParkingMutex<Option<StallState>>,
+    /// Browsable snapshots recorded at time or change boundaries.
+    snapshots: ArcSwap<Vec<SnapshotEntry>>,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -99,6 +101,7 @@ impl Bridge {
             bus,
             overflow,
             stall: ParkingMutex::new(None),
+            snapshots: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -248,6 +251,18 @@ impl Bridge {
     /// Atomically replace the active rule set.
     pub fn store_rules(&self, new_rules: RuleSet) {
         self.rules.store(Arc::new(new_rules));
+    }
+
+    /// Append a browsable snapshot entry.
+    pub fn push_snapshot(&self, entry: SnapshotEntry) {
+        let mut current = (**self.snapshots.load()).clone();
+        current.push(entry);
+        self.snapshots.store(Arc::new(current));
+    }
+
+    /// Load all recorded snapshots.
+    pub fn load_snapshots(&self) -> arc_swap::Guard<Arc<Vec<SnapshotEntry>>> {
+        self.snapshots.load()
     }
 
     /// Records a sink stall condition, replacing any prior stall state.

@@ -124,4 +124,4 @@ export function cleanupStream(): void {
   }
 }
 
-export { events, processes, selectedSeq, connected };
+export { connected, events, processes, selectedSeq };

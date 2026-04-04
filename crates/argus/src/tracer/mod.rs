@@ -6,8 +6,6 @@
 //! retains the low-level building blocks used by pipeline stages.
 
 pub(crate) mod memory;
-pub(crate) mod pending;
 pub(crate) mod regs;
 // seccomp stays pub: supervisor's startup.rs calls install_seccomp_filter directly.
 pub mod seccomp;
-pub(crate) mod syscall_nr;

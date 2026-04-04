@@ -46,6 +46,9 @@ pub struct HttpRequest {
     pub pid: u32,
     pub method: String,
     pub url: String,
+    /// Opaque identifier linking this request to its paired response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +66,9 @@ pub struct HttpRequest {
 pub struct HttpResponse {
     pub pid: u32,
     pub status: u16,
+    /// Opaque identifier linking this response to its paired request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +143,7 @@ mod tests {
             pid: 1,
             method: "POST".into(),
             url: "https://api.example.com/data".into(),
+            flow_id: None,
             headers_hash: Some("h1".into()),
             body_hash: Some("b1".into()),
             headers: None,
@@ -152,6 +159,7 @@ mod tests {
         let r = HttpResponse {
             pid: 1,
             status: 404,
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: None,
@@ -182,6 +190,7 @@ mod tests {
             pid: 1,
             method: "POST".into(),
             url: "https://api.example.com/data".into(),
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: Some("Content-Type: application/json".into()),
@@ -199,6 +208,7 @@ mod tests {
         let r = HttpResponse {
             pid: 1,
             status: 200,
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: Some("Content-Type: text/plain".into()),
@@ -217,6 +227,7 @@ mod tests {
             pid: 1,
             method: "GET".into(),
             url: "https://example.com".into(),
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: None,

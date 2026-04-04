@@ -28,11 +28,12 @@ use crate::events::snapshot::{InitialFile, InitialState};
 use crate::index::{PathIndex, PidIndex, TypeIndex};
 use crate::pipeline::EmitResult;
 use crate::pipeline::bus::RecordBus;
-use crate::pipeline::capture_policy::CapturePolicy;
+use crate::config::CaptureConfig;
+use crate::pipeline::capture_policy::{CaptureLevel, CapturePolicy, CaptureRule};
 use crate::pipeline::context::PipelineContext;
 use crate::pipeline::durability::DurabilityLayer;
 use crate::pipeline::overflow::OverflowQueue;
-use crate::pipeline::outputs::{FileOutput, OutputList};
+use crate::pipeline::outputs::{FileOutput, OutputList, StdoutOutput};
 use crate::pipeline::record::Record;
 use crate::pipeline::runner::PipelineRunner;
 use crate::pipeline::sink::Sink;
@@ -382,7 +383,7 @@ impl SupervisorRuntime {
             self.shared.clone(),
         );
 
-        let policy = CapturePolicy::default_full();
+        let policy = build_capture_policy(&self.config.capture);
         let capture_stage = CaptureStage::new(
             handle.clone(),
             self.durability,
@@ -415,6 +416,8 @@ impl SupervisorRuntime {
             self.shared.pause_flag(),
             self.shared,
             self.config.tree.batch_size,
+            self.config.tree.snapshot_interval(),
+            self.config.tree.snapshot_change_threshold,
         );
 
         Ok((runner, seize_rx, ptrace_thread))
@@ -489,7 +492,9 @@ fn build_outputs(config: &SupervisorConfig) -> OutputList {
     let mut list = OutputList::new();
     for output_config in &config.outputs {
         match output_config {
-            OutputConfig::Stdout { .. } => {}
+            OutputConfig::Stdout { flush_every_event } => {
+                list.push(Box::new(StdoutOutput::new(*flush_every_event)));
+            }
             OutputConfig::File { path, max_size, max_files } => {
                 match FileOutput::new(path.clone(), *max_size, *max_files) {
                     Ok(out) => list.push(Box::new(out)),
@@ -545,6 +550,33 @@ fn build_overflow_queue(config: &SupervisorConfig) -> Option<Arc<OverflowQueue>>
             None
         }
     }
+}
+
+/// Build a `CapturePolicy` from the supervisor's `CaptureConfig`.
+///
+/// Maps the config's path-based glob rules and rate limits into the
+/// runtime policy that the capture stage consults on every syscall.
+fn build_capture_policy(config: &CaptureConfig) -> CapturePolicy {
+    use crate::pipeline::capture_policy::CaptureConfig as PolicyConfig;
+
+    let mut rules = Vec::new();
+    for pattern in &config.content.paths {
+        rules.push(CaptureRule { pattern: pattern.clone(), level: CaptureLevel::Full });
+    }
+    for pattern in &config.metadata_only.paths {
+        rules.push(CaptureRule { pattern: pattern.clone(), level: CaptureLevel::MetadataOnly });
+    }
+    for pattern in &config.ignore.paths {
+        rules.push(CaptureRule { pattern: pattern.clone(), level: CaptureLevel::Ignore });
+    }
+
+    let policy_config = PolicyConfig {
+        rules,
+        window_budget: config.budget_bytes_per_window,
+        rate_limit_per_pid: config.rate_limit_bytes_per_sec,
+    };
+
+    CapturePolicy::new(&policy_config)
 }
 
 fn walk_dir_recursive(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {

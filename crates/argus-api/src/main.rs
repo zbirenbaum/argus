@@ -19,6 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 use tracing::{Level, event};
 use tracing_subscriber::EnvFilter;
 
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
     );
 
     let store = Arc::new(db::EventStore::open(&cli.db)?);
+    let cancel = CancellationToken::new();
 
     // Channel capacity of 4096 covers brief consumer lag without unbounded growth.
     let (tx, _rx) = broadcast::channel::<String>(4096);
@@ -77,8 +79,9 @@ async fn main() -> Result<()> {
         let poll_store = Arc::clone(&store);
         let poll_tx = tx.clone();
         let poll_dir = dir.clone();
+        let poll_cancel = cancel.clone();
         Some(tokio::spawn(async move {
-            ingest::poll_disk(&poll_store, poll_tx, poll_dir).await;
+            ingest::poll_disk(&poll_store, poll_tx, poll_dir, poll_cancel).await;
         }))
     } else {
         event!(
@@ -91,10 +94,11 @@ async fn main() -> Result<()> {
 
     // WS drain task: keeps the supervisor WebSocket consumed so the
     // BroadcastSink never backpressures the ptrace pipeline.
-    // FIXME(event-consumer): may be unnecessary — see note in ingest.rs.
+    // When the supervisor goes away, this task cancels the token.
     let drain_handle = tokio::spawn({
         let url = supervisor_url.clone();
-        async move { ingest::drain_ws(&url).await }
+        let drain_cancel = cancel.clone();
+        async move { ingest::drain_ws(&url, drain_cancel).await }
     });
 
     let app = routes::router(Arc::clone(&store), supervisor_base, tx);
@@ -111,8 +115,15 @@ async fn main() -> Result<()> {
     );
 
     axum::serve(listener, app)
+        .with_graceful_shutdown(cancel.cancelled_owned())
         .await
         .context("API server failed")?;
+
+    event!(
+        name: "argus_api.shutdown",
+        Level::INFO,
+        "argus-api shutting down",
+    );
 
     if let Some(h) = poll_handle { h.abort(); }
     drain_handle.abort();

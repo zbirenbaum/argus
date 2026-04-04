@@ -4,10 +4,7 @@
 //! Uses `process_vm_readv` for efficient cross-process memory reads,
 //! falling back to `ptrace::read` for small reads when needed.
 
-use std::ffi::OsStr;
 use std::io::{IoSlice, IoSliceMut};
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nix::sys::uio::{RemoteIoVec, process_vm_readv, process_vm_writev};
@@ -15,10 +12,6 @@ use nix::unistd::Pid;
 
 /// Maximum path length we will read from a tracee.
 const MAX_PATH_LEN: usize = 4096;
-
-/// `AT_FDCWD` sentinel — resolve relative to process cwd. Value -100
-/// per linux/fcntl.h.
-const AT_FDCWD: i32 = -100;
 
 /// Reads a null-terminated C string from tracee memory.
 ///
@@ -96,70 +89,6 @@ pub fn write_bytes(pid: Pid, addr: u64, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Resolves a path for `*at()` syscalls, handling `AT_FDCWD`.
-///
-/// If `dirfd` is `AT_FDCWD`, the path is resolved relative to the
-/// process cwd (read from `/proc/{pid}/cwd`). If the path is absolute,
-/// `dirfd` is ignored per kernel semantics.
-///
-/// # Errors
-///
-/// Returns an error if the path cannot be read from tracee memory.
-pub fn read_path_at(pid: Pid, dirfd: i32, path_addr: u64) -> Result<PathBuf> {
-    let raw_path = read_c_string(pid, path_addr)?;
-    let path = Path::new(&raw_path);
-
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-
-    if dirfd == AT_FDCWD {
-        let cwd = read_proc_cwd(pid)?;
-        return Ok(cwd.join(path));
-    }
-
-    // dirfd points to an open directory. Read from /proc/{pid}/fd/{dirfd}.
-    let link = format!("/proc/{}/fd/{}", pid.as_raw(), dirfd);
-    let dir = std::fs::read_link(&link)
-        .with_context(|| format!("readlink {link}"))?;
-    Ok(dir.join(path))
-}
-
-/// Reads `/proc/{pid}/cwd` to determine the current working directory.
-fn read_proc_cwd(pid: Pid) -> Result<PathBuf> {
-    let link = format!("/proc/{}/cwd", pid.as_raw());
-    std::fs::read_link(&link)
-        .with_context(|| format!("readlink {link}"))
-}
-
-/// Reads `/proc/{pid}/exe` to determine the executable path.
-///
-/// # Errors
-///
-/// Returns an error if `/proc/{pid}/exe` cannot be read.
-pub fn read_proc_exe(pid: Pid) -> Result<PathBuf> {
-    let link = format!("/proc/{}/exe", pid.as_raw());
-    std::fs::read_link(&link)
-        .with_context(|| format!("readlink {link}"))
-}
-
-/// Reads `/proc/{pid}/cmdline` to get argv.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read.
-pub fn read_proc_cmdline(pid: Pid) -> Result<Vec<String>> {
-    let path = format!("/proc/{}/cmdline", pid.as_raw());
-    let data = std::fs::read(&path)
-        .with_context(|| format!("read {path}"))?;
-    let args: Vec<String> = data
-        .split(|&b| b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| OsStr::from_bytes(s).to_string_lossy().into_owned())
-        .collect();
-    Ok(args)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,10 +117,5 @@ mod tests {
     #[test]
     fn max_path_len_is_reasonable() {
         assert_eq!(MAX_PATH_LEN, 4096);
-    }
-
-    #[test]
-    fn at_fdcwd_matches_kernel_value() {
-        assert_eq!(AT_FDCWD, -100);
     }
 }

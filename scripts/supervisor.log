@@ -1,0 +1,33 @@
+{"timestamp":"2026-03-16T05:58:18.094238Z","level":"INFO","fields":{"message":"supervisor starting for agent {agent.id}","agent.id":"demo"},"target":"supervisor"}
+{"timestamp":"2026-03-16T05:58:18.096544Z","level":"INFO","fields":{"message":"created data directories under {data.dir}","data.dir":"/tmp/data"},"target":"supervisor::startup"}
+{"timestamp":"2026-03-16T05:58:18.111590Z","level":"INFO","fields":{"message":"generated new CA keypair at {ca.dir}","ca.dir":"/data/tls"},"target":"argus::net::ca"}
+{"timestamp":"2026-03-16T05:58:18.117747Z","level":"INFO","fields":{"message":"spawned mitmdump on port {mitmdump.port} (pid {mitmdump.pid})","mitmdump.port":8080,"mitmdump.pid":219},"target":"argus::net::mitmdump"}
+{"timestamp":"2026-03-16T05:58:18.389706Z","level":"INFO","fields":{"message":"mitmdump is ready on port {mitmdump.port}","mitmdump.port":8080},"target":"argus::net::mitmdump"}
+{"timestamp":"2026-03-16T05:58:18.393530Z","level":"INFO","fields":{"message":"no S3 config, running in local-only mode"},"target":"argus::runtime"}
+{"timestamp":"2026-03-16T05:58:18.409940Z","level":"INFO","fields":{"message":"overflow queue initialized at {db.path}","db.path":"/tmp/data/overflow.db"},"target":"argus::runtime"}
+{"timestamp":"2026-03-16T05:58:18.436734Z","level":"INFO","fields":{"message":"API server listening on {listen.addr}","listen.addr":"0.0.0.0:9090"},"target":"supervisor::wiring"}
+{"timestamp":"2026-03-16T05:58:18.438268Z","level":"INFO","fields":{"message":"API server listening on {listen.addr}","listen.addr":"0.0.0.0:9090"},"target":"argus::api"}
+{"timestamp":"2026-03-16T05:58:18.440086Z","level":"INFO","fields":{"message":"spawned agent process with pid {agent.pid}","agent.pid":224},"target":"supervisor::startup"}
+{"timestamp":"2026-03-16T05:58:18.449516Z","level":"INFO","fields":{"message":"keylog pipeline started: {keylog.path}","keylog.path":"/data/tls/keylog.txt"},"target":"argus::pipeline::keylog_pipeline"}
+{"timestamp":"2026-03-16T05:58:18.458823Z","level":"INFO","fields":{"message":"proxy pipeline started: {flow.path}","flow.path":"/tmp/data/flows.jsonl"},"target":"argus::pipeline::proxy_pipeline"}
+{"timestamp":"2026-03-16T05:58:18.461318Z","level":"INFO","fields":{"message":"ptrace pipeline running"},"target":"argus::pipeline::runner"}
+
+Claude configuration file not found at: /home/agent/.claude.json
+A backup file exists at: /home/agent/.claude/backups/.claude.json.backup.1773640572621
+You can manually restore it by running: cp "/home/agent/.claude/backups/.claude.json.backup.1773640572621" "/home/agent/.claude.json"
+
+
+Claude configuration file not found at: /home/agent/.claude.json
+A backup file exists at: /home/agent/.claude/backups/.claude.json.backup.1773640572621
+You can manually restore it by running: cp "/home/agent/.claude/backups/.claude.json.backup.1773640572621" "/home/agent/.claude.json"
+
+
+Claude configuration file not found at: /home/agent/.claude.json
+A backup file exists at: /home/agent/.claude/backups/.claude.json.backup.1773640572621
+You can manually restore it by running: cp "/home/agent/.claude/backups/.claude.json.backup.1773640572621" "/home/agent/.claude.json"
+
+{"timestamp":"2026-03-16T05:58:28.462332Z","level":"INFO","fields":{"message":"browsable snapshot recorded at seq={snapshot.seq}","snapshot.seq":118,"snapshot.file_count":0},"target":"argus::pipeline::runner"}
+{"timestamp":"2026-03-16T05:58:29.534484Z","level":"INFO","fields":{"message":"ptrace pipeline finished, shutting down outputs and bus"},"target":"argus::pipeline::runner"}
+{"timestamp":"2026-03-16T05:58:29.655087Z","level":"INFO","fields":{"message":"keylog pipeline stopped"},"target":"argus::pipeline::keylog_pipeline"}
+{"timestamp":"2026-03-16T05:58:29.660558Z","level":"INFO","fields":{"message":"proxy pipeline stopped"},"target":"argus::pipeline::proxy_pipeline"}
+{"timestamp":"2026-03-16T05:58:29.660760Z","level":"INFO","fields":{"message":"stopping mitmdump on port {mitmdump.port}","mitmdump.port":8080},"target":"argus::net::mitmdump"}

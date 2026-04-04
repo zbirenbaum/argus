@@ -1,3 +1,4 @@
+import { formatTimeMs as formatTime } from "@lib/format";
 import {
   clearSelection,
   events,
@@ -6,7 +7,6 @@ import {
   selectEvent,
   selectedSeq,
 } from "@stores/events.store";
-import { formatTimeMs as formatTime } from "@lib/format";
 import { cn } from "@utils/cn";
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { For, Show } from "solid-js/web";
@@ -60,7 +60,7 @@ const FS_TYPES = new Set([
 
 function eventContext(event: ArgusEvent): string | undefined {
   if (event.type === "exec") {
-    const binary = event["binary"];
+    const binary = event.binary;
     return typeof binary === "string" ? binary.split("/").pop() : undefined;
   }
   if (FS_TYPES.has(event.type) && event.path) {
@@ -137,13 +137,15 @@ function VirtualSidebar() {
   });
 
   // Flatten into virtual rows based on open/closed state
+  // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: grouping logic is inherently branchy
   const flatRows = createMemo<FlatRow[]>(() => {
     const { pidMap, pids } = grouped();
     const open = openSections();
     const rows: FlatRow[] = [];
 
     for (const pid of pids) {
-      const typeMap = pidMap.get(pid)!;
+      const typeMap = pidMap.get(pid);
+      if (!typeMap) continue;
       let pidCount = 0;
       for (const evts of typeMap.values()) {
         pidCount += evts.length;

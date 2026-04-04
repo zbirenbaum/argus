@@ -11,4 +11,5 @@ pub(crate) mod process_tree;
 pub(crate) mod pty_registry;
 pub(crate) use fd_table::FdTable;
 pub(crate) use pipe_registry::PipeRegistry;
+pub(crate) use process_tree::ProcessTree;
 pub(crate) use pty_registry::PtyRegistry;

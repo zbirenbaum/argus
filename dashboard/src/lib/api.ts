@@ -40,3 +40,49 @@ export function createEventStream(afterSeq?: number): EventSource {
   const url = query ? `${API_BASE}/events/stream?${query}` : `${API_BASE}/events/stream`;
   return new EventSource(url);
 }
+
+// --- Snapshot browsing ---
+
+export interface SnapshotEntry {
+  seq: number;
+  ts_wall: string;
+  tree_hash: string;
+  file_count: number;
+}
+
+export interface TreeSnapshotFile {
+  path: string;
+  hash: string;
+}
+
+export interface TreeSnapshotResponse {
+  tree_hash: string;
+  seq: number;
+  file_count: number;
+  files: TreeSnapshotFile[];
+}
+
+export async function fetchSnapshots(): Promise<SnapshotEntry[]> {
+  const res = await fetch(`${API_BASE}/snapshots`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch snapshots: ${res.status}`);
+  }
+  const data = (await res.json()) as { snapshots: SnapshotEntry[] };
+  return data.snapshots;
+}
+
+export async function fetchTreeAt(seq: number): Promise<TreeSnapshotResponse> {
+  const res = await fetch(`${API_BASE}/tree?seq=${seq}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch tree at seq ${seq}: ${res.status}`);
+  }
+  return res.json() as Promise<TreeSnapshotResponse>;
+}
+
+export async function fetchCasContent(hash: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/cas/${hash}`);
+  if (!res.ok) {
+    throw new Error(`Failed to fetch CAS content: ${res.status}`);
+  }
+  return res.text();
+}

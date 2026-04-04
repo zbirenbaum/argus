@@ -482,6 +482,7 @@ mod tests {
             pid: 1,
             method: "POST".to_owned(),
             url: "https://api.example.com/v1/data".to_owned(),
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: headers.map(str::to_owned),
@@ -495,6 +496,7 @@ mod tests {
         let payload = EventPayload::HttpResponse(HttpResponse {
             pid: 1,
             status: 200,
+            flow_id: None,
             headers_hash: None,
             body_hash: None,
             headers: headers.map(str::to_owned),

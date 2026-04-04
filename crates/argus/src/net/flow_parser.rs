@@ -18,10 +18,15 @@ use crate::pipeline::record::Record;
 /// Raw flow structure deserialized from mitmdump addon JSON output.
 ///
 /// The addon script emits one JSON object per completed HTTP flow,
-/// containing the request and optional response.
+/// containing an optional request and optional response. Response-only
+/// flows occur when a request was already emitted in a prior line.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MitmdumpFlow {
-    pub request: FlowRequest,
+    /// Opaque identifier for pairing requests with responses across lines.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+    #[serde(default)]
+    pub request: Option<FlowRequest>,
     #[serde(default)]
     pub response: Option<FlowResponse>,
 }
@@ -52,8 +57,8 @@ pub struct FlowResponse {
 /// Result of processing a single mitmdump flow.
 #[derive(Debug)]
 pub struct ProcessedFlow {
-    /// The HTTP request event payload.
-    pub request: HttpRequest,
+    /// The HTTP request event payload, absent for response-only flows.
+    pub request: Option<HttpRequest>,
     /// The HTTP response event payload, if a response was captured.
     pub response: Option<HttpResponse>,
 }
@@ -93,9 +98,33 @@ pub fn process_flow_detached(
     pid: u32,
 ) -> Result<(ProcessedFlow, Vec<FlowContent>)> {
     let mut content = Vec::new();
+    let flow_id = flow.flow_id.clone();
 
-    let req_headers_hash = hash_headers(&flow.request.headers, &mut content)?;
-    let req_body_hash = hash_body(flow.request.body.as_deref(), &mut content)?;
+    let req_event = if let Some(req) = &flow.request {
+        let req_headers_hash = hash_headers(&req.headers, &mut content)?;
+        let req_body_hash = hash_body(req.body.as_deref(), &mut content)?;
+
+        event!(
+            name: "net.flow.processed",
+            Level::DEBUG,
+            flow.method = %req.method,
+            flow.url = %req.url,
+            "processed HTTP flow",
+        );
+
+        Some(HttpRequest {
+            pid,
+            method: req.method.clone(),
+            url: req.url.clone(),
+            flow_id: flow_id.clone(),
+            headers_hash: req_headers_hash,
+            body_hash: req_body_hash,
+            headers: inline_headers(&req.headers),
+            body: inline_body(req.body.as_deref()),
+        })
+    } else {
+        None
+    };
 
     let resp_event = match &flow.response {
         Some(resp) => {
@@ -105,6 +134,7 @@ pub fn process_flow_detached(
             Some(HttpResponse {
                 pid,
                 status: resp.status_code,
+                flow_id,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
                 headers: inline_headers(&resp.headers),
@@ -114,25 +144,7 @@ pub fn process_flow_detached(
         None => None,
     };
 
-    event!(
-        name: "net.flow.processed",
-        Level::DEBUG,
-        flow.method = %flow.request.method,
-        flow.url = %flow.request.url,
-        "processed HTTP flow",
-    );
-
-    let http_req = HttpRequest {
-        pid,
-        method: flow.request.method.clone(),
-        url: flow.request.url.clone(),
-        headers_hash: req_headers_hash,
-        body_hash: req_body_hash,
-        headers: inline_headers(&flow.request.headers),
-        body: inline_body(flow.request.body.as_deref()),
-    };
-
-    Ok((ProcessedFlow { request: http_req, response: resp_event }, content))
+    Ok((ProcessedFlow { request: req_event, response: resp_event }, content))
 }
 
 /// Serialize headers as a JSON string for inline embedding in events.
@@ -207,8 +219,33 @@ pub fn process_flow(
     bus: &RecordBus,
     pid: u32,
 ) -> Result<ProcessedFlow> {
-    let req_headers_hash = store_headers(bus, &flow.request.headers)?;
-    let req_body_hash = store_body(bus, flow.request.body.as_deref())?;
+    let flow_id = flow.flow_id.clone();
+
+    let req_event = if let Some(req) = &flow.request {
+        let req_headers_hash = store_headers(bus, &req.headers)?;
+        let req_body_hash = store_body(bus, req.body.as_deref())?;
+
+        event!(
+            name: "net.flow.processed",
+            Level::DEBUG,
+            flow.method = %req.method,
+            flow.url = %req.url,
+            "processed HTTP flow",
+        );
+
+        Some(HttpRequest {
+            pid,
+            method: req.method.clone(),
+            url: req.url.clone(),
+            flow_id: flow_id.clone(),
+            headers_hash: req_headers_hash,
+            body_hash: req_body_hash,
+            headers: inline_headers(&req.headers),
+            body: inline_body(req.body.as_deref()),
+        })
+    } else {
+        None
+    };
 
     let resp_event = match &flow.response {
         Some(resp) => {
@@ -218,6 +255,7 @@ pub fn process_flow(
             Some(HttpResponse {
                 pid,
                 status: resp.status_code,
+                flow_id,
                 headers_hash: resp_headers_hash,
                 body_hash: resp_body_hash,
                 headers: inline_headers(&resp.headers),
@@ -227,26 +265,8 @@ pub fn process_flow(
         None => None,
     };
 
-    event!(
-        name: "net.flow.processed",
-        Level::DEBUG,
-        flow.method = %flow.request.method,
-        flow.url = %flow.request.url,
-        "processed HTTP flow",
-    );
-
-    let http_req = HttpRequest {
-        pid,
-        method: flow.request.method.clone(),
-        url: flow.request.url.clone(),
-        headers_hash: req_headers_hash,
-        body_hash: req_body_hash,
-        headers: inline_headers(&flow.request.headers),
-        body: inline_body(flow.request.body.as_deref()),
-    };
-
     Ok(ProcessedFlow {
-        request: http_req,
+        request: req_event,
         response: resp_event,
     })
 }
@@ -346,9 +366,9 @@ mod tests {
     fn parse_complete_flow() {
         let json = flow_json("POST", "https://api.example.com/data", 200);
         let flow = parse_flow_line(&json).unwrap();
-        assert_eq!(flow.request.method, "POST");
-        assert_eq!(flow.request.url, "https://api.example.com/data");
-        assert_eq!(flow.request.headers.len(), 2);
+        assert_eq!(flow.request.as_ref().unwrap().method, "POST");
+        assert_eq!(flow.request.as_ref().unwrap().url, "https://api.example.com/data");
+        assert_eq!(flow.request.as_ref().unwrap().headers.len(), 2);
         assert!(flow.response.is_some());
         assert_eq!(flow.response.unwrap().status_code, 200);
     }
@@ -357,7 +377,7 @@ mod tests {
     fn parse_flow_without_response() {
         let json = r#"{"request":{"method":"GET","url":"https://example.com"}}"#;
         let flow = parse_flow_line(json).unwrap();
-        assert_eq!(flow.request.method, "GET");
+        assert_eq!(flow.request.as_ref().unwrap().method, "GET");
         assert!(flow.response.is_none());
     }
 
@@ -373,13 +393,14 @@ mod tests {
         let flow = parse_flow_line(&json).unwrap();
         let result = process_flow(&flow, &bus, 42).unwrap();
 
-        assert_eq!(result.request.method, "POST");
-        assert_eq!(result.request.pid, 42);
-        assert!(result.request.body_hash.is_some());
-        assert!(result.request.headers_hash.is_some());
+        let req = result.request.unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.pid, 42);
+        assert!(req.body_hash.is_some());
+        assert!(req.headers_hash.is_some());
         // Inline fields are populated
-        assert!(result.request.headers.is_some());
-        assert_eq!(result.request.body.as_deref(), Some("hello"));
+        assert!(req.headers.is_some());
+        assert_eq!(req.body.as_deref(), Some("hello"));
 
         let resp = result.response.unwrap();
         assert_eq!(resp.status, 200);
@@ -395,8 +416,9 @@ mod tests {
         let flow = parse_flow_line(json).unwrap();
         let result = process_flow(&flow, &bus, 1).unwrap();
 
-        assert!(result.request.body_hash.is_none());
-        assert!(result.request.headers_hash.is_none());
+        let req = result.request.unwrap();
+        assert!(req.body_hash.is_none());
+        assert!(req.headers_hash.is_none());
         assert!(result.response.is_none());
     }
 
@@ -429,6 +451,30 @@ mod tests {
         let json = r#"{"request":{"method":"GET","url":"https://x.com","headers":[],"body":""}}"#;
         let flow = parse_flow_line(json).unwrap();
         let result = process_flow(&flow, &bus, 1).unwrap();
-        assert!(result.request.body_hash.is_none());
+        assert!(result.request.unwrap().body_hash.is_none());
+    }
+
+    #[test]
+    fn parse_response_only_flow() {
+        let json =
+            r#"{"flow_id":"abc-123","response":{"status_code":200,"headers":[],"body":""}}"#;
+        let flow = parse_flow_line(json).unwrap();
+        assert_eq!(flow.flow_id.as_deref(), Some("abc-123"));
+        assert!(flow.request.is_none());
+        assert!(flow.response.is_some());
+    }
+
+    #[test]
+    fn flow_id_propagated_to_events() {
+        let bus = noop_bus();
+        let json = r#"{"flow_id":"xyz-456","request":{"method":"GET","url":"https://example.com","headers":[]},"response":{"status_code":200,"headers":[],"body":""}}"#;
+        let flow = parse_flow_line(json).unwrap();
+        let result = process_flow(&flow, &bus, 1).unwrap();
+
+        let req = result.request.unwrap();
+        assert_eq!(req.flow_id.as_deref(), Some("xyz-456"));
+
+        let resp = result.response.unwrap();
+        assert_eq!(resp.flow_id.as_deref(), Some("xyz-456"));
     }
 }
