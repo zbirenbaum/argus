@@ -32,28 +32,9 @@ Container (SYS_PTRACE)
 └── Agent process (traced, all descendants auto-traced)
 ```
 
-## What works
-
-These validation tests pass on native aarch64 Linux:
-
-| Test | What it proves |
-|------|----------------|
-| Process tracing | exec, fork, exit events with correct pid/ppid chains |
-| Stdio capture | stdout/stderr separated with correct byte counts |
-| File write/read/delete | write, read, unlink with paths and BLAKE3 hashes |
-| Pipe topology | pipe flow through shell pipelines (echo→grep→wc) |
-| Subprocess tree | python3→ls with pipe data flowing back to parent |
-| Escape test | tool creation, exec, write attribution across processes |
-| Write locking | unbroken hash chain across 3 concurrent writers |
-
-408 unit tests pass across the workspace.
-
-### Not yet validated
-
-- TLS/HTTPS capture (wired but not end-to-end tested)
-- Pause-before-action (API works, ptrace enforcement not connected)
-- Full snapshot/restore cycle
-- Initial filesystem state scan
+### Not yet implemented:
+ - Pause-before-action (API works but ptrace enforcement not yet connected)
+ - Initial filesystem state scan
 
 ## Events
 
