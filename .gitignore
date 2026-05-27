@@ -3,14 +3,46 @@
 *.swo
 .DS_Store
 
-
-# Added by cargo
-#
-# already existing elements were commented out
-
+# Cargo
 #/target
+
+# Claude Code
 .claude/worktrees/
+.claude/agent-memory/
+.claire/
+ms-rust/
+docs/superpowers/
+dashboard/AGENTS/
+
+# Deploy secrets
 deploy/claude-auth/
+
+# Scratch / WIP files
 NEXT
 prompt
+shared.txt
+status.md
+run_claude.md
+run-claude-code.sh
+sanity_checks.md
+script2
+Needs_Addressing.md
+FINDINGS.md
+MIGRATION.md
+ARGUS_ONE_PAGER.md
+
+# Script artifacts
 scripts/__pycache__/
+scripts/supervisor.log
+
+# Demo data
+demo-events.jsonl
+
+# Dashboard build
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.astro/
+
+# Test artifacts
+*.db
+*.db-journal
