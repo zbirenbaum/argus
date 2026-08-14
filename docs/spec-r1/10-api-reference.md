@@ -7,10 +7,12 @@ Supervisor REST API on `http://127.0.0.1:9090`. JSON responses. Streaming: `appl
 ## Agent Control
 
 ```
-POST /agent/pause                → Freeze all. Response: {status, stopped_processes: [{pid, binary, current_syscall}]}
-POST /agent/resume               → Resume all. Response: {status, resumed_count}
-GET  /agent/status               → {status, agent_id, uptime_seconds, event_count, processes: [{pid, ppid, binary, argv, state}]}
+POST /agent/pause                → Freeze all. Response: {status: "paused", stopped_processes: [{pid, binary, state}]}
+POST /agent/resume               → Resume all. Response: {status: "running", resumed_count}
+GET  /agent/status               → {status, agent_id, uptime_seconds, event_count, processes: [{pid, binary, state}]}
 ```
+
+`POST /agent/pause` returns only once every traced process is stopped; `stopped_processes` lists them. `409 Conflict` if already paused (likewise `/agent/resume` if already running). `status` is `running`, `paused`, or `partially_paused`; per-process `state` is `stopped`, `running`, `zombie`, or `gone`.
 
 ## Approvals
 

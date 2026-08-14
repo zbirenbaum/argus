@@ -16,12 +16,14 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::broadcast;
 
-use crate::api::types::{PendingApprovalEntry, SnapshotEntry};
+use crate::api::types::{PendingApprovalEntry, ProcessInfo, SnapshotEntry};
 use crate::cas::Cas;
 use crate::config::RuleSet;
 use crate::events::{ApprovalDecision, Event, EventPayload, SequenceGenerator};
 use crate::pipeline::EmitResult;
 use crate::pipeline::RecordBus;
+use crate::pipeline::TraceeRegistry;
+use crate::pipeline::ptrace_thread::PtraceHandle;
 use crate::pipeline::overflow::OverflowQueue;
 use crate::pipeline::record::Record;
 use crate::pipeline::stall::StallState;
@@ -60,6 +62,10 @@ pub struct Bridge {
     stall: ParkingMutex<Option<StallState>>,
     /// Browsable snapshots recorded at time or change boundaries.
     snapshots: ArcSwap<Vec<SnapshotEntry>>,
+    /// Live tracee PIDs, kept current by the ptrace thread.
+    tracees: Arc<TraceeRegistry>,
+    /// Handle used to freeze tracees; set once the pipeline is built.
+    ptrace: std::sync::OnceLock<PtraceHandle>,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -102,6 +108,8 @@ impl Bridge {
             overflow,
             stall: ParkingMutex::new(None),
             snapshots: ArcSwap::from_pointee(Vec::new()),
+            tracees: Arc::new(TraceeRegistry::new()),
+            ptrace: std::sync::OnceLock::new(),
         }
     }
 
@@ -185,6 +193,35 @@ impl Bridge {
     /// Shared handle to the pause flag for the pipeline runner.
     pub fn pause_flag(&self) -> Arc<AtomicBool> {
         self.paused.clone()
+    }
+
+    /// Shared handle to the live-tracee registry for the ptrace thread.
+    pub fn tracees(&self) -> Arc<TraceeRegistry> {
+        Arc::clone(&self.tracees)
+    }
+
+    /// Publish the ptrace handle so the API can freeze tracees.
+    ///
+    /// Called once while the pipeline is built. Later calls are ignored,
+    /// which keeps `Bridge` shareable without interior mutability.
+    pub fn set_ptrace_handle(&self, handle: PtraceHandle) {
+        let _ = self.ptrace.set(handle);
+    }
+
+    /// Stop every traced process, returning those confirmed stopped.
+    ///
+    /// Returns an empty list when no ptrace handle has been published
+    /// (unit tests, or before the pipeline starts).
+    pub async fn freeze_tracees(&self) -> Vec<ProcessInfo> {
+        let Some(handle) = self.ptrace.get() else {
+            return Vec::new();
+        };
+        handle.freeze().await.into_iter().map(process_info).collect()
+    }
+
+    /// Snapshot of every live tracee with its current kernel state.
+    pub fn process_list(&self) -> Vec<ProcessInfo> {
+        self.tracees.pids().into_iter().map(process_info).collect()
     }
 
     /// The configured agent identifier.
@@ -279,6 +316,27 @@ impl Bridge {
     pub fn stall_state(&self) -> Option<StallState> {
         self.stall.lock().clone()
     }
+}
+
+/// Describe one tracee for API responses.
+///
+/// `binary` comes from `/proc/<pid>/comm` and `state` is the kernel
+/// state letter expanded to a word, so `t` (ptrace-stop) and `T`
+/// (job-control stop) both read as `"stopped"`.
+fn process_info(pid: nix::unistd::Pid) -> ProcessInfo {
+    let raw = pid.as_raw();
+    let binary = std::fs::read_to_string(format!("/proc/{raw}/comm"))
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|_| "<unknown>".to_owned());
+
+    let state = match crate::pipeline::freeze::proc_state(pid) {
+        Some('t') | Some('T') => "stopped",
+        Some('Z') => "zombie",
+        Some(_) => "running",
+        None => "gone",
+    };
+
+    ProcessInfo { pid: raw as u32, binary, state: state.to_owned() }
 }
 
 /// Thread-safe handle to the bridge.

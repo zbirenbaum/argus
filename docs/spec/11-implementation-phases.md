@@ -37,8 +37,8 @@
 - Per-path write locking from `01-supervisor.md`: lock → before_hash → resume → exit → after_hash → release
 - Durability modes: memory / local (default) / remote, per-path config
 - Initial state capture: walk watched paths, hash into CAS, commit zero
-- Pause/resume API: POST /agent/pause, /resume, GET /status
-- Pause-before-action: load rules from config, wire approval endpoints
+- Pause/resume API: POST /agent/pause, /resume, GET /status — freeze is active (`PTRACE_INTERRUPT` on every tracee), not just withheld PTRACE_CONT
+- Pause-before-action: load rules from config, freeze the agent, walk the approver chain, wire approval endpoints
 - Read dedup: skip content if hash matches last captured version
 - Stdio/pipe/PTY content stored in CAS by hash
 - TLS content: watch keylog file, store in CAS, emit tls_keys; parse mitmdump JSON, emit http_request/http_response
@@ -47,7 +47,9 @@
 
 **Deliverable:** Full content capture with before/after. Events streaming to S3. Digest cache working. Pause/resume + approval API functional. TLS bodies captured.
 
-**Validate with:** Tests 3 (file write/read/delete), 7 (write locking), 8 (TLS capture), 9 (pause/resume), 10 (pause-before-action).
+**Validate with:** Tests 3 (file write/read/delete), 7 (write locking), 8 (TLS capture), 9 (pause/resume), 10 (pause-before-action), 14 (verdict freeze).
+
+**Status:** landed, except concrete approver implementations and the `approvers:` config section — the chain is wired but empty at runtime, so every held syscall escalates to the human backstop. See `docs/tasks/p2-verdict-freeze.md`.
 
 **Not yet:** Merkle tree, restore, indexes, query API, stdio reconstruction.
 

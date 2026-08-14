@@ -8,7 +8,9 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use anyhow::Result;
 use futures::Stream;
@@ -23,7 +25,18 @@ use crate::tracer::memory::{read_bytes, read_c_string, write_bytes};
 use crate::tracer::regs::get_regs;
 
 use super::directive::PipelineDirective;
+use super::freeze;
 use super::raw_stop::{RawSyscallStop, StopType, SyscallArgs};
+use super::tracee_registry::TraceeRegistry;
+
+/// How long a freeze/thaw request waits for the ptrace thread before the
+/// wake signal is re-sent. The thread only misses a wake if the signal
+/// lands in the window between draining directives and re-entering
+/// `waitpid`, so one retry is normally enough.
+const FREEZE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Total time a freeze request waits before giving up.
+const FREEZE_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Ptrace options applied to every seized process.
 ///
@@ -128,10 +141,28 @@ fn translate_wait_status(status: WaitStatus) -> RawSyscallStop {
 
 /// Execute one `PipelineDirective` on behalf of the pipeline.
 ///
-/// Called synchronously in the ptrace thread after each stop is delivered.
-/// Returns `true` if the tracee was resumed by this function.
-fn execute_directive(directive: PipelineDirective) -> bool {
+/// Called synchronously in the ptrace thread, either while a stop is in
+/// flight or while draining after a wake. `in_flight` is the tracee the
+/// pipeline currently holds at a syscall stop, if any. Returns `true` if
+/// the tracee was resumed by this function.
+fn execute_directive(
+    directive: PipelineDirective,
+    registry: &TraceeRegistry,
+    in_flight: Option<Pid>,
+) -> bool {
     match directive {
+        PipelineDirective::Freeze { reply } => {
+            let _ = reply.send(freeze::freeze_all(registry, in_flight));
+            false
+        }
+        other => execute_tracee_directive(other),
+    }
+}
+
+/// Execute a directive that targets a single tracee.
+fn execute_tracee_directive(directive: PipelineDirective) -> bool {
+    match directive {
+        PipelineDirective::Freeze { .. } => unreachable!("handled by execute_directive"),
         PipelineDirective::Resume { pid, trace_exit, signal } => {
             if trace_exit {
                 let _ = ptrace::syscall(pid, signal);
@@ -156,13 +187,8 @@ fn execute_directive(directive: PipelineDirective) -> bool {
             let _ = reply.send(std::fs::read(&path).map_err(anyhow::Error::from));
             false
         }
-        PipelineDirective::InjectError { pid, errno: _ } => {
-            // At a seccomp entry stop the syscall hasn't run yet. Invalidate
-            // the syscall number so the kernel skips execution and returns
-            // -ENOSYS to the tracee. Using cont avoids extra entry/exit stops.
-            use crate::tracer::regs::set_syscall_nr;
-            let _ = set_syscall_nr(pid, -1);
-            let _ = ptrace::cont(pid, None);
+        PipelineDirective::InjectError { pid, errno } => {
+            inject_errno(pid, errno);
             true
         }
         PipelineDirective::ResolveFd { pid, fd, reply } => {
@@ -177,42 +203,88 @@ fn execute_directive(directive: PipelineDirective) -> bool {
     }
 }
 
+/// Cancel the pending syscall and hand `errno` back to the tracee.
+///
+/// At a seccomp entry stop the syscall has not run yet. Invalidating the
+/// syscall number makes the kernel skip execution; the return register
+/// then keeps whatever the tracer leaves in it, so the negated errno has
+/// to be written explicitly. Without that write the tracee sees whatever
+/// happened to be in the register — a denial that reports a nonsense
+/// errno instead of the `EPERM` the rules promise.
+fn inject_errno(pid: Pid, errno: i32) {
+    use crate::tracer::regs::{cancel_syscall, set_regs, set_ret, set_syscall_nr};
+
+    // aarch64 keeps the pending syscall number outside the GP register
+    // set, so it needs its own regset write.
+    let _ = set_syscall_nr(pid, -1);
+
+    match get_regs(pid) {
+        Ok(mut regs) => {
+            cancel_syscall(&mut regs);
+            set_ret(&mut regs, (-i64::from(errno)) as u64);
+            if let Err(e) = set_regs(pid, &regs) {
+                event!(
+                    name: "ptrace_thread.inject_errno_failed",
+                    Level::WARN,
+                    pid = pid.as_raw(),
+                    error.message = %e,
+                    "failed to write injected errno into tracee registers",
+                );
+            }
+        }
+        Err(e) => {
+            event!(
+                name: "ptrace_thread.inject_errno_regs_failed",
+                Level::WARN,
+                pid = pid.as_raw(),
+                error.message = %e,
+                "failed to read tracee registers for errno injection",
+            );
+        }
+    }
+
+    let _ = ptrace::cont(pid, None);
+}
+
 /// Tracks active tracee PIDs for the ptrace loop.
 ///
 /// Distinguishes tracees from non-tracee children (e.g. mitmdump) so
 /// `waitpid(-1)` events for non-tracees can be ignored. Exits the loop
 /// when all tracees have terminated.
+///
+/// Backed by the shared [`TraceeRegistry`] so the API server sees the
+/// same set — `GET /agent/status` lists it and `POST /agent/pause`
+/// freezes it.
 #[derive(Debug)]
 struct TraceeSet {
-    pids: std::collections::HashSet<Pid>,
+    registry: Arc<TraceeRegistry>,
 }
 
 impl TraceeSet {
     /// Create with the initial agent PID.
-    fn new(initial_pid: Pid) -> Self {
-        let mut pids = std::collections::HashSet::new();
-        pids.insert(initial_pid);
-        Self { pids }
+    fn new(initial_pid: Pid, registry: Arc<TraceeRegistry>) -> Self {
+        registry.insert(initial_pid);
+        Self { registry }
     }
 
     /// Returns true if `pid` is a known tracee.
     fn contains(&self, pid: &Pid) -> bool {
-        self.pids.contains(pid)
+        self.registry.contains(*pid)
     }
 
     /// Returns true when no tracees remain.
     fn is_empty(&self) -> bool {
-        self.pids.is_empty()
+        self.registry.is_empty()
     }
 
     /// Register a new tracee discovered via fork/clone.
     fn add(&mut self, pid: Pid) {
-        self.pids.insert(pid);
+        self.registry.insert(pid);
     }
 
     /// Remove a tracee that has been finally reaped.
     fn remove(&mut self, pid: &Pid) {
-        self.pids.remove(pid);
+        self.registry.remove(*pid);
     }
 
     /// Process a wait status. Returns `None` if the event is from a
@@ -259,7 +331,12 @@ fn ptrace_thread_main(
     stop_tx: mpsc::UnboundedSender<RawSyscallStop>,
     mut directive_rx: mpsc::UnboundedReceiver<PipelineDirective>,
     seize_ready: oneshot::Sender<Result<()>>,
+    registry: Arc<TraceeRegistry>,
 ) {
+    // Publish this thread as the wake target before any tracee exists so
+    // an early pause request can interrupt the wait below.
+    freeze::register_wake_target();
+
     match ptrace::seize(initial_pid, PTRACE_OPTS) {
         Err(e) => {
             event!(
@@ -280,12 +357,19 @@ fn ptrace_thread_main(
         }
     }
 
-    let mut tracees = TraceeSet::new(initial_pid);
+    let mut tracees = TraceeSet::new(initial_pid, Arc::clone(&registry));
 
     loop {
+        // Directives can arrive with no stop in flight — a pause request
+        // while the agent runs freely. Drain them before blocking so the
+        // freeze happens promptly rather than at the next syscall.
+        drain_directives(&mut directive_rx, &registry, None);
+
         let status = match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::__WALL)) {
             Ok(s) => s,
             Err(nix::errno::Errno::ECHILD) => break,
+            // A wake signal interrupted the wait: loop back and drain.
+            Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => {
                 event!(
                     name: "ptrace_thread.waitpid_error",
@@ -313,6 +397,7 @@ fn ptrace_thread_main(
             continue;
         }
 
+        let in_flight = stop.pid;
         if stop_tx.send(stop).is_err() {
             break;
         }
@@ -320,7 +405,7 @@ fn ptrace_thread_main(
         loop {
             match directive_rx.blocking_recv() {
                 Some(directive) => {
-                    if execute_directive(directive) {
+                    if execute_directive(directive, &registry, Some(in_flight)) {
                         break;
                     }
                 }
@@ -331,6 +416,17 @@ fn ptrace_thread_main(
         if tracees.is_empty() {
             break;
         }
+    }
+}
+
+/// Run every directive already queued, without blocking.
+fn drain_directives(
+    directive_rx: &mut mpsc::UnboundedReceiver<PipelineDirective>,
+    registry: &TraceeRegistry,
+    in_flight: Option<Pid>,
+) {
+    while let Ok(directive) = directive_rx.try_recv() {
+        execute_directive(directive, registry, in_flight);
     }
 }
 
@@ -419,6 +515,42 @@ impl PtraceHandle {
     pub fn inject_error(&self, pid: Pid, errno: i32) {
         self.directive(PipelineDirective::InjectError { pid, errno });
     }
+
+    /// Stop every live tracee and return the PIDs confirmed stopped.
+    ///
+    /// Returns an empty vector if the ptrace thread has already exited or
+    /// does not answer within [`FREEZE_TOTAL_TIMEOUT`]. The wake signal is
+    /// re-sent between polls: the thread only misses one if it lands in
+    /// the narrow window before `waitpid` blocks, and a resend closes it.
+    pub async fn freeze(&self) -> Vec<Pid> {
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        self.directive(PipelineDirective::Freeze { reply: reply_tx });
+
+        let deadline = tokio::time::Instant::now() + FREEZE_TOTAL_TIMEOUT;
+        loop {
+            freeze::wake();
+            match tokio::time::timeout_at(
+                deadline.min(tokio::time::Instant::now() + FREEZE_RETRY_INTERVAL),
+                &mut reply_rx,
+            )
+            .await
+            {
+                Ok(Ok(pids)) => return pids,
+                // Sender dropped: the ptrace thread is gone, so every
+                // tracee is either reaped or beyond our control.
+                Ok(Err(_)) => return Vec::new(),
+                Err(_) if tokio::time::Instant::now() >= deadline => {
+                    event!(
+                        name: "ptrace_thread.freeze_no_reply",
+                        Level::WARN,
+                        "ptrace thread did not answer the freeze request",
+                    );
+                    return Vec::new();
+                }
+                Err(_) => continue,
+            }
+        }
+    }
 }
 
 /// Async stream of `RawSyscallStop` events from the ptrace thread.
@@ -453,14 +585,19 @@ impl PtraceStream {
     /// # Errors
     ///
     /// Returns an error if the OS fails to create the ptrace thread.
-    pub fn spawn(child_pid: Pid) -> Result<(Self, oneshot::Receiver<Result<()>>, std::thread::JoinHandle<()>)> {
+    pub fn spawn(
+        child_pid: Pid,
+        registry: Arc<TraceeRegistry>,
+    ) -> Result<(Self, oneshot::Receiver<Result<()>>, std::thread::JoinHandle<()>)> {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let (directive_tx, directive_rx) = mpsc::unbounded_channel();
         let (seize_tx, seize_rx) = oneshot::channel();
 
         let handle = std::thread::Builder::new()
             .name("ptrace-loop".into())
-            .spawn(move || ptrace_thread_main(child_pid, stop_tx, directive_rx, seize_tx))
+            .spawn(move || {
+                ptrace_thread_main(child_pid, stop_tx, directive_rx, seize_tx, registry)
+            })
             .map_err(|e| anyhow::anyhow!("failed to spawn ptrace thread: {e}"))?;
 
         let stream = Self { stop_rx, directive_tx };
@@ -498,11 +635,16 @@ mod tests {
         Pid::from_raw(n)
     }
 
+    /// Fresh registry-backed tracee set for a single test.
+    fn tracee_set(initial: Pid) -> TraceeSet {
+        TraceeSet::new(initial, Arc::new(TraceeRegistry::new()))
+    }
+
     // ── TraceeSet: non-tracee filtering ──────────────────────────────
 
     #[test]
     fn tracee_set_ignores_unknown_pid() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // mitmdump (pid 99) exits — should be ignored.
         let status = WaitStatus::Exited(pid(99), 0);
@@ -512,14 +654,14 @@ mod tests {
 
     #[test]
     fn tracee_set_tracks_initial_pid() {
-        let set = TraceeSet::new(pid(10));
+        let set = tracee_set(pid(10));
         assert!(set.contains(&pid(10)));
         assert!(!set.contains(&pid(99)));
     }
 
     #[test]
     fn tracee_set_auto_adds_unknown_non_final() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // A child's initial stop can arrive before the parent's fork event.
         // Non-final stops from unknown PIDs should auto-add the PID.
@@ -537,7 +679,7 @@ mod tests {
 
     #[test]
     fn tracee_set_learns_child_from_fork() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // Parent (10) forks child (20).
         let status = WaitStatus::PtraceEvent(
@@ -557,7 +699,7 @@ mod tests {
 
     #[test]
     fn tracee_set_removes_on_exited() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
         set.add(pid(20));
 
         // pid 20 exits normally.
@@ -575,7 +717,7 @@ mod tests {
 
     #[test]
     fn tracee_set_removes_on_signaled() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         let result = set.process_wait(WaitStatus::Signaled(pid(10), Signal::SIGKILL, false));
         assert!(result.is_some());
@@ -586,7 +728,7 @@ mod tests {
 
     #[test]
     fn tracee_set_empty_after_all_exit() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
         set.add(pid(20));
         set.add(pid(30));
 
@@ -602,7 +744,7 @@ mod tests {
 
     #[test]
     fn ptrace_event_exit_is_not_final() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // PTRACE_EVENT_EXIT is a stop, not the final reap.
         let status = WaitStatus::PtraceEvent(
@@ -621,7 +763,7 @@ mod tests {
 
     #[test]
     fn signal_delivery_stop_is_not_final() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // SIGCHLD delivered to tracee — this is a ptrace signal-delivery stop.
         let status = WaitStatus::Stopped(pid(10), Signal::SIGCHLD);
@@ -637,11 +779,11 @@ mod tests {
 
     #[test]
     fn full_lifecycle_with_fork_and_exit() {
-        let mut set = TraceeSet::new(pid(10));
+        let mut set = tracee_set(pid(10));
 
         // Agent (10) forks child (20) — learned via add().
         set.add(pid(20));
-        assert_eq!(set.pids.len(), 2);
+        assert_eq!(set.registry.len(), 2);
 
         // Child (20) receives SIGCHLD — non-final, re-inject signal.
         let result = set.process_wait(WaitStatus::Stopped(pid(20), Signal::SIGCHLD));

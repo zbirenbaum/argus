@@ -2,13 +2,29 @@
 
 ## Pause/Resume
 
-Supervisor controls when every traced process resumes. Pausing = stop calling PTRACE_CONT. Kernel keeps processes stopped, zero CPU.
+Supervisor controls when every traced process resumes. A paused agent consumes zero CPU: the kernel holds each process stopped. Withholding PTRACE_CONT is only half of it — see [Freeze mechanics](#freeze-mechanics).
 
 ```
 POST /agent/pause   → Freeze all. Returns when all stopped.
 POST /agent/resume  → Resume all. Returns immediately.
 GET  /agent/status  → running | paused | partially_paused + process list
 ```
+
+### Freeze mechanics
+
+Withholding PTRACE_CONT only holds a process that is already stopped at a syscall. A tracee doing arithmetic, or blocked in a syscall the filter does not trap, keeps running — so pause cannot wait for it to trap.
+
+Freezing is therefore active: the supervisor sends `PTRACE_INTERRUPT` to every live tracee and confirms each one reached a stopped state (`/proc/<pid>/stat` state `t` or `T`) before the pause call returns. The tracee currently held by the pipeline at a syscall stop counts as already stopped.
+
+The resulting interrupt-stops are deliberately **not reaped**. The kernel keeps each process stopped at zero CPU until the ptrace thread collects the notification, which it cannot do while the pause flag is set. There is no separate "thaw" step: on resume the queued stops flow through the normal pipeline path and are resumed like any other passthrough.
+
+Freeze requests are executed on the ptrace thread — ptrace requests are only valid from the thread that attached. When no stop is in flight that thread is blocked in `waitpid`, so a freeze request is accompanied by a signal that interrupts the wait (`EINTR`) and makes it drain pending requests.
+
+**Status semantics.** `running` = no pause requested. `paused` = pause requested and no traced process is running. `partially_paused` = pause requested but at least one tracee is still running — a process in an uninterruptible wait, for example. The process list carries `{pid, binary, state}` per tracee.
+
+### Tracee lifetime
+
+Tracees outlive the supervisor: ptrace detaches on tracer exit, it does not kill. Killing the supervisor therefore leaves the agent's processes running, which matters for cleanup in tests and orchestration.
 
 ## Rules
 
@@ -18,7 +34,9 @@ Rules control what traced processes can do. Two types share the same hook point 
 
 **Block rules** — instant deny, no approval prompt. The syscall gets EPERM injected immediately and a `blocked` event is emitted. Use for hard security boundaries.
 
-**Pause-before-action rules** — hold the process, emit `pending_approval`, wait for operator decision via API/WebSocket. Approve resumes normally; deny injects EPERM.
+**Pause-before-action rules** — freeze the agent, ask the approver chain for a verdict, and act on it. An escalation reaches the operator as a `pending_approval` on the approvals API. Approve resumes normally; deny injects EPERM.
+
+A match freezes **every** traced process, not only the one that made the syscall (same mechanism as `POST /agent/pause`). The calling tracee is already held at its syscall-entry stop; its siblings are not, and a sibling left running could complete the very action under review while the verdict is outstanding.
 
 ### Evaluation Order
 
@@ -83,9 +101,13 @@ DELETE /rules/{index}      → Remove single rule, swap
 
 1. Tracee stops at syscall entry (no block rule matched)
 2. Check pause-before-action rules against syscall + path/binary
-3. If match: emit `pending_approval` event, notify via API/WebSocket
-4. Wait for `POST /approvals/{action_id}/approve` or `/deny`
-5. Approve → resume normally. Deny → inject EPERM
+3. If match: freeze every traced process (see [Freeze mechanics](#freeze-mechanics)) and mint an `action_id` for the decision
+4. Walk the approver chain with an `ApprovalRequest` carrying that `action_id`
+5. `Allow` → emit `approval_granted`, resume normally
+6. `Deny` → emit `approval_denied`, inject EPERM
+7. `Escalate` (including "no approvers configured") → emit `pending_approval` under the same `action_id`, publish it on `/approvals/pending`, and wait for `POST /approvals/{action_id}/approve` or `/deny`. The agent stays frozen for the whole wait.
+
+The chain is consulted on a blocking thread, not on the ptrace loop. Nothing resumes the tracee until a verdict lands, so a slow judge costs latency, never correctness.
 
 ### Approvals API
 
@@ -107,7 +129,9 @@ Rules change events:
 {"type": "rules_updated", "block_count": 3, "pause_before_count": 4, "source": "api"}
 ```
 
-### WebSocket
+### WebSocket (planned)
+
+Not implemented. The supervisor serves a single `ws://127.0.0.1:9090/ws` event stream; there is no approvals-specific socket and no client→server decision channel yet. Approve/deny is REST-only.
 
 ```
 ws://127.0.0.1:9090/ws/approvals
@@ -147,20 +171,30 @@ Approvers are evaluated in config order. First non-`Escalate` verdict wins.
 1. If an approver returns `Allow` or `Deny` → that's the final decision, chain stops.
 2. If an approver returns `Escalate` → log it, move to the next approver.
 3. If an approver returns an error → treat as implicit escalation, move to next.
-4. If every approver escalates (or errors) → deny with `system:chain-exhausted`.
+4. If the chain is **exhausted** → escalate to the human approval API.
 
-The last approver should be a terminal backstop that never escalates (e.g. the human API endpoint, which blocks until a human decides).
+**Exhausted** means the chain produced no terminal verdict: every configured approver returned `Escalate` or failed with an error, or no approvers are configured at all. It is not a decision — it means nobody in the chain was willing to decide.
+
+The human approval API (`/approvals/pending` + approve/deny) is the supervisor's terminal backstop and sits **outside** the configured chain. Exhaustion routes there, the agent stays frozen, and the wait is unbounded — the backstop blocks until a human decides. Denying on exhaustion instead would mean that configuring any judge silently disables human approval; escalating keeps the backstop reachable no matter what the chain does.
+
+Two entry points express this:
+
+- `Approvers::judge` — returns `Deny { approver: "system:chain-exhausted" }` on exhaustion. For callers whose chain carries its own terminal backstop.
+- `Approvers::judge_or_escalate` — returns `Escalate { approver: "system:chain-exhausted" }` on exhaustion. This is what the policy gate calls, so exhaustion reaches the operator.
+
+Both are fail-closed: neither can turn an exhausted chain into an `Allow`.
 
 ### Planned Approver Implementations
 
-1. **API Approver** — existing REST/WebSocket endpoint (`POST /approvals/{id}/approve|deny`). Human operator via CLI or dashboard. Always terminal — blocks until a human decides.
-2. **LLM Judge** — HTTP call to an LLM API with the `ApprovalRequest` as context. Returns `Allow`/`Deny` if confident, `Escalate` if confidence is below threshold.
-3. **Webhook** — POST to a configured URL, wait for response. Supports push notifications, Slack bots, PagerDuty, etc.
-4. **Email/SMS** — Notification with approve/deny links. Polls for response or uses callback URL.
+None of these exist yet. The chain is injectable — `PolicyGate::with_approvers` — and is exercised in tests with stub judges, but nothing constructs a non-empty chain at runtime, so today every pause-before-action match escalates to the human backstop. The human path itself is built into the gate rather than being a chain member.
 
-### Configuration
+1. **LLM Judge** — HTTP call to an LLM API with the `ApprovalRequest` as context. Returns `Allow`/`Deny` if confident, `Escalate` if confidence is below threshold.
+2. **Webhook** — POST to a configured URL, wait for response. Supports push notifications, Slack bots, PagerDuty, etc.
+3. **Email/SMS** — Notification with approve/deny links. Polls for response or uses callback URL.
 
-Approver order in config is the escalation chain order. Automated judges first, human backstop last.
+### Configuration (planned)
+
+Not implemented — `SupervisorConfig` has no `approvers` field yet, so this block is a design target, not something the supervisor reads. Approver order in config is the escalation chain order, automated judges first. The human backstop needs no entry: it is always last.
 
 ```yaml
 approvers:
@@ -172,5 +206,4 @@ approvers:
   - type: webhook
     url: https://hooks.example.com/approvals
     timeout: 60s
-  - type: api
 ```

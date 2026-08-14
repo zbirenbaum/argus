@@ -1,6 +1,11 @@
 # Pipeline Status
 
-Last updated: 2026-03-15
+Last updated: 2026-08-14
+
+> **Staleness warning.** The dead-code audit and dispatch tables below
+> were written on 2026-03-15 and have not been re-derived since. The
+> validation results, test counts, and pause/approval rows were refreshed
+> on 2026-08-14; treat everything else as historical.
 
 ## Context Recovery
 
@@ -21,7 +26,7 @@ docker exec argus-arm64 cargo build --target aarch64-unknown-linux-musl -p super
 # Unit tests
 docker exec argus-arm64 cargo test --target aarch64-unknown-linux-musl -p argus -p supervisor -p argus-api
 
-# Validation tests (all 13)
+# Validation tests (all 14)
 docker exec argus-arm64 ./tests/validate.sh
 
 # Single validation test
@@ -60,7 +65,7 @@ These have passing unit tests but no methods are called from the actual pipeline
 | Module | What's tested | What's missing | Blocker |
 |-|-|-|-|
 | `index/` (PathIndex, TypeIndex, PidIndex, QueryEngine) | 338 tests pass | Zero index methods called at runtime. `QueryEngine` never constructed outside tests. | p3-query-api (not started) — would expose indexes through HTTP endpoints |
-| `approver/` + `api/routes` (pause/resume/approvals) | 36 tests pass (API layer) | API endpoints work but `cancel_syscall`/`set_ret`/`set_regs` in `regs.rs` are never called — pause has no effect on traced process | ptrace-level enforcement not wired into pipeline stages |
+| `approver/` (chain, verdicts, parallel policies) | 28 tests pass | Chain is wired into `PolicyGate` and covered end-to-end, but no concrete `Approver` exists and config has no `approvers:` section, so nothing builds a non-empty chain at runtime | Needs LLM/webhook approver implementations — see `p2-verdict-freeze.md` |
 | `pipeline/capture_policy.rs` | `should_capture()` tested | `should_capture()` never called — classify stage doesn't consult policy | Needs call site in classify stage |
 | `net/dedup.rs` (NetworkDedup) | Unit tests pass | Never constructed outside tests | p2-tls-content integration incomplete |
 
@@ -134,12 +139,14 @@ These have passing unit tests but no methods are called from the actual pipeline
 | 5: Subprocess tree | PASS | python3→ls with pipe_data back to parent |
 | 6: Escape test | PASS | Tool creation, exec, write attribution, unlink |
 | 7: Write locking | PASS | 49 write events, unbroken hash chain across 3 concurrent threads |
-| 8: TLS capture | not tested | |
-| 9: Pause/resume | not tested | API layer works (36 tests) but ptrace enforcement not wired |
-| 10: Pause-before-action | not tested | Approver chain tested (22 tests) but `cancel_syscall` not wired |
-| 11: Snapshot/restore | not tested | Restore endpoint works (8 tests) but full checkpoint flow not wired |
-| 12: Initial state | not tested | |
-| 13: Child reaping | not tested | |
+| 7b: Write interleaving | PASS | 400 writes across 4 pthreads, no interleaving |
+| 8: TLS capture | PASS | connect, tls_keys, http_request/http_response via mitmdump |
+| 9: Pause/resume | PASS | freeze stops every tracee, agent_pause/agent_resume emitted |
+| 10: Pause-before-action | PASS | pending_approval, deny injects EPERM, file survives |
+| 11: Snapshot/restore | PASS | |
+| 12: Initial state | PASS | |
+| 13: Child reaping | PASS | 10 concurrent children, no zombies |
+| 14: Verdict freeze | PASS | whole agent stopped at zero CPU per verdict; EPERM on deny |
 
 ## Ready to Dispatch (dependencies met)
 
@@ -147,7 +154,7 @@ These have passing unit tests but no methods are called from the actual pipeline
 |-|-|-|
 | P3: Query API | indexes (merged), merkle-tree (merged), pause-resume-api (merged) | **READY** — would wire QueryEngine to HTTP, eliminating index dead code |
 | P4: Container Image | supervisor-main (merged), s3-upload (merged) | **READY** |
-| Wire ptrace enforcement | pause-resume-api (merged) | **READY** — connect `cancel_syscall`/`set_ret` to pipeline, make pause actually stop syscalls |
+| Concrete approvers | verdict-freeze (chain wired) | **READY** — LLM judge / webhook + `approvers:` config; the chain and freeze already work |
 | Wire CapturePolicy | content-capture (merged) | **READY** — add `should_capture()` call in classify stage |
 | Wire ProcessTree | state (merged), tracer-loop (merged) | **READY** — call `add_process`/`mark_exited`/`get_children` from classify stage fork/exit handlers |
 | Wire PipeRegistry lifecycle | state (merged) | **READY** — call `on_fork`/`on_close`/`on_dup` from classify stage |
@@ -167,16 +174,17 @@ No agents currently running.
 ## Next Steps (in order)
 
 1. **Delete dead code** — `tracer/syscall_nr.rs`, dead functions in `memory.rs`, `pending.rs`
-2. **Wire disconnected pieces** — ProcessTree, PipeRegistry lifecycle, CapturePolicy, ptrace enforcement for pause
+2. **Wire disconnected pieces** — ProcessTree, PipeRegistry lifecycle, CapturePolicy (ptrace enforcement for pause is done — see `p2-verdict-freeze.md`)
 3. **Dispatch P3 Query API** — unblocked, would wire indexes to HTTP
 4. **Dispatch P4 Container Image** — unblocked, can run in parallel
-5. **Run validation tests 8-13** — after wiring + query API are merged
+5. **Add concrete approvers** — the judge chain is wired but empty at runtime
 6. **Dispatch P3 Realtime API** — after query-api merged
 7. **Clean up stale worktrees** — old worktrees from merged branches
 
 ## Build Status
 
-- Last full test run: 408 pass (391 argus + 17 supervisor + 9 argus-api), 0 fail, 5 ignored
+- Last full test run (2026-08-14): 704 pass (681 argus + 14 supervisor + 9 argus-api), 0 fail, 3 ignored
+- Validation suite: 15/15 entries PASS (tests 1-14 including 7b)
 - **144 compiler warnings** — see audit above
 - All P1 + P2 + P3 (indexes, merkle) merged to main
 - Validation tests 1-7 pass on native aarch64

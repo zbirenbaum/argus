@@ -36,11 +36,29 @@ Run in order. Later tests depend on earlier mechanisms working.
 | 5 | Subprocess tree | process_tree reconstruction, pipe-connected stdio |
 | 6 | Agent-created tools | Self-written scripts don't escape tracing |
 | 7 | Write locking | Concurrent writes produce unbroken hash chain |
+| 7b | Write interleaving | Hardened variant: no interleaved partial writes |
 | 8 | TLS capture | SSLKEYLOGFILE, mitmdump, HTTP body in CAS |
 | 9 | Pause/resume | Freeze/unfreeze via API |
 | 10 | Pause-before-action | Rule matching, approval, EPERM injection |
 | 11 | Snapshot and restore | Point-in-time restore to new directory |
 | 12 | Initial state | Commit zero captures pre-agent filesystem |
+| 13 | Child reaping | Concurrent short-lived children leave no zombies |
+| 14 | Verdict freeze | A verdict stops every traced process; deny returns EPERM |
+
+### Running them
+
+All of the above are automated in `tests/validate.sh`, which must be run
+inside the `argus-arm64` container (x86 under Rosetta breaks ptrace and
+seccomp — tests 2-7 fail silently there).
+
+```bash
+docker exec argus-arm64 ./tests/validate.sh          # all tests
+docker exec argus-arm64 ./tests/validate.sh 9 10 14  # selected tests
+```
+
+Test 14 delegates to `tests/repro-verdict-freeze.sh`, which can also be
+run on its own and exits non-zero on any spec violation. The manual
+recipes below describe what each test exercises.
 
 ---
 
@@ -227,14 +245,16 @@ curl -X POST http://127.0.0.1:9090/agent/pause
 
 # Check status
 curl http://127.0.0.1:9090/agent/status
-# Verify: status is "paused", bash listed as stopped
+# Verify: status is "paused", bash listed with state "stopped"
 
 # Unfreeze
 curl -X POST http://127.0.0.1:9090/agent/resume
 # Verify: bash unfreezes, pending input is processed
 ```
 
-**Validates:** Phase 2 pause/resume API, PTRACE_CONT suppression, agent_pause/agent_resume events.
+**Expect:** the pause response lists the processes it stopped, and each one reads as stopped in `/proc/<pid>/stat` (state `t`) with a CPU counter that stops advancing. A process doing pure computation must stop too — withholding PTRACE_CONT alone would not touch it.
+
+**Validates:** Phase 2 pause/resume API, PTRACE_INTERRUPT freeze, agent_pause/agent_resume events.
 
 ---
 
@@ -268,7 +288,7 @@ curl -X POST http://127.0.0.1:9090/approvals/<action_id>/deny
 # The rm command should fail with "Permission denied"
 ```
 
-**Expect:** `pending_approval` event emitted, process frozen until decision, `approval_denied` event, EPERM injected so process sees permission denied.
+**Expect:** `pending_approval` event emitted, the whole agent frozen until the decision, `approval_denied` event, EPERM injected so `rm` reports "Operation not permitted" and the file survives.
 
 **Validates:** Phase 2 pause-before-action rules, rule matching, approval API, EPERM injection.
 
@@ -322,6 +342,40 @@ echo "nested" > /workspace/subdir/nested.txt
 - `argus cat <hash>` for each file returns correct content
 
 **Validates:** Phase 1/2 startup sequence step 7, initial filesystem walk, commit zero, Merkle tree baseline.
+
+---
+
+### Test 13: Child Process Reaping
+
+```bash
+./supervisor --agent-id test --storage.backend local-only -- python3 -c '
+import subprocess
+procs = [subprocess.Popen(["bash", "-c", f"echo child-{i} > /workspace/child_{i}.txt && cat /workspace/child_{i}.txt"]) for i in range(10)]
+for p in procs: p.wait()
+'
+```
+
+Simulates a long-running parent (Node.js, Claude Code) spawning many short-lived children at once.
+
+**Expect:** an `exit` event per child, writes captured for each, and zero zombie processes left behind. Zombies mean the ptrace loop stalled reaping children — typically head-of-line blocking in directive processing.
+
+**Validates:** Phase 1 fork-following and reaping under concurrency.
+
+---
+
+### Test 14: Verdict Freeze
+
+Automated as `tests/repro-verdict-freeze.sh`. Runs an agent with a CPU-bound sibling process alongside a syscall that trips a pause-before-action rule, then checks the three verdict outcomes.
+
+**Expect:**
+
+- While a verdict is outstanding (escalated to the human backstop): every traced process is stopped, including the sibling that never traps, and its CPU counter does not advance. `GET /agent/status` lists them.
+- `POST /agent/pause` during that window returns the stopped process list, and each listed pid really is stopped.
+- Deny → `rm` gets `EPERM` ("Operation not permitted"), the file survives, `approval_denied` is emitted.
+- Approve → the syscall proceeds.
+- Pausing an agent with no verdict outstanding (ptrace thread parked in `waitpid`) still stops it, and resume releases it.
+
+**Validates:** freeze mechanics (`PTRACE_INTERRUPT` + wake signal), approver-chain wiring, errno injection, `/agent/pause` and `/agent/status` contracts.
 
 ---
 

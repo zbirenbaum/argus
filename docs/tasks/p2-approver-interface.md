@@ -35,9 +35,14 @@ Last approver should be terminal backstop (human API endpoint).
 ## What's missing
 
 - Concrete `Approver` implementations (ApiApprover, LlmApprover, WebhookApprover)
-- Wiring `Approvers` into `TracerLoop` and `SupervisorState`
 - Config deserialization for `approvers:` YAML section
 - Timeout wrapper for slow approvers
+
+Chain wiring is done: `PolicyGate::with_approvers` consults the chain on
+every pause-before-action match and maps verdicts onto resume / EPERM /
+human backstop. See [p2-verdict-freeze.md](p2-verdict-freeze.md). Until
+a concrete approver exists there is nothing to configure, so a deployed
+supervisor still escalates every match to the human API.
 
 ## How to test
 

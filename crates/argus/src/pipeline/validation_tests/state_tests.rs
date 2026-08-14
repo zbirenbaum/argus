@@ -122,7 +122,8 @@ async fn test_policy_gate_deny_blocks_and_injects_eperm() {
     ));
     rs.compile_patterns();
     let shared = test_shared();
-    let (gate, mut rx) = make_gate(Arc::clone(&shared), rs);
+    let (gate, rx) = make_gate(Arc::clone(&shared), rs);
+    let mut rx = crate::pipeline::freeze::spawn_freeze_responder(rx);
     let event = make_event(99, Classification::FileUnlink {
         path: PathBuf::from("/workspace/critical.txt"),
     });
@@ -143,7 +144,7 @@ async fn test_policy_gate_deny_blocks_and_injects_eperm() {
         PolicyOutcome::Blocked { pid, .. } => assert_eq!(pid, 99),
         PolicyOutcome::Approved(_) => panic!("expected Blocked after Deny"),
     }
-    let dir = rx.try_recv().expect("directive must be sent");
+    let dir = rx.recv().await.expect("directive must be sent");
     assert!(matches!(dir, PipelineDirective::InjectError { errno, .. } if errno == libc::EPERM));
 }
 
@@ -159,7 +160,8 @@ async fn test_policy_gate_approve_passes_through() {
     ));
     rs.compile_patterns();
     let shared = test_shared();
-    let (gate, mut rx) = make_gate(Arc::clone(&shared), rs);
+    let (gate, rx) = make_gate(Arc::clone(&shared), rs);
+    let mut rx = crate::pipeline::freeze::spawn_freeze_responder(rx);
     let event = make_event(77, Classification::FileUnlink {
         path: PathBuf::from("/workspace/safe.txt"),
     });
@@ -177,7 +179,8 @@ async fn test_policy_gate_approve_passes_through() {
     });
 
     assert!(matches!(gate.evaluate(event).await, PolicyOutcome::Approved(_)));
-    assert!(rx.try_recv().is_err(), "no directive for an approved action");
+    let idle = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+    assert!(idle.is_err(), "no directive for an approved action");
 }
 
 // ── Test 11 — Snapshot ────────────────────────────────────────────────────────

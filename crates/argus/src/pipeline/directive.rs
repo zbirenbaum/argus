@@ -55,6 +55,13 @@ pub enum PipelineDirective {
     /// Inject an errno return value and resume.
     InjectError { pid: Pid, errno: i32 },
 
+    /// Stop every live tracee and report those confirmed stopped.
+    ///
+    /// Used by `POST /agent/pause` and by the policy gate while a
+    /// verdict is outstanding. Does not resume the in-flight tracee —
+    /// the reply arrives while it is still held at its syscall stop.
+    Freeze { reply: oneshot::Sender<Vec<Pid>> },
+
     /// Resolve a file descriptor number to its filesystem path.
     ResolveFd {
         pid: Pid,
@@ -85,6 +92,7 @@ impl std::fmt::Debug for PipelineDirective {
             }
             Self::ReadFile { path, .. } => write!(f, "ReadFile({path:?})"),
             Self::InjectError { pid, errno } => write!(f, "InjectError({pid}, {errno})"),
+            Self::Freeze { .. } => write!(f, "Freeze"),
             Self::ResolveFd { pid, fd, .. } => write!(f, "ResolveFd({pid}, {fd})"),
             Self::WriteMemory { pid, addr, .. } => {
                 write!(f, "WriteMemory({pid}, {addr:#x})")

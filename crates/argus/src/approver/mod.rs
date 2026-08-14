@@ -136,6 +136,27 @@ impl Approvers {
 
         policy::walk_chain(&self.chain, request)
     }
+
+    /// Walk the chain, reporting exhaustion as an escalation.
+    ///
+    /// [`Approvers::judge`] denies when every approver escalates, which
+    /// is the right default for a chain that ends in a terminal
+    /// backstop. The supervisor's backstop is the human approval API,
+    /// which lives outside this chain, so it needs to tell "the judges
+    /// decided to reject" apart from "the judges want a human" — this
+    /// method keeps that distinction.
+    pub fn judge_or_escalate(&self, request: &ApprovalRequest) -> Verdict {
+        if self.chain.is_empty() {
+            return Verdict::escalate("no approvers configured", "system");
+        }
+
+        match policy::walk_chain(&self.chain, request) {
+            Verdict::Deny { approver, .. } if approver == "system:chain-exhausted" => {
+                Verdict::escalate("all approvers escalated", "system:chain-exhausted")
+            }
+            verdict => verdict,
+        }
+    }
 }
 
 #[cfg(test)]

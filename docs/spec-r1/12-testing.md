@@ -1,5 +1,15 @@
 # Testing & Validation
 
+> The suite is automated in `tests/validate.sh` and must run inside the
+> `argus-arm64` container (x86 under Rosetta breaks ptrace/seccomp).
+> `docs/spec/12-testing.md` carries the full list, including tests 7b,
+> 13, and 14; the recipes here are the manual equivalents.
+>
+> ```bash
+> docker exec argus-arm64 ./tests/validate.sh        # all 14
+> docker exec argus-arm64 ./tests/validate.sh 9 10   # selected
+> ```
+
 ## Minimal Infrastructure
 
 Docker with SYS_PTRACE. No K8s, no S3. Supervisor runs in `local-only` storage mode.
@@ -289,7 +299,10 @@ Confirms: all traced processes freeze on pause, unfreeze on resume, API returns 
 curl -s -X POST http://127.0.0.1:9090/agent/pause | jq .
 # Expect: {"status":"paused","stopped_processes":[{"pid":...,"binary":"/bin/bash",...}]}
 
-# Verify bash is frozen — typing in terminal 1 produces nothing
+# Verify bash is frozen — typing in terminal 1 produces nothing.
+# Freezing is active (PTRACE_INTERRUPT), so a process busy computing
+# stops too, not only one sitting in a syscall. Confirm with
+# /proc/<pid>/stat: state 't' and a CPU counter that stops advancing.
 
 # Check status
 curl -s http://127.0.0.1:9090/agent/status | jq .
@@ -320,7 +333,8 @@ pause_before:
 ./supervisor --config test-config.yaml -- bash
 # In bash:
 rm /workspace/test-file.txt
-# bash hangs — the rm is paused at syscall entry
+# bash hangs — the rm is paused at syscall entry, and every other
+# traced process is frozen too until the verdict lands
 ```
 
 **Terminal 2:**
@@ -412,6 +426,34 @@ cat /tmp/initial/workspace/data/train.csv
 ls /tmp/initial/workspace/new.txt
 # Should not exist
 ```
+
+---
+
+### Test 13: Child Process Reaping
+
+Confirms: concurrent short-lived children are reaped, no zombies accumulate.
+
+```bash
+./supervisor --agent-id test --storage.backend local-only -- python3 -c '
+import subprocess
+procs = [subprocess.Popen(["bash", "-c", f"echo child-{i} > /workspace/child_{i}.txt"]) for i in range(10)]
+for p in procs: p.wait()
+'
+```
+
+Expect an `exit` event per child and zero zombies. Zombies mean the ptrace loop stalled reaping — typically head-of-line blocking in directive processing.
+
+---
+
+### Test 14: Verdict Freeze
+
+Confirms: a verdict stops every traced process; deny returns EPERM.
+
+```bash
+docker exec argus-arm64 ./tests/repro-verdict-freeze.sh
+```
+
+Runs an agent with a CPU-bound sibling alongside a syscall that trips a pause-before-action rule. Expect: while the verdict is outstanding every tracee is stopped at zero CPU (including the sibling that never traps) and listed by `GET /agent/status`; `POST /agent/pause` in that window returns the stopped list; deny yields `EPERM` with the file intact; approve lets the syscall through; and pausing an agent with no verdict outstanding still stops it.
 
 ---
 

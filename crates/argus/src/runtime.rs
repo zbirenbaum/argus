@@ -350,8 +350,12 @@ impl SupervisorRuntime {
         self,
         child_pid: Pid,
     ) -> Result<(PipelineRunner, tokio::sync::oneshot::Receiver<Result<()>>, JoinHandle<()>)> {
-        let (ptrace_stream, seize_rx, ptrace_thread) = PtraceStream::spawn(child_pid)?;
+        // The registry lives in shared state so `GET /agent/status` and
+        // `POST /agent/pause` see the same tracee set as the ptrace thread.
+        let (ptrace_stream, seize_rx, ptrace_thread) =
+            PtraceStream::spawn(child_pid, self.shared.tracees())?;
         let handle = ptrace_stream.handle();
+        self.shared.set_ptrace_handle(handle.clone());
 
         let fd_tables: Arc<DashMap<Pid, FdTable>> = Arc::new(DashMap::new());
         let pipe_registry = Arc::new(parking_lot::Mutex::new(PipeRegistry::new()));

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validation tests 1-12 for Argus supervisor.
+# Validation tests 1-14 for Argus supervisor.
 #
 # Runs inside the dev container (argus-arm64 or argus-x86).
 # Usage: ./tests/validate.sh [test_number...]
@@ -624,8 +624,10 @@ test_10() {
     local action_id=""
     while [ -z "$action_id" ] && [ "$waited" -lt 40 ]; do
         sleep 0.3
+        # `|| true`: the API is not up yet on the first polls, and under
+        # `set -e -o pipefail` a failed curl would abort the whole script.
         action_id=$(curl -sf http://127.0.0.1:19090/approvals/pending 2>/dev/null \
-            | jq -r '.pending[0].action_id // empty' 2>/dev/null)
+            | jq -r '.pending[0].action_id // empty' 2>/dev/null || true)
         waited=$((waited + 1))
     done
 
@@ -1005,6 +1007,19 @@ print(f'zombies={zombies}')
     fi
 }
 
+test_14() {
+    echo "Test 14: Verdict Freeze (judge decided: needs approval / rejected)"
+    cleanup_workspace
+
+    # Delegates to the standalone reproduction so the same checks can be
+    # run on their own: tests/repro-verdict-freeze.sh
+    if bash "$SCRIPT_DIR/repro-verdict-freeze.sh"; then
+        record 14 "Verdict freeze" "PASS"
+    else
+        record 14 "Verdict freeze" "FAIL"
+    fi
+}
+
 # --- Runner ---
 
 print_summary() {
@@ -1022,7 +1037,7 @@ print_summary() {
     fi
 }
 
-ALL_TESTS=(1 2 3 4 5 6 7 7b 8 9 10 11 12 13)
+ALL_TESTS=(1 2 3 4 5 6 7 7b 8 9 10 11 12 13 14)
 
 if [ $# -gt 0 ]; then
     TESTS=("$@")
@@ -1052,6 +1067,7 @@ for t in "${TESTS[@]}"; do
         11) test_11 ;;
         12) test_12 ;;
         13) test_13 ;;
+        14) test_14 ;;
         *)  echo "Unknown test: $t"; exit 1 ;;
     esac
 done

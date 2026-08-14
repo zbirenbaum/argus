@@ -100,6 +100,11 @@ async fn drive_mock(
 fn handle_directive(directive: PipelineDirective, memory: &HashMap<(i32, usize), Vec<u8>>) -> bool {
     match directive {
         PipelineDirective::Resume { .. } | PipelineDirective::InjectError { .. } => true,
+        // No real tracees exist in the mock, so nothing can be frozen.
+        PipelineDirective::Freeze { reply } => {
+            let _ = reply.send(Vec::new());
+            false
+        }
         PipelineDirective::ReadMemory { pid, addr, len, reply } => {
             let key = (pid.as_raw(), addr);
             let data = memory.get(&key).cloned().unwrap_or_default();

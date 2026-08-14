@@ -37,14 +37,19 @@ pub async fn pause_handler(
         return Err(ApiError::AlreadyInState { state: "paused" });
     }
 
+    // The paused flag alone only holds tracees that happen to trap;
+    // freezing interrupts the rest so this returns once they are all
+    // stopped, as the spec requires.
+    let stopped = state.freeze_tracees().await;
+
     state.emit(EventPayload::AgentPause(control::AgentPause {
         reason: "api_request".into(),
-        stopped_pids: Vec::new(),
+        stopped_pids: stopped.iter().map(|p| p.pid).collect(),
     }));
 
     Ok(Json(PauseResponse {
         status: "paused".into(),
-        stopped_processes: Vec::new(),
+        stopped_processes: stopped,
     }))
 }
 
@@ -60,26 +65,42 @@ pub async fn resume_handler(
         return Err(ApiError::AlreadyInState { state: "running" });
     }
 
+    // Clearing the flag releases the pipeline, which then reaps the
+    // interrupt-stops queued by the freeze and resumes each tracee
+    // through the normal passthrough path.
+    let resumed = state.process_list();
+
     state.emit(EventPayload::AgentResume(control::AgentResume {
-        resumed_pids: Vec::new(),
+        resumed_pids: resumed.iter().map(|p| p.pid).collect(),
     }));
 
     Ok(Json(ResumeResponse {
         status: "running".into(),
-        resumed_count: 0,
+        resumed_count: resumed.len() as u32,
     }))
 }
 
 /// `GET /agent/status` — current supervisor status snapshot.
+///
+/// Reports `partially_paused` when a pause has been requested but some
+/// tracee is still running — a tracee stuck in an uninterruptible wait,
+/// for example.
 pub async fn status_handler(State(state): State<SharedState>) -> Json<StatusResponse> {
-    let status = if state.is_paused() { "paused" } else { "running" };
+    let processes = state.process_list();
+    let status = if !state.is_paused() {
+        "running"
+    } else if processes.iter().all(|p| p.state != "running") {
+        "paused"
+    } else {
+        "partially_paused"
+    };
 
     Json(StatusResponse {
         status: status.into(),
         agent_id: state.agent_id().to_owned(),
         uptime_seconds: state.uptime_seconds(),
         event_count: state.event_seq(),
-        processes: Vec::new(),
+        processes,
     })
 }
 
@@ -503,17 +524,19 @@ pub async fn restore_file_handler(
 /// Submits a pending approval from the tracer thread.
 ///
 /// Called by the tracer when a syscall matches a pause-before-action
-/// rule. Returns a oneshot receiver that the tracer blocks on to get
+/// rule. `action_id` is supplied by the caller so the same identifier
+/// can be given to the judges that saw the action first. Returns it
+/// back along with a oneshot receiver that the tracer blocks on to get
 /// the human decision.
 pub fn submit_pending_approval(
     state: &SharedState,
+    action_id: String,
     pid: u32,
     process: String,
     syscall: String,
     path: Option<String>,
     rule_matched: String,
 ) -> (String, tokio::sync::oneshot::Receiver<ApprovalDecision>) {
-    let action_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     let timestamp = Utc::now().to_rfc3339();
 

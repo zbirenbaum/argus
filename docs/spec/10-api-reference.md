@@ -2,15 +2,43 @@
 
 Supervisor REST API on `http://127.0.0.1:9090`. JSON responses. Streaming: `application/x-ndjson`.
 
+## Implemented today
+
+Everything else in this document is a design target, not a live endpoint.
+
+```
+POST   /agent/pause                      GET  /tree
+POST   /agent/resume                     GET  /snapshots
+GET    /agent/status                     GET  /cas/{hash}
+GET    /approvals/pending                POST /restore
+POST   /approvals/{action_id}/approve    POST /restore/file
+POST   /approvals/{action_id}/deny       GET  /health
+GET    /rules                            WS   /ws   (all events, server→client)
+POST   /rules
+DELETE /rules/{index}
+```
+
+The separate `argus-api` service (`:8000`) adds query endpoints over the
+ingested event log — `/events`, `/events/count`, `/events/latest`,
+`/events/stream` (SSE) — and proxies the control endpoints above so a
+dashboard talks to one origin. The richer query surface described later
+in this document (`/file_history`, `/process_tree`, `/stdio`,
+`/pipeline`, `/connections`, `/storage/status`) and the cross-agent
+layer are not built.
+
 ---
 
 ## Agent Control
 
 ```
-POST /agent/pause                → Freeze all. Response: {status, stopped_processes: [{pid, binary, current_syscall}]}
-POST /agent/resume               → Resume all. Response: {status, resumed_count}
-GET  /agent/status               → {status, agent_id, uptime_seconds, event_count, processes: [{pid, ppid, binary, argv, state}]}
+POST /agent/pause                → Freeze all. Response: {status: "paused", stopped_processes: [{pid, binary, state}]}
+POST /agent/resume               → Resume all. Response: {status: "running", resumed_count}
+GET  /agent/status               → {status, agent_id, uptime_seconds, event_count, processes: [{pid, binary, state}]}
 ```
+
+`POST /agent/pause` returns only once every traced process is stopped; `stopped_processes` lists them. `409 Conflict` if already paused (and `/agent/resume` likewise if already running).
+
+`status` is one of `running`, `paused`, or `partially_paused` — see `06-agent-controls.md` for the semantics. Per-process `state` is `stopped`, `running`, `zombie`, or `gone`; `binary` comes from `/proc/<pid>/comm`.
 
 ## Rules
 
@@ -30,6 +58,10 @@ GET  /approvals/pending                    → {pending: [{action_id, pid, proce
 POST /approvals/{action_id}/approve        → {action_id, result: "approved", pid}
 POST /approvals/{action_id}/deny           → {action_id, result: "denied", pid, injected_errno: "EPERM"}
 ```
+
+An action only appears here when the approver chain escalates to the human backstop — a chain that returns `Allow` or `Deny` decides without queueing anything. The whole agent is frozen while an action is pending, and stays frozen until approve/deny arrives; there is no timeout. `404 Not Found` for an unknown `action_id`.
+
+A denied syscall is cancelled before the kernel runs it and returns `EPERM` to the tracee.
 
 ## Events
 
@@ -150,7 +182,7 @@ ws://127.0.0.1:9090/ws/events?type=write&path_prefix=/workspace/
 ws://127.0.0.1:9090/ws/stdio/{pid}
   Server→Client: {stream: "stdout", content: "...", seq, ts_wall}
 
-ws://127.0.0.1:9090/ws/approvals
+ws://127.0.0.1:9090/ws/approvals          (planned — not implemented)
   Server→Client: {action_id, pid, syscall, path}
   Client→Server: {action_id, decision: "approve"|"deny"}
 ```

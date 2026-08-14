@@ -32,8 +32,23 @@ Container (SYS_PTRACE)
 └── Agent process (traced, all descendants auto-traced)
 ```
 
+### Interception
+
+Rules can block a syscall outright or hold it for a decision. A held
+syscall freezes the whole agent — every traced process is stopped, not
+just the one that made the call, so a sibling can't finish the action
+while you're deciding. Approve and it proceeds; deny and it comes back
+as `EPERM` without ever reaching the kernel. Pause/resume works the same
+way and stops processes that are busy computing, not only ones that
+happen to be in a syscall.
+
+Decisions come from a chain of approvers (LLM judge, webhook, whatever
+you plug in) with a human operator as the backstop via
+`/approvals/pending`. The chain is wired up and tested; no concrete
+judges ship yet, so today every held syscall goes to the operator.
+
 ### Not yet implemented:
- - Pause-before-action (API works but ptrace enforcement not yet connected)
+ - Concrete approvers (LLM judge, webhook) and their config section
  - Initial filesystem state scan
 
 ## Events

@@ -44,7 +44,12 @@ External:
 
 ## Documents
 
-| File | Contents |
+Spec lives in `docs/spec/` (authoritative). `docs/spec-r1/` is an earlier
+revision kept for the pipeline-refactor work; where the two disagree,
+`docs/spec/` wins. Update both when behaviour changes, or fold the
+overlap into one tree.
+
+| File (`docs/spec/`) | Contents |
 |------|----------|
 | `01-supervisor.md` | ptrace loop, syscall interception, fd/pipe/PTY tracking, write locking, startup sequence |
 | `02-event-schema.md` | Event envelope, dual timestamps, agent_id, vclock, all event types |
@@ -57,7 +62,7 @@ External:
 | `09-multi-agent.md` | Container image, Helm chart, auto-registration, clock sync, cross-agent queries |
 | `10-api-reference.md` | All REST endpoints, WebSocket, CLI commands |
 | `11-implementation-phases.md` | Phase breakdown with file references per phase |
-| `12-testing.md` | 12 validation tests, integration test, bug indicators |
+| `12-testing.md` | 14 validation tests, integration test, bug indicators |
 
 
 ## Task Tracking
@@ -114,21 +119,29 @@ docker exec argus-arm64 cargo build --target aarch64-unknown-linux-musl -p super
 # Unit tests
 docker exec argus-arm64 cargo test --target aarch64-unknown-linux-musl -p argus -p supervisor
 
-# Validation tests (all 13 must pass)
+# Validation tests (all 14 must pass)
 docker exec argus-arm64 ./tests/validate.sh
 
 # Single validation test
 docker exec argus-arm64 ./tests/validate.sh 8
+
+# Verdict-freeze reproduction (also runs as validation test 14)
+docker exec argus-arm64 ./tests/repro-verdict-freeze.sh
 ```
+
+Validation tests leave traced processes behind if interrupted — ptrace
+detaches on supervisor exit, it does not kill. After an aborted run,
+check for strays: `docker exec argus-arm64 ps -eo pid,pcpu,args --sort=-pcpu | head`.
 
 Never use `cargo build` without `--target aarch64-unknown-linux-musl`. The validation script expects the binary at `target/aarch64-unknown-linux-musl/debug/supervisor`.
 
 
-## Specs
+## Other docs
 
-- `docs/mvp.md` — MVP specification, event schema, storage architecture
-- `docs/apis.md` — REST API, WebSocket, CLI interface contracts
-- `docs/considerations.md` — Full design rationale and alternatives
+- `docs/data-flow.md` — end-to-end record flow through the pipeline
+- `docs/PROXY.md` — mitmdump/TLS interception setup
+- `docs/FAQ.md` — design rationale and alternatives considered
+- `docs/tasks/STATUS.md` — pipeline status and dispatch tracker
 
 
 ## Conventions

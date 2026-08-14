@@ -153,6 +153,7 @@ async fn submit_and_approve_pending() {
 
     let (action_id, rx) = submit_pending_approval(
         &state,
+        uuid::Uuid::new_v4().to_string(),
         42,
         "python".into(),
         "unlink".into(),
@@ -180,6 +181,7 @@ async fn submit_and_deny_pending() {
 
     let (action_id, rx) = submit_pending_approval(
         &state,
+        uuid::Uuid::new_v4().to_string(),
         99,
         "bash".into(),
         "exec".into(),
@@ -236,6 +238,7 @@ async fn approval_emits_event() {
 
     let (action_id, _rx_decision) = submit_pending_approval(
         &state,
+        uuid::Uuid::new_v4().to_string(),
         50,
         "node".into(),
         "write".into(),

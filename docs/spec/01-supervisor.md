@@ -156,8 +156,12 @@ loop {
         extract syscall info via PTRACE_GET_SYSCALL_INFO
         resolve path/fd arguments
 
-        >>> CHECK PAUSE-BEFORE-ACTION RULES <<<     // see 06-agent-controls.md
-        if rule matches → emit pending_approval, wait for API decision
+        >>> CHECK BLOCK + PAUSE-BEFORE-ACTION RULES <<<   // see 06-agent-controls.md
+        if block rule matches   → inject EPERM, emit blocked, skip to resume
+        if pause rule matches   → freeze every tracee (PTRACE_INTERRUPT),
+                                  walk the approver chain for a verdict,
+                                  escalation → emit pending_approval and
+                                  wait for the API decision
         if denied → inject EPERM, skip to resume
 
         if mutating file op → acquire write lock, capture before_hash
